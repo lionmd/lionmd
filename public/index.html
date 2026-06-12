@@ -11311,15 +11311,27 @@ function cpOpenAddClient() {
 }
 
 function cpEditClient(id, name) {
-  $('cpClientModalTitle').textContent = 'Rename Client'
-  $('cpClientEditId').value = id
-  $('cpClientName').value = name
+  console.log('[cpEditClient] id=', id, 'name=', name)
+  const modalTitle = $('cpClientModalTitle')
+  const editIdInput = $('cpClientEditId')
+  const nameInput = $('cpClientName')
+  const modal = $('cpClientModal')
+  console.log('[cpEditClient] modal elements found:', !!modalTitle, !!editIdInput, !!nameInput, !!modal)
+  if (!editIdInput || !nameInput || !modal) {
+    console.error('[cpEditClient] Modal elements missing from DOM!')
+    showToast('UI error: modal not ready, please re-open the Payments page', 'error')
+    return
+  }
+  if (modalTitle) modalTitle.textContent = 'Rename Client'
+  editIdInput.value = id
+  nameInput.value = name
   $('cpClientNotes').value = ''
-  $('cpClientSaveBtn').textContent = 'Rename'
+  const saveBtn = $('cpClientSaveBtn')
+  if (saveBtn) saveBtn.textContent = 'Rename'
   const notesRow = $('cpClientNotesRow')
   if (notesRow) notesRow.classList.add('hidden')
-  $('cpClientModal').classList.remove('hidden')
-  setTimeout(() => { const inp = $('cpClientName'); inp.focus(); inp.select() }, 50)
+  modal.classList.remove('hidden')
+  setTimeout(() => { const inp = $('cpClientName'); if (inp) { inp.focus(); inp.select() } }, 50)
 }
 
 function cpCloseClientModal() { $('cpClientModal').classList.add('hidden') }
