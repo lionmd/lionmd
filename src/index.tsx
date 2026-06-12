@@ -3293,6 +3293,74 @@ app.post('/api/provider/cv', requireProvider, async (c) => {
   return c.json({ ok: true })
 })
 
+// ── GET /api/provider/documents ──────────────────────────────────
+// Provider lists their own documents (metadata only)
+app.get('/api/provider/documents', requireProvider, async (c) => {
+  await ensureContractorDocSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json([])
+  const rows = await c.env.DB.prepare(
+    `SELECT id, contractor_id, doc_type, file_name, file_size, mime_type, notes, uploaded_at
+     FROM contractor_documents WHERE contractor_id=? ORDER BY uploaded_at DESC`
+  ).bind(pu.contractor_id).all()
+  return c.json(rows.results)
+})
+
+// ── POST /api/provider/documents ─────────────────────────────────
+// Provider uploads a document (base64 JSON body)
+app.post('/api/provider/documents', requireProvider, async (c) => {
+  await ensureContractorDocSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
+  const body = await c.req.json() as any
+  if (!body.file_name || !body.file_data) return c.json({ error: 'file_name and file_data required' }, 400)
+  const r = await c.env.DB.prepare(
+    `INSERT INTO contractor_documents
+       (contractor_id, doc_type, file_name, file_data, file_size, mime_type, notes, uploaded_by)
+     VALUES (?,?,?,?,?,?,?,?)`
+  ).bind(
+    pu.contractor_id,
+    body.doc_type || 'other',
+    body.file_name,
+    body.file_data,
+    body.file_size || 0,
+    body.mime_type || 'application/octet-stream',
+    body.notes || '',
+    u.name || u.email || 'provider'
+  ).run()
+  return c.json({ ok: true, id: r.meta.last_row_id })
+})
+
+// ── GET /api/provider/documents/:id/download ─────────────────────
+// Provider downloads their own document (includes file_data)
+app.get('/api/provider/documents/:id/download', requireProvider, async (c) => {
+  await ensureContractorDocSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
+  const doc = await c.env.DB.prepare(
+    `SELECT * FROM contractor_documents WHERE id=? AND contractor_id=?`
+  ).bind(c.req.param('id'), pu.contractor_id).first() as any
+  if (!doc) return c.json({ error: 'Not found' }, 404)
+  return c.json(doc)
+})
+
+// ── DELETE /api/provider/documents/:id ───────────────────────────
+// Provider deletes their own document
+app.delete('/api/provider/documents/:id', requireProvider, async (c) => {
+  await ensureContractorDocSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
+  // Only delete if it belongs to this contractor
+  await c.env.DB.prepare(
+    `DELETE FROM contractor_documents WHERE id=? AND contractor_id=?`
+  ).bind(c.req.param('id'), pu.contractor_id).run()
+  return c.json({ ok: true })
+})
+
 // ── GET /api/provider/licenses ────────────────────────────────────
 app.get('/api/provider/licenses', requireProvider, async (c) => {
   await ensureProviderSchema(c.env.DB)

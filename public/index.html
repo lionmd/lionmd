@@ -2076,7 +2076,7 @@ function buildNav() {
     { id: 'provider_payroll',   icon: 'fa-money-bill-wave', label: 'My Payroll' },
     { id: 'provider_consults',  icon: 'fa-file-medical',   label: 'My Consults' },
     { id: 'provider_licenses',  icon: 'fa-map-marker-alt', label: 'State Licenses' },
-    { id: 'provider_documents', icon: 'fa-file-alt',       label: 'Documents & CV' },
+    { id: 'provider_documents', icon: 'fa-file-alt',       label: 'My Documents' },
   ]
   const candidateNav = [
     { id: 'candidate_status',    icon: 'fa-clipboard-list', label: 'My Application' },
@@ -2153,7 +2153,7 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'Documents & CV', candidate_status:'My Application', candidate_documents:'My Documents' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', candidate_status:'My Application', candidate_documents:'My Documents' }
   $('pageTitle').textContent = titles[page] || page
 
   const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments }
@@ -12494,78 +12494,154 @@ function ppDrawConsults() {
 }
 
 // ── Documents & CV tab ────────────────────────────────────────────
+// Document types shown in the provider documents page
+const PP_DOC_TYPES = [
+  { key: 'resume',         label: 'Resume / CV',            icon: 'fa-file-user',       accept: '.pdf,.doc,.docx' },
+  { key: 'medical_license',label: 'Medical License',        icon: 'fa-id-card',         accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'dea',            label: 'DEA Certificate',        icon: 'fa-certificate',     accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'malpractice',    label: 'Malpractice Insurance',  icon: 'fa-shield-alt',      accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'npi',            label: 'NPI Letter',             icon: 'fa-hospital',        accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'w9',             label: 'W-9 Form',               icon: 'fa-file-invoice',    accept: '.pdf' },
+  { key: 'id',             label: 'Government ID',          icon: 'fa-address-card',    accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'other',          label: 'Other Document',         icon: 'fa-file-alt',        accept: '.pdf,.doc,.docx,.jpg,.jpeg,.png' },
+]
+
 async function renderProviderDocuments() {
   const mc = $('mainContent')
   mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
   try {
-    const data = await ppLoadProfile()
-    ppDrawDocuments(data.contractor)
+    const docs = await api('/api/provider/documents')
+    ppDrawDocuments(docs || [])
   } catch(e) {
     mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
   }
 }
 
-function ppDrawDocuments(ct) {
+async function ppDownloadProviderDoc(id, fileName) {
+  try {
+    showToast('Preparing download…', 'info')
+    const doc = await api(`/api/provider/documents/${id}/download`)
+    if (!doc?.file_data) { showToast('File data not found', 'error'); return }
+    // file_data is a data URL (data:mime;base64,...)
+    const a = document.createElement('a')
+    a.href = doc.file_data
+    a.download = fileName
+    a.click()
+  } catch(e) { showToast('Download failed: ' + e.message, 'error') }
+}
+
+async function ppDeleteProviderDoc(id, fileName) {
+  if (!confirm(`Delete "${fileName}"? This cannot be undone.`)) return
+  try {
+    await api(`/api/provider/documents/${id}`, { method: 'DELETE' })
+    showToast(`"${fileName}" deleted`, 'success')
+    renderProviderDocuments()
+  } catch(e) { showToast('Delete failed: ' + e.message, 'error') }
+}
+
+async function ppUploadProviderDoc(input, docType) {
+  const file = input.files?.[0]
+  if (!file) return
+  const MAX = 5 * 1024 * 1024
+  if (file.size > MAX) { showToast('File too large (max 5 MB)', 'error'); input.value = ''; return }
+  const toastId = showToast('Uploading…', 'info', 0)
+  const reader = new FileReader()
+  reader.onload = async (e) => {
+    try {
+      await api('/api/provider/documents', {
+        method: 'POST',
+        body: JSON.stringify({
+          doc_type: docType,
+          file_name: file.name,
+          file_data: e.target.result,   // data URL (base64)
+          file_size: file.size,
+          mime_type: file.type || 'application/octet-stream',
+        })
+      })
+      showToast('Uploaded successfully', 'success')
+      renderProviderDocuments()
+    } catch(err) {
+      showToast('Upload failed: ' + err.message, 'error')
+    } finally {
+      input.value = ''
+    }
+  }
+  reader.readAsDataURL(file)
+}
+
+function ppDrawDocuments(docs) {
+  // Group uploaded docs by doc_type (keep latest on top per type via ORDER BY uploaded_at DESC)
+  const byType = {}
+  for (const d of docs) {
+    if (!byType[d.doc_type]) byType[d.doc_type] = []
+    byType[d.doc_type].push(d)
+  }
+
   const mc = $('mainContent')
   mc.innerHTML = `
   <div class="max-w-2xl">
     <div class="mb-5">
-      <h2 class="text-lg font-bold text-gray-800">Documents & CV</h2>
+      <h2 class="text-lg font-bold text-gray-800">My Documents</h2>
       <p class="text-sm text-gray-400 mt-0.5">Upload and manage your professional documents</p>
     </div>
 
-    <!-- CV / Resume Section -->
-    <div class="card p-6 mb-5">
-      <div class="flex items-center justify-between mb-4">
-        <div class="flex items-center gap-3">
-          <div class="w-10 h-10 rounded-xl bg-blue-100 flex items-center justify-center flex-shrink-0">
-            <i class="fas fa-file-pdf text-blue-500 text-lg"></i>
+    <div class="space-y-3">
+      ${PP_DOC_TYPES.map(dt => {
+        const typeDocs = byType[dt.key] || []
+        const inputId = `ppDocUpload_${dt.key}`
+        return `
+        <div class="card p-5">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
+                <i class="fas ${dt.icon} text-blue-500"></i>
+              </div>
+              <div class="min-w-0">
+                <p class="font-semibold text-gray-800 text-sm">${dt.label}</p>
+                <p class="text-xs text-gray-400">${typeDocs.length > 0 ? `${typeDocs.length} file${typeDocs.length > 1 ? 's' : ''} uploaded` : 'No file uploaded yet'}</p>
+              </div>
+            </div>
+            <label for="${inputId}"
+              class="cursor-pointer flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 text-xs font-semibold transition">
+              <i class="fas fa-upload"></i> Upload
+            </label>
+            <input id="${inputId}" type="file" accept="${dt.accept}" class="hidden"
+              onchange="ppUploadProviderDoc(this,'${dt.key}')">
           </div>
-          <div>
-            <h3 class="font-bold text-gray-800">CV / Résumé</h3>
-            <p class="text-xs text-gray-400">PDF, Word documents up to 5 MB</p>
-          </div>
-        </div>
-        <label for="ppDocCvUpload" class="cursor-pointer btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
-          <i class="fas fa-upload"></i> ${ct?.cv_filename ? 'Replace' : 'Upload'}
-        </label>
-        <input id="ppDocCvUpload" type="file" accept=".pdf,.doc,.docx" class="hidden" onchange="ppUploadCV(this); renderProviderDocuments()">
-      </div>
 
-      ${ct?.cv_filename ? `
-      <div class="p-4 bg-green-50 rounded-xl border border-green-200">
-        <div class="flex items-center gap-3">
-          <i class="fas fa-check-circle text-green-500 text-xl flex-shrink-0"></i>
-          <div class="flex-1 min-w-0">
-            <p class="font-semibold text-gray-800">${escHtml(ct.cv_filename)}</p>
-            ${ct.cv_updated_at ? `<p class="text-xs text-gray-400 mt-0.5">Last updated ${new Date(ct.cv_updated_at).toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'})}</p>` : ''}
-          </div>
-          ${ct.cv_url ? `<a href="${ct.cv_url}" download="${escHtml(ct.cv_filename)}"
-            class="text-sm px-4 py-2 rounded-xl bg-white border border-green-300 text-green-700 hover:bg-green-100 font-semibold flex-shrink-0 flex items-center gap-2">
-            <i class="fas fa-download"></i> Download
-          </a>` : ''}
-        </div>
-      </div>` : `
-      <div class="p-6 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200 text-center">
-        <i class="fas fa-file-upload text-4xl text-gray-200 mb-3 block"></i>
-        <p class="text-gray-400 text-sm mb-1">No CV uploaded yet</p>
-        <p class="text-gray-300 text-xs">Drop a PDF or Word file here, or use the Upload button above</p>
-      </div>`}
+          ${typeDocs.length > 0 ? `
+          <div class="mt-3 space-y-2">
+            ${typeDocs.map(d => `
+            <div class="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+              <i class="fas fa-file text-gray-300 flex-shrink-0"></i>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm text-gray-700 font-medium truncate">${escHtml(d.file_name)}</p>
+                <p class="text-xs text-gray-400">${d.file_size ? Math.round(d.file_size/1024) + ' KB · ' : ''}${new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</p>
+              </div>
+              <button onclick="ppDownloadProviderDoc(${d.id},'${d.file_name.replace(/'/g,"\\'")}'); event.stopPropagation()"
+                class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-gray-200 text-gray-600 hover:text-blue-600 hover:border-blue-200 transition flex items-center gap-1">
+                <i class="fas fa-download"></i>
+              </button>
+              <button onclick="ppDeleteProviderDoc(${d.id},'${d.file_name.replace(/'/g,"\\'")}'); event.stopPropagation()"
+                class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-gray-200 text-gray-400 hover:text-red-500 hover:border-red-200 transition flex items-center gap-1">
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>`).join('')}
+          </div>` : ''}
+        </div>`
+      }).join('')}
     </div>
 
-    <!-- Tips section -->
-    <div class="card p-5 bg-blue-50 border border-blue-100">
-      <div class="flex items-start gap-3">
-        <i class="fas fa-lightbulb text-blue-400 mt-0.5 flex-shrink-0"></i>
-        <div>
-          <p class="font-semibold text-blue-800 text-sm">Document Tips</p>
-          <ul class="text-xs text-blue-600 mt-1.5 space-y-1 list-disc list-inside">
-            <li>Keep your CV updated with your latest experience and certifications</li>
-            <li>PDF format is recommended for best compatibility</li>
-            <li>Maximum file size: 5 MB</li>
-            <li>Contact an admin if you need to upload additional document types</li>
-          </ul>
-        </div>
+    <div class="mt-4 p-4 bg-blue-50 rounded-xl border border-blue-100 flex items-start gap-3">
+      <i class="fas fa-lightbulb text-blue-400 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold text-blue-800 text-sm">Tips</p>
+        <ul class="text-xs text-blue-600 mt-1 space-y-1 list-disc list-inside">
+          <li>PDF format is recommended for best compatibility</li>
+          <li>Maximum file size: 5 MB per document</li>
+          <li>You can upload multiple files per document type</li>
+          <li>Contact an admin if you have questions about required documents</li>
+        </ul>
       </div>
     </div>
   </div>
