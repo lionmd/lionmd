@@ -2813,6 +2813,7 @@ app.get('/api/admin/users', requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare(`
     SELECT pu.id, pu.name, pu.email, pu.role, pu.is_active, pu.must_set_password,
            pu.last_login, pu.created_at, pu.contractor_id,
+           pu.managed_contractor_ids, pu.managed_all,
            ct.name AS contractor_name
     FROM portal_users pu
     LEFT JOIN contractors ct ON ct.id = pu.contractor_id
@@ -2828,7 +2829,7 @@ app.post('/api/admin/users', requireAdmin, async (c) => {
   const body = await c.req.json() as any
   const { name, email, role } = body
   if (!name || !email || !role) return c.json({ error: 'name, email, and role required' }, 400)
-  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider']
+  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider', 'manager']
   if (!validRoles.includes(role)) return c.json({ error: 'Invalid role' }, 400)
 
   // Check duplicate
@@ -2849,7 +2850,7 @@ app.post('/api/admin/users', requireAdmin, async (c) => {
 app.put('/api/admin/users/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json() as any
-  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider']
+  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider', 'manager']
   if (body.role && !validRoles.includes(body.role)) return c.json({ error: 'Invalid role' }, 400)
 
   const sets: string[] = []
@@ -2862,6 +2863,15 @@ app.put('/api/admin/users/:id', requireAdmin, async (c) => {
     const hash = await hashPassword(body.password)
     sets.push('password_hash=?'); vals.push(hash)
     sets.push('must_set_password=0')
+  }
+  // Manager-specific fields
+  if (body.managed_contractor_ids !== undefined) {
+    sets.push('managed_contractor_ids=?')
+    vals.push(body.managed_contractor_ids || '')
+  }
+  if (body.managed_all !== undefined) {
+    sets.push('managed_all=?')
+    vals.push(body.managed_all ? 1 : 0)
   }
   if (sets.length === 0) return c.json({ ok: true })
   sets.push('updated_at=CURRENT_TIMESTAMP')
@@ -3568,6 +3578,283 @@ app.get('/api/admin/contractors/:id/full-profile', requireAdmin, async (c) => {
 })
 
 // ── Admin: PUT /api/admin/users/:id/link-contractor ──────────────
+// ══════════════════════════════════════════════════════════════════════
+// MANAGER ROLE  — read-only access to assigned contractors
+// No financial data (payroll, fees, rates, client payments)
+// Full license write access; document read/download; consults read (no fees)
+// ══════════════════════════════════════════════════════════════════════
+
+async function requireManager(c: any, next: any) {
+  const auth = c.req.header('Authorization') || ''
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  const payload = await verifyToken(token)
+  if (!payload || (payload.role !== 'admin' && payload.role !== 'manager')) {
+    return c.json({ error: 'Manager access required' }, 403)
+  }
+  c.set('user', payload)
+  return next()
+}
+
+// Helper: given a manager user payload, return the set of allowed contractor IDs
+// Returns null if managed_all=1 (meaning all contractors allowed)
+async function getManagerAllowedIds(db: D1Database, userId: number): Promise<number[] | null> {
+  const row = await db.prepare(
+    `SELECT managed_contractor_ids, managed_all FROM portal_users WHERE id=?`
+  ).bind(userId).first() as any
+  if (!row) return []
+  if (row.managed_all === 1 || row.managed_all === '1') return null // null = all
+  const ids = (row.managed_contractor_ids || '').split(',').map((s: string) => parseInt(s.trim())).filter((n: number) => !isNaN(n) && n > 0)
+  return ids
+}
+
+// Middleware helper: checks that the requested contractor_id is in the manager's allowed list
+async function managerCanAccessContractor(db: D1Database, userId: number, contractorId: number): Promise<boolean> {
+  const allowed = await getManagerAllowedIds(db, userId)
+  if (allowed === null) return true // managed_all
+  return allowed.includes(contractorId)
+}
+
+// ── GET /api/manager/contractors ─────────────────────────────────────
+// Returns contractor profiles scoped to this manager's allowed list
+// Strips financial/sensitive fields (EIN/SSN, contractor_type, gusto, earns_commission)
+app.get('/api/manager/contractors', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const isAdmin = user.role === 'admin'
+  const allowedIds = isAdmin ? null : await getManagerAllowedIds(c.env.DB, user.id)
+
+  let rows: any[]
+  if (allowedIds === null || isAdmin) {
+    // all contractors
+    rows = await c.env.DB.prepare(
+      `SELECT id, name, first_name, last_name, email, phone, bio, specialty,
+              role_group, npi, states_licensed, is_active,
+              photo_data, photo_mime, created_at
+       FROM contractors ORDER BY name ASC`
+    ).all().then(r => r.results)
+  } else if (allowedIds.length === 0) {
+    rows = []
+  } else {
+    const placeholders = allowedIds.map(() => '?').join(',')
+    rows = await c.env.DB.prepare(
+      `SELECT id, name, first_name, last_name, email, phone, bio, specialty,
+              role_group, npi, states_licensed, is_active,
+              photo_data, photo_mime, created_at
+       FROM contractors WHERE id IN (${placeholders}) ORDER BY name ASC`
+    ).bind(...allowedIds).all().then(r => r.results)
+  }
+  return c.json(rows)
+})
+
+// ── GET /api/manager/contractors/:id ─────────────────────────────────
+app.get('/api/manager/contractors/:id', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  const row = await c.env.DB.prepare(
+    `SELECT id, name, first_name, last_name, email, phone, bio, specialty,
+            role_group, npi, states_licensed, is_active,
+            photo_data, photo_mime, created_at
+     FROM contractors WHERE id=?`
+  ).bind(id).first()
+  if (!row) return c.json({ error: 'Not found' }, 404)
+  return c.json(row)
+})
+
+// ── GET /api/manager/contractors/:id/licenses ─────────────────────────
+app.get('/api/manager/contractors/:id/licenses', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  await ensureProviderSchema(c.env.DB)
+  const licenses = await c.env.DB.prepare(
+    `SELECT * FROM provider_licenses WHERE contractor_id=? ORDER BY state ASC`
+  ).bind(id).all().then(r => r.results)
+  return c.json(licenses)
+})
+
+// ── POST /api/manager/contractors/:id/licenses ────────────────────────
+app.post('/api/manager/contractors/:id/licenses', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  await ensureProviderSchema(c.env.DB)
+  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const r = await c.env.DB.prepare(
+    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes)
+     VALUES (?,?,?,?,?,?,?)`
+  ).bind(id, state || '', license_number || '', license_type || '', expiry_date || '', status || 'active', notes || '').run()
+  return c.json({ ok: true, id: r.meta.last_row_id })
+})
+
+// ── PUT /api/manager/contractors/:id/licenses/:lid ────────────────────
+app.put('/api/manager/contractors/:id/licenses/:lid', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  const lid = c.req.param('lid')
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  await c.env.DB.prepare(
+    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP
+     WHERE id=? AND contractor_id=?`
+  ).bind(state || '', license_number || '', license_type || '', expiry_date || '', status || 'active', notes || '', lid, id).run()
+  return c.json({ ok: true })
+})
+
+// ── DELETE /api/manager/contractors/:id/licenses/:lid ─────────────────
+app.delete('/api/manager/contractors/:id/licenses/:lid', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  const lid = c.req.param('lid')
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  await c.env.DB.prepare(
+    `DELETE FROM provider_licenses WHERE id=? AND contractor_id=?`
+  ).bind(lid, id).run()
+  return c.json({ ok: true })
+})
+
+// ── GET /api/manager/contractors/:id/documents ────────────────────────
+app.get('/api/manager/contractors/:id/documents', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  const docs = await c.env.DB.prepare(
+    `SELECT id, doc_type, file_name, file_size, mime_type, notes, uploaded_by, uploaded_at
+     FROM contractor_documents WHERE contractor_id=? ORDER BY uploaded_at DESC`
+  ).bind(id).all().then(r => r.results)
+  return c.json(docs)
+})
+
+// ── GET /api/manager/contractors/:id/documents/:did/download ──────────
+app.get('/api/manager/contractors/:id/documents/:did/download', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  const did = c.req.param('did')
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  const doc = await c.env.DB.prepare(
+    `SELECT file_name, file_data, mime_type FROM contractor_documents WHERE id=? AND contractor_id=?`
+  ).bind(did, id).first() as any
+  if (!doc) return c.json({ error: 'Not found' }, 404)
+  const binary = Uint8Array.from(atob(doc.file_data), ch => ch.charCodeAt(0))
+  return new Response(binary, {
+    headers: {
+      'Content-Type': doc.mime_type || 'application/octet-stream',
+      'Content-Disposition': `attachment; filename="${doc.file_name}"`,
+    }
+  })
+})
+
+// ── GET /api/manager/consults ─────────────────────────────────────────
+// Returns consult records for all allowed contractors — NO fee columns
+app.get('/api/manager/consults', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const isAdmin = user.role === 'admin'
+  const allowedIds = isAdmin ? null : await getManagerAllowedIds(c.env.DB, user.id)
+
+  const page  = parseInt(c.req.query('page')  || '1')
+  const limit = parseInt(c.req.query('limit') || '50')
+  const offset = (page - 1) * limit
+  const search    = (c.req.query('search')    || '').trim()
+  const doctor    = (c.req.query('doctor')    || '').trim()
+  const visitType = (c.req.query('visitType') || '').trim()
+  const dateFrom  = (c.req.query('dateFrom')  || '').trim()
+  const dateTo    = (c.req.query('dateTo')    || '').trim()
+  const decisionStatus = (c.req.query('decisionStatus') || '').trim()
+
+  const where: string[] = []
+  const params: any[] = []
+
+  // Scope to allowed contractors
+  if (!isAdmin && allowedIds !== null) {
+    if (allowedIds.length === 0) return c.json({ rows: [], total: 0 })
+    where.push(`c.contractor_id IN (${allowedIds.map(() => '?').join(',')})`)
+    params.push(...allowedIds)
+  }
+
+  if (search)    { where.push(`(c.case_id_short LIKE ? OR c.organization_name LIKE ? OR c.patient_name LIKE ?)`)
+                   params.push(`%${search}%`, `%${search}%`, `%${search}%`) }
+  if (doctor)    { where.push(`c.doctor_name=?`);        params.push(doctor) }
+  if (visitType) { where.push(`c.visit_type=?`);         params.push(visitType) }
+  if (dateFrom)  { where.push(`c.decision_date>=?`);     params.push(dateFrom) }
+  if (dateTo)    { where.push(`c.decision_date<=?`);     params.push(dateTo) }
+  if (decisionStatus) { where.push(`c.decision_status=?`); params.push(decisionStatus) }
+
+  const whereClause = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+  const totalRow = await c.env.DB.prepare(
+    `SELECT COUNT(*) as n FROM consults c ${whereClause}`
+  ).bind(...params).first() as any
+  const total = totalRow?.n ?? 0
+
+  // Intentionally omit carevalidate_fee, contractor_fee, override_fee, is_override
+  const rows = await c.env.DB.prepare(`
+    SELECT c.id, c.case_id_short, c.case_id, c.organization_name, c.patient_name,
+           c.doctor_name, c.decision_date, c.decision_status, c.visit_type,
+           c.is_flagged, c.flag_reason, c.notes, c.is_orderly,
+           ct.name AS contractor_name
+    FROM consults c
+    LEFT JOIN contractors ct ON ct.id = c.contractor_id
+    ${whereClause}
+    ORDER BY c.decision_date DESC, c.id DESC
+    LIMIT ? OFFSET ?
+  `).bind(...params, limit, offset).all().then(r => r.results)
+
+  return c.json({ rows, total })
+})
+
+// ── GET /api/manager/licenses-overview ───────────────────────────────
+// All licenses across all allowed contractors — for the expiry dashboard
+app.get('/api/manager/licenses-overview', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const isAdmin = user.role === 'admin'
+  const allowedIds = isAdmin ? null : await getManagerAllowedIds(c.env.DB, user.id)
+
+  await ensureProviderSchema(c.env.DB)
+
+  let rows: any[]
+  if (allowedIds === null || isAdmin) {
+    rows = await c.env.DB.prepare(`
+      SELECT pl.*, ct.name AS contractor_name, ct.role_group
+      FROM provider_licenses pl
+      JOIN contractors ct ON ct.id = pl.contractor_id
+      ORDER BY pl.expiry_date ASC, ct.name ASC
+    `).all().then(r => r.results)
+  } else if (allowedIds.length === 0) {
+    rows = []
+  } else {
+    const placeholders = allowedIds.map(() => '?').join(',')
+    rows = await c.env.DB.prepare(`
+      SELECT pl.*, ct.name AS contractor_name, ct.role_group
+      FROM provider_licenses pl
+      JOIN contractors ct ON ct.id = pl.contractor_id
+      WHERE pl.contractor_id IN (${placeholders})
+      ORDER BY pl.expiry_date ASC, ct.name ASC
+    `).bind(...allowedIds).all().then(r => r.results)
+  }
+  return c.json(rows)
+})
+
 // Links a portal_user to a contractor record (for provider role)
 app.put('/api/admin/users/:id/link-contractor', requireAdmin, async (c) => {
   await ensureProviderSchema(c.env.DB)

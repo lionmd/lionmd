@@ -1452,6 +1452,10 @@ function applySession(token, user) {
     $('loginScreen').classList.add('hidden')
     showApp()
     renderCandidatePortal()
+  } else if (user.role === 'manager') {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    renderManagerPortal()
   } else {
     $('loginScreen').classList.add('hidden')
     showApp()
@@ -1975,6 +1979,10 @@ async function tryRestoreSession() {
       $('loginScreen').classList.add('hidden')
       showApp()
         renderCandidatePortal()
+    } else if (me.role === 'manager') {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        renderManagerPortal()
     } else {
       $('loginScreen').classList.add('hidden')
       showApp()
@@ -2082,12 +2090,18 @@ function buildNav() {
     { id: 'candidate_status',    icon: 'fa-clipboard-list', label: 'My Application' },
     { id: 'candidate_documents', icon: 'fa-file-alt',       label: 'My Documents' },
   ]
+  const managerNav = [
+    { id: 'mgr_contractors', icon: 'fa-user-md',          label: 'Contractors' },
+    { id: 'mgr_licenses',    icon: 'fa-map-marker-alt',   label: 'Licenses' },
+    { id: 'mgr_consults',    icon: 'fa-table',            label: 'Consult Records' },
+  ]
 
   // Admin in onboarding view gets the same 3-item nav as the onboarding role
   const inObView = state.role === 'onboarding' || (state.role === 'admin' && state.adminView === 'onboarding')
   let items
   if (state.role === 'candidate') items = candidateNav
   else if (state.role === 'provider') items = providerNav
+  else if (state.role === 'manager') items = managerNav
   else if (inObView) items = obNav
   else if (state.role === 'admin') items = adminNav
   else items = cvNav
@@ -2153,10 +2167,10 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', candidate_status:'My Application', candidate_documents:'My Documents' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records' }
   $('pageTitle').textContent = titles[page] || page
 
-  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments }
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults }
   if (pages[page]) pages[page]()
 
   if (isMobile()) closeMobileSidebar()
@@ -9784,7 +9798,7 @@ function noDataMsg() {
 // ════════════════════════════════════════════════════
 // USER MANAGEMENT (Admin only)
 // ════════════════════════════════════════════════════
-let umState = { users: [], editId: null, contractors: [] }
+let umState = { users: [], editId: null, contractors: [], editManagedIds: [] }
 
 async function renderUserManagement() {
   $('mainContent').innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
@@ -9890,6 +9904,7 @@ function umDrawPage() {
               <option value="carevalidate">🏥 CareValidate — Summary &amp; Detail view only</option>
               <option value="onboarding">🟢 Onboarding — Onboarding pipeline only</option>
               <option value="provider">🩺 Provider — Self-service profile portal</option>
+              <option value="manager">🗂️ Manager — Licenses, consults, no financials</option>
             </select>
           </div>
           <div id="umPwField">
@@ -9904,6 +9919,19 @@ function umDrawPage() {
           <select id="umContractorId" class="w-full text-sm">
             <option value="">— No link yet —</option>
           </select>
+        </div>
+        <!-- Manager contractor scope (shown only when role=manager) -->
+        <div id="umManagerField" class="hidden mt-4 p-4 bg-teal-50 rounded-xl border border-teal-200">
+          <label class="block text-xs font-semibold text-teal-700 mb-2"><i class="fas fa-users-cog mr-1"></i>Manager Contractor Access</label>
+          <label class="flex items-center gap-2 mb-3 cursor-pointer select-none">
+            <input type="checkbox" id="umManagedAll" class="accent-teal-600" onchange="umToggleManagedAll(this.checked)">
+            <span class="text-sm font-semibold text-teal-800">Access all contractors</span>
+            <span class="text-xs text-teal-500">(leave unchecked to assign specific contractors)</span>
+          </label>
+          <div id="umMgrContractorList" class="space-y-1 max-h-48 overflow-y-auto bg-white rounded-lg border border-teal-100 p-2">
+            <p class="text-xs text-gray-400 text-center py-3">Loading contractors…</p>
+          </div>
+          <p class="text-xs text-teal-500 mt-2">Managers see contractor profiles, licenses, and consults — but no financial data.</p>
         </div>
         <div class="flex gap-3 mt-4">
           <button onclick="umCloseForm()" class="px-4 py-2 rounded-lg border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
@@ -9934,6 +9962,7 @@ function umDrawPage() {
                     ${u.id === state.user?.id ? '<span class="ml-1 text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded-full font-semibold">You</span>' : ''}</div>
                     ${u.role === 'provider' && u.contractor_name ? `<div class="text-xs text-purple-500 mt-0.5 truncate"><i class="fas fa-link mr-1"></i>${escHtml(u.contractor_name)}</div>` : ''}
                     ${u.role === 'provider' && !u.contractor_name ? `<div class="text-xs text-orange-400 mt-0.5"><i class="fas fa-exclamation-triangle mr-1"></i>No link</div>` : ''}
+                    ${u.role === 'manager' ? (u.managed_all ? `<div class="text-xs text-teal-500 mt-0.5"><i class="fas fa-users mr-1"></i>All contractors</div>` : u.managed_contractor_ids ? `<div class="text-xs text-teal-500 mt-0.5 truncate"><i class="fas fa-users mr-1"></i>${u.managed_contractor_ids.split(',').filter(Boolean).length} contractor(s)</div>` : `<div class="text-xs text-orange-400 mt-0.5"><i class="fas fa-exclamation-triangle mr-1"></i>No scope set</div>`) : ''}
                     <div class="text-xs text-gray-400 mt-0.5 truncate um-hide-mobile">${escHtml(u.email)}</div>
                   </td>
                   <td class="px-3 py-3 text-gray-600 text-xs um-hide-mobile">${escHtml(u.email)}</td>
@@ -10304,6 +10333,7 @@ function umRoleBadge(role) {
   if (role === 'carevalidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">🏥 CareValidate</span>'
   if (role === 'provider') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800">🩺 Provider</span>'
   if (role === 'candidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800">📋 Applicant</span>'
+  if (role === 'manager') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 text-teal-800">🗂️ Manager</span>'
   return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">🟢 Onboarding</span>'
 }
 
@@ -10318,9 +10348,12 @@ async function umLoadContractors() {
 
 function umHandleRoleChange(role) {
   const pf = $('umProviderField')
-  if (!pf) return
+  const mf = $('umManagerField')
+  if (pf) pf.classList.add('hidden')
+  if (mf) mf.classList.add('hidden')
+
   if (role === 'provider') {
-    pf.classList.remove('hidden')
+    if (pf) pf.classList.remove('hidden')
     umLoadContractors().then(() => {
       const sel = $('umContractorId')
       if (!sel) return
@@ -10328,13 +10361,37 @@ function umHandleRoleChange(role) {
       sel.innerHTML = '<option value="">— No link yet —</option>' +
         umState.contractors.map(c => `<option value="${c.id}" ${cur==c.id?'selected':''}>${escHtml(c.name)}</option>`).join('')
     })
-  } else {
-    pf.classList.add('hidden')
+  } else if (role === 'manager') {
+    if (mf) mf.classList.remove('hidden')
+    umLoadContractors().then(() => umDrawMgrContractorList())
   }
+}
+
+function umDrawMgrContractorList() {
+  const list = $('umMgrContractorList')
+  if (!list) return
+  const allChecked = $('umManagedAll')?.checked
+  if (allChecked) {
+    list.innerHTML = '<p class="text-xs text-teal-600 text-center py-3 font-medium"><i class="fas fa-check-circle mr-1"></i>All contractors will be accessible</p>'
+    return
+  }
+  const selected = (umState.editManagedIds || [])
+  list.innerHTML = umState.contractors.length === 0
+    ? '<p class="text-xs text-gray-400 text-center py-3">No active contractors found.</p>'
+    : umState.contractors.map(c => `
+      <label class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-teal-50 cursor-pointer text-sm">
+        <input type="checkbox" class="umMgrCheck accent-teal-600" value="${c.id}" ${selected.includes(c.id)?'checked':''}>
+        <span class="text-gray-700">${escHtml(c.name)}</span>
+      </label>`).join('')
+}
+
+function umToggleManagedAll(checked) {
+  umDrawMgrContractorList()
 }
 
 function umOpenAdd() {
   umState.editId = null
+  umState.editManagedIds = []
   $('umFormTitle').textContent = 'Add New User'
   $('umSaveBtn').textContent = 'Create User'
   $('umPwNote').textContent = '(leave blank to send invite link)'
@@ -10343,6 +10400,8 @@ function umOpenAdd() {
   $('umFormError').classList.add('hidden')
   $('umInviteBox').classList.add('hidden')
   $('umProviderField').classList.add('hidden')
+  $('umManagerField').classList.add('hidden')
+  $('umManagedAll').checked = false
   $('umContractorId').value = ''
   $('umForm').classList.remove('hidden')
   $('umName').focus()
@@ -10352,6 +10411,7 @@ async function umOpenEdit(id) {
   const u = umState.users.find(x => x.id === id)
   if (!u) return
   umState.editId = id
+  umState.editManagedIds = []
   $('umFormTitle').textContent = 'Edit User'
   $('umSaveBtn').textContent = 'Save Changes'
   $('umPwNote').textContent = '(leave blank to keep current password)'
@@ -10359,16 +10419,26 @@ async function umOpenEdit(id) {
   $('umEmail').disabled = false
   $('umFormError').classList.add('hidden')
   $('umInviteBox').classList.add('hidden')
-  // Handle provider field
+  $('umProviderField').classList.add('hidden')
+  $('umManagerField').classList.add('hidden')
+  $('umManagedAll').checked = false
+  $('umContractorId').value = ''
+
   if (u.role === 'provider') {
     $('umProviderField').classList.remove('hidden')
     await umLoadContractors()
     const sel = $('umContractorId')
     sel.innerHTML = '<option value="">— No link yet —</option>' +
       umState.contractors.map(c => `<option value="${c.id}" ${u.contractor_id==c.id?'selected':''}>${escHtml(c.name)}</option>`).join('')
-  } else {
-    $('umProviderField').classList.add('hidden')
-    $('umContractorId').value = ''
+  } else if (u.role === 'manager') {
+    $('umManagerField').classList.remove('hidden')
+    // Parse existing managed_contractor_ids
+    const raw = (u.managed_contractor_ids || '').trim()
+    umState.editManagedIds = raw ? raw.split(',').map(Number).filter(Boolean) : []
+    const managedAll = u.managed_all === 1 || u.managed_all === '1'
+    $('umManagedAll').checked = managedAll
+    await umLoadContractors()
+    umDrawMgrContractorList()
   }
   $('umForm').classList.remove('hidden')
   $('umName').focus()
@@ -10391,30 +10461,38 @@ async function umSave() {
   if (!name || !email) { errEl.textContent = 'Name and email are required.'; errEl.classList.remove('hidden'); return }
   if (pw && pw.length < 8) { errEl.textContent = 'Password must be at least 8 characters.'; errEl.classList.remove('hidden'); return }
 
+  // Collect manager scope fields
+  let managed_all = 0
+  let managed_contractor_ids = ''
+  if (role === 'manager') {
+    managed_all = $('umManagedAll')?.checked ? 1 : 0
+    if (!managed_all) {
+      const checks = document.querySelectorAll('.umMgrCheck:checked')
+      managed_contractor_ids = Array.from(checks).map(cb => cb.value).join(',')
+    }
+  }
+
   try {
     if (umState.editId) {
-      // Edit existing
       const body = { name, role }
       if (pw) body.password = pw
+      if (role === 'manager') { body.managed_all = managed_all; body.managed_contractor_ids = managed_contractor_ids }
       await api(`/api/admin/users/${umState.editId}`, { method: 'PUT', body: JSON.stringify(body) })
-      // Update contractor link if provider
       if (role === 'provider') {
         await api(`/api/admin/users/${umState.editId}/link-contractor`, { method: 'PUT', body: JSON.stringify({ contractor_id: contractorId ? parseInt(contractorId) : null }) })
       }
       showToast('User updated!', 'success')
       umCloseForm()
     } else {
-      // Create new
       const body = { name, email, role }
       if (pw) body.password = pw
+      if (role === 'manager') { body.managed_all = managed_all; body.managed_contractor_ids = managed_contractor_ids }
       const result = await api('/api/admin/users', { method: 'POST', body: JSON.stringify(body) })
-      // Link contractor if provider
       if (role === 'provider' && contractorId && result.id) {
         await api(`/api/admin/users/${result.id}/link-contractor`, { method: 'PUT', body: JSON.stringify({ contractor_id: parseInt(contractorId) }) })
       }
       showToast('User created!', 'success')
       umCloseForm()
-      // Show invite link if generated
       if (result.invite_token) {
         const link = window.location.origin + '/?token=' + result.invite_token
         umState.users = await api('/api/admin/users')
@@ -12920,6 +12998,686 @@ window.addEventListener('DOMContentLoaded', async () => {
   }
 
   const appPage = PATH_TO_PAGE[path]
+
+// ══════════════════════════════════════════════════════════════════
+// ── Manager Portal ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const mgrState = {
+  contractors: [],          // list from /api/manager/contractors
+  activeContractor: null,   // { ...contractor row }
+  activeTab: 'licenses',    // 'licenses' | 'documents'
+  licenses: [],             // licenses for activeContractor
+  documents: [],            // document metadata for activeContractor
+  licenseEditId: null,      // which license is in inline-edit mode
+  consults: [],
+  consultsPage: 1,
+  consultsTotal: 0,
+  consultsSearch: '',
+  consultsShowNames: false,
+  licensesOverview: [],     // for mgr_licenses page
+}
+
+async function renderManagerPortal() {
+  state.currentPage = 'mgr_contractors'
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const navEl = $('nav_mgr_contractors')
+  if (navEl) navEl.classList.add('active')
+  $('pageTitle').textContent = 'Contractors'
+  renderMgrContractors()
+}
+
+// ── Contractors Page ───────────────────────────────────────────────
+async function renderMgrContractors() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/manager/contractors')
+    mgrState.contractors = data || []
+    mgrDrawContractorList()
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrDrawContractorList() {
+  const mc = $('mainContent')
+  const list = mgrState.contractors
+  // If a contractor is selected, show split layout
+  if (mgrState.activeContractor) {
+    mgrDrawDetail()
+    return
+  }
+  mc.innerHTML = `
+  <div class="max-w-3xl">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">Contractors</h2>
+        <p class="text-sm text-gray-400 mt-0.5">${list.length} contractor${list.length!==1?'s':''} in your scope</p>
+      </div>
+    </div>
+    ${list.length === 0 ? `
+      <div class="card p-10 text-center text-gray-300">
+        <i class="fas fa-user-md text-5xl mb-3 block"></i>
+        <p class="text-sm">No contractors assigned to your manager account yet.</p>
+        <p class="text-xs mt-1 text-gray-400">Contact an admin to update your access scope.</p>
+      </div>` : `
+    <div class="space-y-2">
+      ${list.map(c => `
+      <div class="card p-4 flex items-center gap-4 hover:shadow-md transition-shadow cursor-pointer group" onclick="mgrSelectContractor(${c.id})">
+        <div class="w-11 h-11 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0 shadow-sm" style="background:var(--lion-gold)">
+          ${(c.name||'?')[0].toUpperCase()}
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="font-semibold text-gray-800 truncate">${escHtml(c.name)}</div>
+          <div class="flex items-center gap-3 mt-0.5 flex-wrap">
+            ${c.specialty ? `<span class="text-xs text-purple-600"><i class="fas fa-stethoscope mr-1 text-xs"></i>${escHtml(c.specialty)}</span>` : ''}
+            ${c.role_group ? `<span class="text-xs text-gray-500">${escHtml(c.role_group)}</span>` : ''}
+            ${c.npi ? `<span class="text-xs text-gray-400">NPI: ${escHtml(c.npi)}</span>` : ''}
+          </div>
+        </div>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${c.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}">${c.is_active ? 'Active' : 'Inactive'}</span>
+          <i class="fas fa-chevron-right text-gray-300 group-hover:text-gray-500 transition-colors text-sm"></i>
+        </div>
+      </div>`).join('')}
+    </div>`}
+  </div>`
+}
+
+async function mgrSelectContractor(id) {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const [ct, lics, docs] = await Promise.all([
+      api(`/api/manager/contractors/${id}`),
+      api(`/api/manager/contractors/${id}/licenses`),
+      api(`/api/manager/contractors/${id}/documents`),
+    ])
+    mgrState.activeContractor = ct
+    mgrState.licenses = lics || []
+    mgrState.documents = docs || []
+    mgrState.licenseEditId = null
+    mgrState.activeTab = 'licenses'
+    mgrDrawDetail()
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrDrawDetail() {
+  const mc = $('mainContent')
+  const ct = mgrState.activeContractor
+  if (!ct) { mgrDrawContractorList(); return }
+
+  mc.innerHTML = `
+  <div class="max-w-3xl">
+    <!-- Back button + header -->
+    <div class="flex items-center gap-3 mb-4">
+      <button onclick="mgrBack()" class="p-2 rounded-xl hover:bg-gray-100 text-gray-400 hover:text-gray-700 transition-colors">
+        <i class="fas fa-arrow-left"></i>
+      </button>
+      <div class="w-11 h-11 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0" style="background:var(--lion-gold)">
+        ${(ct.name||'?')[0].toUpperCase()}
+      </div>
+      <div class="flex-1 min-w-0">
+        <h2 class="text-xl font-bold text-gray-800 truncate">${escHtml(ct.name)}</h2>
+        <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+          ${ct.specialty ? `<span class="text-xs text-purple-600"><i class="fas fa-stethoscope mr-1 text-xs"></i>${escHtml(ct.specialty)}</span>` : ''}
+          ${ct.npi ? `<span class="text-xs text-gray-400">NPI: ${escHtml(ct.npi)}</span>` : ''}
+          ${ct.company ? `<span class="text-xs text-gray-500">${escHtml(ct.company)}</span>` : ''}
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${ct.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}">${ct.is_active ? 'Active' : 'Inactive'}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Contact info card -->
+    <div class="card p-4 mb-4 grid grid-cols-2 gap-3 text-sm">
+      ${ct.email ? `<div><span class="text-xs text-gray-400 block">Email</span><a href="mailto:${escHtml(ct.email)}" class="text-blue-600 hover:underline truncate block">${escHtml(ct.email)}</a></div>` : ''}
+      ${ct.phone ? `<div><span class="text-xs text-gray-400 block">Phone</span><span class="text-gray-700">${escHtml(ct.phone)}</span></div>` : ''}
+      ${ct.state ? `<div><span class="text-xs text-gray-400 block">State</span><span class="text-gray-700">${escHtml(ct.state)}</span></div>` : ''}
+      ${ct.role_group ? `<div><span class="text-xs text-gray-400 block">Role Group</span><span class="text-gray-700">${escHtml(ct.role_group)}</span></div>` : ''}
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex border-b border-gray-200 mb-4">
+      <button onclick="mgrSetTab('licenses')" id="mgrTabLicenses" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='licenses' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas fa-map-marker-alt mr-1.5"></i>State Licenses <span class="ml-1 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full">${mgrState.licenses.length}</span>
+      </button>
+      <button onclick="mgrSetTab('documents')" id="mgrTabDocs" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas fa-file-alt mr-1.5"></i>Documents <span class="ml-1 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full">${mgrState.documents.length}</span>
+      </button>
+    </div>
+
+    <!-- Tab content -->
+    <div id="mgrTabContent">${mgrState.activeTab === 'licenses' ? mgrRenderLicensesTab() : mgrRenderDocumentsTab()}</div>
+  </div>`
+}
+
+function mgrBack() {
+  mgrState.activeContractor = null
+  mgrState.licenses = []
+  mgrState.documents = []
+  mgrState.licenseEditId = null
+  mgrDrawContractorList()
+}
+
+function mgrSetTab(tab) {
+  mgrState.activeTab = tab
+  const content = $('mgrTabContent')
+  if (!content) return
+  content.innerHTML = tab === 'licenses' ? mgrRenderLicensesTab() : mgrRenderDocumentsTab()
+  // Update tab buttons
+  const tl = $('mgrTabLicenses'), td = $('mgrTabDocs')
+  if (tl) tl.className = `px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${tab==='licenses' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`
+  if (td) td.className = `px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${tab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`
+}
+
+function mgrLicenseStatusBadge(status, expiry) {
+  const now = new Date(); const exp = expiry ? new Date(expiry) : null
+  const daysLeft = exp ? Math.ceil((exp - now) / 86400000) : null
+  if (status === 'active' && daysLeft !== null && daysLeft <= 60 && daysLeft > 0)
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">⚠️ Expiring (${daysLeft}d)</span>`
+  if (status === 'active' && daysLeft !== null && daysLeft <= 0)
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">❌ Expired</span>`
+  if (status === 'active')
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✅ Active</span>`
+  if (status === 'pending')
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">⏳ Pending</span>`
+  return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">${escHtml(status||'Unknown')}</span>`
+}
+
+function mgrRenderLicensesTab() {
+  const ct = mgrState.activeContractor
+  const lics = mgrState.licenses
+  const editId = mgrState.licenseEditId
+  const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC']
+  return `
+  <div>
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-sm font-semibold text-gray-700">State Licenses</p>
+      <button onclick="mgrOpenAddLicense()" class="btn-primary px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5">
+        <i class="fas fa-plus"></i> Add License
+      </button>
+    </div>
+    ${lics.length === 0 ? `
+      <div class="text-center py-10 text-gray-300">
+        <i class="fas fa-map-marker-alt text-4xl mb-3 block"></i>
+        <p class="text-sm">No licenses on file.</p>
+        <button onclick="mgrOpenAddLicense()" class="mt-3 text-teal-600 hover:underline text-xs font-semibold">+ Add first license</button>
+      </div>` : `
+    <div class="space-y-2">
+      ${lics.map(l => editId === l.id ? `
+      <!-- Inline edit form -->
+      <div class="card p-4 border-2 border-teal-300 bg-teal-50">
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+            <select id="mgrLicState" class="w-full text-sm">
+              ${US_STATES.map(s => `<option value="${s}" ${l.state===s?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">License #</label>
+            <input id="mgrLicNumber" class="w-full text-sm" value="${escHtml(l.license_number||'')}">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Expiry Date</label>
+            <input id="mgrLicExpiry" type="date" class="w-full text-sm" value="${l.expiry_date||''}">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+            <select id="mgrLicStatus" class="w-full text-sm">
+              <option value="active" ${l.status==='active'?'selected':''}>Active</option>
+              <option value="pending" ${l.status==='pending'?'selected':''}>Pending</option>
+              <option value="expired" ${l.status==='expired'?'selected':''}>Expired</option>
+              <option value="inactive" ${l.status==='inactive'?'selected':''}>Inactive</option>
+            </select>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+          <textarea id="mgrLicNotes" class="w-full text-sm" rows="2">${escHtml(l.notes||'')}</textarea>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="mgrSaveLicense(${l.id})" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Save</button>
+          <button onclick="mgrCancelLicenseEdit()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+          <button onclick="mgrDeleteLicense(${l.id})" class="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold text-red-500 hover:bg-red-50 border border-red-200">
+            <i class="fas fa-trash mr-1"></i>Delete
+          </button>
+        </div>
+      </div>` : `
+      <!-- License row -->
+      <div class="card p-3 flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg bg-teal-100 flex items-center justify-center flex-shrink-0">
+          <span class="text-teal-700 font-bold text-xs">${escHtml(l.state||'?')}</span>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-gray-800 text-sm">${escHtml(l.state||'')}</span>
+            ${l.license_number ? `<span class="text-xs text-gray-500 font-mono">#${escHtml(l.license_number)}</span>` : ''}
+            ${mgrLicenseStatusBadge(l.status, l.expiry_date)}
+          </div>
+          ${l.expiry_date ? `<div class="text-xs text-gray-400 mt-0.5"><i class="fas fa-calendar-alt mr-1"></i>Expires ${new Date(l.expiry_date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>` : ''}
+          ${l.notes ? `<div class="text-xs text-gray-400 mt-0.5 truncate">${escHtml(l.notes)}</div>` : ''}
+        </div>
+        <button onclick="mgrEditLicense(${l.id})" class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors tooltip" data-tip="Edit">
+          <i class="fas fa-pencil text-xs"></i>
+        </button>
+      </div>`).join('')}
+    </div>`}
+
+    <!-- Add License form (hidden by default) -->
+    <div id="mgrAddLicForm" class="hidden mt-4 card p-4 border-2 border-teal-200 bg-teal-50">
+      <h4 class="text-sm font-bold text-teal-800 mb-3"><i class="fas fa-plus mr-1"></i>Add State License</h4>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+          <select id="mgrNewLicState" class="w-full text-sm">
+            ${US_STATES.map(s => `<option value="${s}">${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License #</label>
+          <input id="mgrNewLicNumber" class="w-full text-sm" placeholder="Optional">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Expiry Date</label>
+          <input id="mgrNewLicExpiry" type="date" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select id="mgrNewLicStatus" class="w-full text-sm">
+            <option value="active">Active</option>
+            <option value="pending">Pending</option>
+            <option value="expired">Expired</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+        <textarea id="mgrNewLicNotes" class="w-full text-sm" rows="2" placeholder="Optional notes"></textarea>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="mgrSubmitAddLicense()" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Save License</button>
+        <button onclick="mgrCloseAddLicense()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function mgrRenderDocumentsTab() {
+  const docs = mgrState.documents
+  return `
+  <div>
+    ${docs.length === 0 ? `
+      <div class="text-center py-10 text-gray-300">
+        <i class="fas fa-folder-open text-4xl mb-3 block"></i>
+        <p class="text-sm">No documents on file.</p>
+      </div>` : `
+    <div class="space-y-2">
+      ${docs.map(d => `
+      <div class="card p-3 flex items-center gap-3">
+        <div class="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-file text-blue-500 text-xs"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-gray-800 truncate">${escHtml(d.file_name)}</div>
+          <div class="text-xs text-gray-400">${escHtml(d.doc_type||'Document')} · ${d.file_size ? Math.round(d.file_size/1024) + ' KB · ' : ''}${new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
+        </div>
+        <a href="/api/manager/contractors/${mgrState.activeContractor.id}/documents/${d.id}/download" target="_blank"
+          class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors tooltip" data-tip="Download">
+          <i class="fas fa-download text-xs"></i>
+        </a>
+      </div>`).join('')}
+    </div>`}
+  </div>`
+}
+
+// License CRUD helpers
+function mgrEditLicense(id) {
+  mgrState.licenseEditId = id
+  const content = $('mgrTabContent')
+  if (content) content.innerHTML = mgrRenderLicensesTab()
+}
+function mgrCancelLicenseEdit() {
+  mgrState.licenseEditId = null
+  const content = $('mgrTabContent')
+  if (content) content.innerHTML = mgrRenderLicensesTab()
+}
+async function mgrSaveLicense(id) {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    const body = {
+      state: $('mgrLicState').value,
+      license_number: $('mgrLicNumber').value.trim() || null,
+      expiry_date: $('mgrLicExpiry').value || null,
+      status: $('mgrLicStatus').value,
+      notes: $('mgrLicNotes').value.trim() || null,
+    }
+    await api(`/api/manager/contractors/${ct.id}/licenses/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+    showToast('License updated!', 'success')
+    mgrState.licenses = await api(`/api/manager/contractors/${ct.id}/licenses`)
+    mgrState.licenseEditId = null
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderLicensesTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+async function mgrDeleteLicense(id) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  const ct = mgrState.activeContractor
+  try {
+    await api(`/api/manager/contractors/${ct.id}/licenses/${id}`, { method: 'DELETE' })
+    showToast('License deleted.', 'success')
+    mgrState.licenses = await api(`/api/manager/contractors/${ct.id}/licenses`)
+    mgrState.licenseEditId = null
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderLicensesTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+function mgrOpenAddLicense() {
+  const form = $('mgrAddLicForm')
+  if (form) form.classList.remove('hidden')
+}
+function mgrCloseAddLicense() {
+  const form = $('mgrAddLicForm')
+  if (form) form.classList.add('hidden')
+}
+async function mgrSubmitAddLicense() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    const body = {
+      state: $('mgrNewLicState').value,
+      license_number: $('mgrNewLicNumber').value.trim() || null,
+      expiry_date: $('mgrNewLicExpiry').value || null,
+      status: $('mgrNewLicStatus').value,
+      notes: $('mgrNewLicNotes').value.trim() || null,
+    }
+    await api(`/api/manager/contractors/${ct.id}/licenses`, { method: 'POST', body: JSON.stringify(body) })
+    showToast('License added!', 'success')
+    mgrState.licenses = await api(`/api/manager/contractors/${ct.id}/licenses`)
+    mgrCloseAddLicense()
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderLicensesTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+// ── Licenses Overview Page ─────────────────────────────────────────
+async function renderMgrLicenses() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/manager/licenses-overview')
+    mgrState.licensesOverview = data || []
+    mgrDrawLicensesOverview()
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrDrawLicensesOverview() {
+  const mc = $('mainContent')
+  const all = mgrState.licensesOverview
+  const now = new Date()
+
+  // Categorise
+  const expired  = all.filter(l => l.expiry_date && new Date(l.expiry_date) < now && l.status === 'active')
+  const soon     = all.filter(l => {
+    if (!l.expiry_date || l.status !== 'active') return false
+    const d = new Date(l.expiry_date); const days = Math.ceil((d - now)/86400000)
+    return days >= 0 && days <= 60
+  })
+  const ok       = all.filter(l => {
+    if (!l.expiry_date || l.status !== 'active') return false
+    return Math.ceil((new Date(l.expiry_date) - now)/86400000) > 60
+  })
+  const noExpiry = all.filter(l => !l.expiry_date || l.status !== 'active')
+
+  function licCard(l) {
+    const exp = l.expiry_date ? new Date(l.expiry_date+'T12:00:00') : null
+    const daysLeft = exp ? Math.ceil((exp - now)/86400000) : null
+    let borderCls = 'border-gray-100'
+    if (daysLeft !== null && daysLeft < 0) borderCls = 'border-red-200 bg-red-50'
+    else if (daysLeft !== null && daysLeft <= 60) borderCls = 'border-amber-200 bg-amber-50'
+    return `
+    <div class="card border ${borderCls} p-3 flex items-center gap-3">
+      <div class="w-10 h-10 rounded-lg bg-teal-100 flex items-center justify-center flex-shrink-0">
+        <span class="text-teal-700 font-bold text-xs">${escHtml(l.state||'?')}</span>
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-semibold text-gray-800 text-sm">${escHtml(l.contractor_name||'')}</span>
+          <span class="text-xs text-gray-500">· ${escHtml(l.state||'')}</span>
+          ${l.license_number ? `<span class="text-xs text-gray-400 font-mono">#${escHtml(l.license_number)}</span>` : ''}
+          ${mgrLicenseStatusBadge(l.status, l.expiry_date)}
+        </div>
+        ${exp ? `<div class="text-xs text-gray-400 mt-0.5"><i class="fas fa-calendar-alt mr-1"></i>${daysLeft !== null && daysLeft < 0 ? 'Expired' : 'Expires'} ${exp.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft !== null && daysLeft >= 0 ? ` (${daysLeft}d)` : ''}</div>` : ''}
+      </div>
+      <button onclick="mgrGoToContractorLicenses(${l.contractor_id})" class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors tooltip" data-tip="Manage licenses">
+        <i class="fas fa-arrow-right text-xs"></i>
+      </button>
+    </div>`
+  }
+
+  mc.innerHTML = `
+  <div class="max-w-3xl">
+    <div class="mb-5">
+      <h2 class="text-xl font-bold text-gray-800">License Dashboard</h2>
+      <p class="text-sm text-gray-400 mt-0.5">${all.length} license${all.length!==1?'s':''} across all contractors</p>
+    </div>
+
+    <!-- Summary strip -->
+    <div class="grid grid-cols-3 gap-3 mb-6">
+      <div class="card p-4 text-center ${expired.length ? 'border-2 border-red-200 bg-red-50' : ''}">
+        <div class="text-2xl font-bold ${expired.length ? 'text-red-600' : 'text-gray-300'}">${expired.length}</div>
+        <div class="text-xs font-semibold text-gray-500 mt-0.5">Expired</div>
+      </div>
+      <div class="card p-4 text-center ${soon.length ? 'border-2 border-amber-200 bg-amber-50' : ''}">
+        <div class="text-2xl font-bold ${soon.length ? 'text-amber-600' : 'text-gray-300'}">${soon.length}</div>
+        <div class="text-xs font-semibold text-gray-500 mt-0.5">Expiring ≤60 days</div>
+      </div>
+      <div class="card p-4 text-center">
+        <div class="text-2xl font-bold text-green-600">${ok.length}</div>
+        <div class="text-xs font-semibold text-gray-500 mt-0.5">Current</div>
+      </div>
+    </div>
+
+    ${expired.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-red-600 mb-2 flex items-center gap-2"><i class="fas fa-exclamation-circle"></i>Expired (${expired.length})</h3>
+      <div class="space-y-2">${expired.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${soon.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-amber-600 mb-2 flex items-center gap-2"><i class="fas fa-clock"></i>Expiring Soon — within 60 days (${soon.length})</h3>
+      <div class="space-y-2">${soon.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${ok.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-green-700 mb-2 flex items-center gap-2"><i class="fas fa-check-circle"></i>Current (${ok.length})</h3>
+      <div class="space-y-2">${ok.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${noExpiry.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-gray-500 mb-2 flex items-center gap-2"><i class="fas fa-minus-circle"></i>No Expiry / Inactive (${noExpiry.length})</h3>
+      <div class="space-y-2">${noExpiry.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${all.length === 0 ? `<div class="card p-10 text-center text-gray-300"><i class="fas fa-map-marker-alt text-5xl mb-3 block"></i><p class="text-sm">No licenses found across your contractors.</p></div>` : ''}
+  </div>`
+}
+
+async function mgrGoToContractorLicenses(contractorId) {
+  navigate('mgr_contractors')
+  await mgrSelectContractor(contractorId)
+  mgrSetTab('licenses')
+}
+
+// ── Consults Page ──────────────────────────────────────────────────
+async function renderMgrConsults() {
+  mgrState.consultsPage = 1
+  mgrState.consultsSearch = ''
+  mgrState.consultsShowNames = false
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  await mgrFetchConsults()
+}
+
+async function mgrFetchConsults() {
+  try {
+    const params = new URLSearchParams({ page: mgrState.consultsPage, search: mgrState.consultsSearch })
+    const data = await api(`/api/manager/consults?${params}`)
+    mgrState.consults = data.rows || []
+    mgrState.consultsTotal = data.total || 0
+    mgrDrawConsults()
+  } catch(e) {
+    $('mainContent').innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrMaskName(name) {
+  if (mgrState.consultsShowNames) return name || ''
+  const words = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '—'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+function mgrToggleNames() {
+  if (mgrState.consultsShowNames) {
+    mgrState.consultsShowNames = false
+    mgrDrawConsults()
+    return
+  }
+  $('mgrHipaaModal').classList.remove('hidden')
+}
+
+function mgrConfirmShowNames() {
+  $('mgrHipaaModal').classList.add('hidden')
+  mgrState.consultsShowNames = true
+  mgrDrawConsults()
+}
+
+function mgrDrawConsults() {
+  const mc = $('mainContent')
+  const rows = mgrState.consults
+  const total = mgrState.consultsTotal
+  const page = mgrState.consultsPage
+  const perPage = 25
+  const totalPages = Math.max(1, Math.ceil(total / perPage))
+  const showing = mgrState.consultsShowNames
+
+  mc.innerHTML = `
+  <!-- HIPAA modal -->
+  <div id="mgrHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
+      <div class="text-center mb-4">
+        <div class="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center mx-auto mb-3">
+          <i class="fas fa-shield-alt text-amber-500 text-2xl"></i>
+        </div>
+        <h3 class="font-bold text-gray-800 text-lg">HIPAA Notice</h3>
+        <p class="text-gray-500 text-sm mt-2">Patient names are protected health information. Only reveal them when operationally necessary.</p>
+      </div>
+      <div class="flex gap-3">
+        <button onclick="$('mgrHipaaModal').classList.add('hidden')" class="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+        <button onclick="mgrConfirmShowNames()" class="flex-1 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold">Show Names</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="max-w-5xl">
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">Consult Records</h2>
+        <p class="text-sm text-gray-400 mt-0.5">${total.toLocaleString()} record${total!==1?'s':''}</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <input type="text" id="mgrConsultSearch" placeholder="Search case ID, org, doctor…"
+          class="text-sm border border-gray-200 rounded-xl px-3 py-2 w-48 focus:outline-none focus:border-teal-400"
+          value="${escHtml(mgrState.consultsSearch)}"
+          oninput="mgrDebounceConsults(this.value)">
+        <button onclick="mgrToggleNames()" id="mgrNamesBtn"
+          class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 transition whitespace-nowrap ${showing ? 'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100' : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'}">
+          <i class="fas ${showing ? 'fa-eye-slash' : 'fa-eye'} mr-1.5"></i>${showing ? 'Hide Names' : 'Show Names'}
+        </button>
+      </div>
+    </div>
+
+    ${rows.length === 0 ? `
+      <div class="card p-10 text-center text-gray-300">
+        <i class="fas fa-table text-5xl mb-3 block"></i>
+        <p class="text-sm">No consult records found.</p>
+      </div>` : `
+    <div class="card overflow-hidden mb-4">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-100 text-left">
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Case ID</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Patient</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Doctor</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Organization</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Visit</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Decision</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+            <tr class="border-b border-gray-50 table-row">
+              <td class="px-3 py-3 font-mono text-xs text-gray-500">${escHtml(r.case_id||'')}</td>
+              <td class="px-3 py-3 text-gray-800 font-medium">${escHtml(mgrMaskName(r.patient_name))}</td>
+              <td class="px-3 py-3 text-gray-600">${escHtml(r.doctor_name||'')}</td>
+              <td class="px-3 py-3 text-gray-600 text-xs">${escHtml(r.organization||'')}</td>
+              <td class="px-3 py-3 text-xs">${escHtml(r.visit_type||'')}</td>
+              <td class="px-3 py-3 text-xs">
+                ${r.decision_status ? `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${r.decision_status==='approved'?'bg-green-100 text-green-700':r.decision_status==='denied'?'bg-red-100 text-red-700':'bg-gray-100 text-gray-600'}">${escHtml(r.decision_status)}</span>` : '—'}
+              </td>
+              <td class="px-3 py-3 text-gray-500 text-xs">${r.decision_date ? new Date(r.decision_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Pagination -->
+    ${totalPages > 1 ? `
+    <div class="flex items-center justify-between text-sm text-gray-500">
+      <span>Page ${page} of ${totalPages}</span>
+      <div class="flex gap-2">
+        <button onclick="mgrConsultsGoPage(${page-1})" ${page<=1?'disabled':''} class="px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+          <i class="fas fa-chevron-left text-xs"></i>
+        </button>
+        <button onclick="mgrConsultsGoPage(${page+1})" ${page>=totalPages?'disabled':''} class="px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+          <i class="fas fa-chevron-right text-xs"></i>
+        </button>
+      </div>
+    </div>` : ''}
+    `}
+  </div>`
+}
+
+let _mgrConsultSearchTimer = null
+function mgrDebounceConsults(val) {
+  clearTimeout(_mgrConsultSearchTimer)
+  _mgrConsultSearchTimer = setTimeout(() => {
+    mgrState.consultsSearch = val.trim()
+    mgrState.consultsPage = 1
+    mgrFetchConsults()
+  }, 350)
+}
+
+function mgrConsultsGoPage(p) {
+  mgrState.consultsPage = p
+  mgrFetchConsults()
+}
+
+// ══════════════════════════════════════════════════════════════════
 
   if (path === '/apply') {
     history.replaceState({}, '', '/apply')
