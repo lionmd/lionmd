@@ -3640,12 +3640,16 @@ async function ensureClientPaymentsSchema(db: D1Database) {
       amount       REAL,               -- NULL = no payment recorded
       status       TEXT    DEFAULT 'paid',  -- 'paid'|'cancelled'|'past_due'|'venmo'|'pending'|'no_payment'
       notes        TEXT,               -- dates, breakdown, extra info
+      is_active    INTEGER DEFAULT 1,  -- 0 = client inactive for this period (carries forward)
       created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
       FOREIGN KEY (client_id) REFERENCES cp_clients(id),
       UNIQUE(client_id, period_key)
     )
   `).run().catch(() => {})
+
+  // Add is_active column to existing tables if it doesn't exist yet (safe migration)
+  await db.prepare(`ALTER TABLE cp_payment_entries ADD COLUMN is_active INTEGER DEFAULT 1`).run().catch(() => {})
 }
 
 // ── GET /api/client-payments/clients ────────────────────────────────
@@ -3686,6 +3690,34 @@ app.delete('/api/client-payments/clients/:id', requireAdmin, async (c) => {
   return c.json({ ok: true })
 })
 
+// ── POST /api/client-payments/clients/:id/merge ──────────────────────
+// Merge source client (id) into target: moves all entries, deletes source.
+// Body: { target_id: number }
+app.post('/api/client-payments/clients/:id/merge', requireAdmin, async (c) => {
+  const sourceId = c.req.param('id')
+  const { target_id } = await c.req.json() as any
+  if (!target_id) return c.json({ error: 'target_id required' }, 400)
+  if (String(target_id) === String(sourceId)) return c.json({ error: 'Cannot merge a client into itself' }, 400)
+
+  // Re-assign entries that don't conflict (target has no entry for same period)
+  await c.env.DB.prepare(`
+    UPDATE cp_payment_entries
+    SET client_id = ?
+    WHERE client_id = ?
+      AND period_key NOT IN (
+        SELECT period_key FROM cp_payment_entries WHERE client_id = ?
+      )
+  `).bind(target_id, sourceId, target_id).run()
+
+  // Delete remaining source entries (period conflicts — source loses)
+  await c.env.DB.prepare(`DELETE FROM cp_payment_entries WHERE client_id=?`).bind(sourceId).run()
+
+  // Delete the source client
+  await c.env.DB.prepare(`DELETE FROM cp_clients WHERE id=?`).bind(sourceId).run()
+
+  return c.json({ ok: true })
+})
+
 // ── GET /api/client-payments/entries?period=YYYY-MM ──────────────────
 app.get('/api/client-payments/entries', requireAdmin, async (c) => {
   await ensureClientPaymentsSchema(c.env.DB)
@@ -3693,18 +3725,18 @@ app.get('/api/client-payments/entries', requireAdmin, async (c) => {
   let rows
   if (period) {
     rows = await c.env.DB.prepare(
-      `SELECT e.*, cl.name as client_name
+      `SELECT e.*, COALESCE(e.is_active, 1) as is_active, cl.name as client_name
        FROM cp_payment_entries e
        JOIN cp_clients cl ON cl.id = e.client_id
        WHERE e.period_key = ?
-       ORDER BY cl.name`
+       ORDER BY COALESCE(e.is_active,1) DESC, cl.name`
     ).bind(period).all()
   } else {
     rows = await c.env.DB.prepare(
-      `SELECT e.*, cl.name as client_name
+      `SELECT e.*, COALESCE(e.is_active, 1) as is_active, cl.name as client_name
        FROM cp_payment_entries e
        JOIN cp_clients cl ON cl.id = e.client_id
-       ORDER BY e.period_key DESC, cl.name`
+       ORDER BY e.period_key DESC, COALESCE(e.is_active,1) DESC, cl.name`
     ).all()
   }
   return c.json(rows.results)
@@ -3753,18 +3785,57 @@ app.put('/api/client-payments/entries/:id', requireAdmin, async (c) => {
   return c.json({ ok: true })
 })
 
+// ── PATCH /api/client-payments/entries/:id/active ────────────────────
+// Toggle or explicitly set is_active for a period entry.
+// Propagates change to all future periods that share the same prior value.
+app.patch('/api/client-payments/entries/:id/active', requireAdmin, async (c) => {
+  const id = c.req.param('id')
+  const body = await c.req.json() as any
+
+  const entry = await c.env.DB.prepare(
+    `SELECT id, client_id, period_key, is_active FROM cp_payment_entries WHERE id=?`
+  ).bind(id).first() as any
+  if (!entry) return c.json({ error: 'Entry not found' }, 404)
+
+  const oldActive = entry.is_active === null ? 1 : entry.is_active
+  const newActive = 'is_active' in body ? (body.is_active ? 1 : 0) : (oldActive === 0 ? 1 : 0)
+
+  // Update this entry
+  await c.env.DB.prepare(
+    `UPDATE cp_payment_entries SET is_active=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(newActive, id).run()
+
+  // Propagate forward: update all future periods for same client that still have old value
+  await c.env.DB.prepare(`
+    UPDATE cp_payment_entries
+    SET is_active=?, updated_at=CURRENT_TIMESTAMP
+    WHERE client_id=? AND period_key > ? AND COALESCE(is_active,1)=?
+  `).bind(newActive, entry.client_id, entry.period_key, oldActive).run()
+
+  return c.json({ ok: true, is_active: newActive })
+})
+
 // ── POST /api/client-payments/entries ────────────────────────────────
 app.post('/api/client-payments/entries', requireAdmin, async (c) => {
   await ensureClientPaymentsSchema(c.env.DB)
   const { client_id, period_key, amount, status, notes } = await c.req.json() as any
   if (!client_id || !period_key) return c.json({ error: 'client_id and period_key required' }, 400)
+
+  // Inherit is_active from the most recent prior period for this client
+  const prev = await c.env.DB.prepare(`
+    SELECT is_active FROM cp_payment_entries
+    WHERE client_id=? AND period_key < ? AND is_active IS NOT NULL
+    ORDER BY period_key DESC LIMIT 1
+  `).bind(client_id, period_key).first() as any
+  const inheritedActive = prev ? prev.is_active : 1
+
   await c.env.DB.prepare(
-    `INSERT INTO cp_payment_entries (client_id, period_key, amount, status, notes)
-     VALUES (?, ?, ?, ?, ?)
+    `INSERT INTO cp_payment_entries (client_id, period_key, amount, status, notes, is_active)
+     VALUES (?, ?, ?, ?, ?, ?)
      ON CONFLICT(client_id, period_key) DO UPDATE SET
        amount=excluded.amount, status=excluded.status,
        notes=excluded.notes, updated_at=CURRENT_TIMESTAMP`
-  ).bind(client_id, period_key, amount ?? null, status || 'paid', notes || '').run()
+  ).bind(client_id, period_key, amount ?? null, status || 'paid', notes || '', inheritedActive).run()
   return c.json({ ok: true })
 })
 
@@ -4307,16 +4378,36 @@ app.post('/api/client-payments/seed', requireAdmin, async (c) => {
     { name:'Weekend Health',          period:'2026-05', amount:'CANCELLED',       notes:'' },
   ]
 
+  // Sort rows by period ascending so carry-forward works correctly
+  rows.sort((a, b) => a.period.localeCompare(b.period))
+
+  // Build per-client is_active carry-forward map from existing entries
+  const activeFlags: Record<number, number> = {}
+  for (const cid of Object.values(clientIdMap) as number[]) {
+    const prev = await db.prepare(`
+      SELECT is_active FROM cp_payment_entries
+      WHERE client_id=? AND is_active IS NOT NULL
+      ORDER BY period_key DESC LIMIT 1
+    `).bind(cid).first() as any
+    activeFlags[cid] = prev ? prev.is_active : 1
+  }
+
   let inserted = 0, skipped = 0
   for (const r of rows) {
     const cid = clientIdMap[r.name]
     if (!cid) { skipped++; continue }
     const status = parseStatus(r.amount)
     const amount = status === 'paid' ? parseAmt(r.amount) : null
-    await db.prepare(
-      `INSERT OR IGNORE INTO cp_payment_entries (client_id, period_key, amount, status, notes)
-       VALUES (?, ?, ?, ?, ?)`
-    ).bind(cid, r.period, amount, status, r.notes).run()
+    // Carry forward is_active for this client
+    const isActive = activeFlags[cid] ?? 1
+    const result = await db.prepare(
+      `INSERT OR IGNORE INTO cp_payment_entries (client_id, period_key, amount, status, notes, is_active)
+       VALUES (?, ?, ?, ?, ?, ?)`
+    ).bind(cid, r.period, amount, status, r.notes, isActive).run()
+    if (result.meta.changes > 0) {
+      // Update carry-forward tracker from this new entry
+      activeFlags[cid] = isActive
+    }
     inserted++
   }
 
