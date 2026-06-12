@@ -3131,7 +3131,46 @@ async function executeDeletePeriod(periodKey, label) {
 // ════════════════════════════════════════════════════
 // CONSULTS TABLE PAGE
 // ════════════════════════════════════════════════════
-let consultsState = { page: 1, data: [], total: 0, search: '', doctor: '', visitType: '', isOrderly: '', organization: '', isFlagged: '', decisionStatus: '', dateFrom: '', dateTo: '', sortBy: 'decision_date', sortDir: 'desc' }
+let consultsState = { page: 1, data: [], total: 0, search: '', doctor: '', visitType: '', isOrderly: '', organization: '', isFlagged: '', decisionStatus: '', dateFrom: '', dateTo: '', sortBy: 'decision_date', sortDir: 'desc', showNames: false }
+
+// ── HIPAA name-masking for consults ──────────────────────────────────
+function csMaskName(name) {
+  if (consultsState.showNames) return name || ''
+  const words = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '—'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+function csToggleNames() {
+  if (consultsState.showNames) {
+    consultsState.showNames = false
+    sessionStorage.removeItem('cs_names_visible')
+    csUpdateToggleBtn()
+    renderConsultsTable(consultsState.data, consultsState.total, consultsState.page)
+    return
+  }
+  $('csHipaaModal').classList.remove('hidden')
+}
+
+function csConfirmShowNames() {
+  $('csHipaaModal').classList.add('hidden')
+  consultsState.showNames = true
+  sessionStorage.setItem('cs_names_visible', '1')
+  csUpdateToggleBtn()
+  renderConsultsTable(consultsState.data, consultsState.total, consultsState.page)
+}
+
+function csUpdateToggleBtn() {
+  const btn = $('csNamesToggleBtn')
+  if (!btn) return
+  if (consultsState.showNames) {
+    btn.innerHTML = '<i class="fas fa-eye-slash mr-1.5"></i>Hide Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 bg-amber-50 border border-amber-300 text-amber-700 hover:bg-amber-100 text-sm font-medium rounded-xl transition whitespace-nowrap'
+  } else {
+    btn.innerHTML = '<i class="fas fa-eye mr-1.5"></i>Show Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap'
+  }
+}
 
 // drillDownConsults — navigate to consults page pre-filtered
 // opts: { doctor, visitType, isOrderly }
@@ -3158,6 +3197,7 @@ function drillDownConsults(opts = {}) {
 }
 
 async function renderConsults() {
+  consultsState.showNames = false   // reset on each navigation — names must be re-acknowledged per session view
   if (!state.currentPeriod) { $('mainContent').innerHTML = noDataMsg(); return }
 
   // Build active-filter banner chips
@@ -3203,7 +3243,11 @@ async function renderConsults() {
         <div class="flex flex-col gap-2">
           <!-- Top row: search + export button -->
           <div class="flex gap-2 items-center">
-            <input type="text" id="searchInput" placeholder="Search patient, case ID, org..." class="flex-1" value="${consultsState.search}" oninput="debounceSearch(this.value)"/>
+            <input type="text" id="searchInput" placeholder="Search case ID, org..." class="flex-1" value="${consultsState.search}" oninput="debounceSearch(this.value)"/>
+            <button id="csNamesToggleBtn" onclick="csToggleNames()"
+              class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap">
+              <i class="fas fa-eye mr-1.5"></i>Show Names
+            </button>
             <button onclick="exportConsultsXlsx(false)" title="Export current filtered view to Excel"
               class="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border-2 border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors whitespace-nowrap">
               <i class="fas fa-file-excel"></i><span class="hidden sm:inline">Export</span>
@@ -3274,6 +3318,41 @@ async function renderConsults() {
       </div>
       <!-- Pagination -->
       <div class="p-4 border-t border-gray-100 flex items-center justify-between" id="pagination"></div>
+    </div>
+
+    <!-- HIPAA Warning Modal (Consults) -->
+    <div id="csHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-shield-alt text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-gray-900">HIPAA Privacy Notice</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Protected Health Information</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-2">
+          <p class="font-semibold">You are about to reveal patient names on screen.</p>
+          <ul class="list-disc list-inside space-y-1 text-xs">
+            <li>Ensure no unauthorized individuals can view your screen</li>
+            <li>Do not take screenshots or record this screen while names are visible</li>
+            <li>Names will be hidden again when you navigate away from this page</li>
+            <li>Access to this information is logged and auditable</li>
+          </ul>
+        </div>
+        <p class="text-xs text-gray-500 mb-5">By clicking <strong>I Acknowledge</strong> you confirm you are authorized to view this information and accept responsibility for its protection under HIPAA.</p>
+        <div class="flex gap-3">
+          <button onclick="$('csHipaaModal').classList.add('hidden')"
+            class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button onclick="csConfirmShowNames()"
+            class="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-xl transition">
+            <i class="fas fa-eye mr-1.5"></i>I Acknowledge — Show Names
+          </button>
+        </div>
+      </div>
     </div>`
 
   await Promise.all([
@@ -3281,6 +3360,8 @@ async function renderConsults() {
     loadOrgFilterOptions(),
     loadDoctorFilterOptions()
   ])
+  // Restore toggle button state after re-render
+  csUpdateToggleBtn()
 }
 
 function clearDrillFilter(field) {
@@ -3433,7 +3514,7 @@ function renderConsultsTable(rows, total, page) {
         ${r.is_flagged ? '<i class="fas fa-flag text-yellow-500 ml-1 text-xs"></i>' : ''}
       </td>
       <td class="px-4 py-2.5 text-gray-500 text-xs">${r.decision_date ? r.decision_date.substring(0,10) : ''}</td>
-      <td class="px-4 py-2.5 text-gray-700">${r.patient_name || ''}</td>
+      <td class="px-4 py-2.5 text-gray-700 ${!consultsState.showNames ? 'font-mono tracking-wider text-gray-400' : ''}">${csMaskName(r.patient_name)}</td>
       <td class="px-4 py-2.5 text-gray-500 text-xs max-w-[140px] truncate">${r.organization_name || ''}</td>
       <td class="px-4 py-2.5 text-gray-700 font-medium">${r.doctor_name || '<span class="text-gray-300">—</span>'}</td>
       <td class="px-4 py-2.5">${visitTypeBadge(r.visit_type, r.carevalidate_fee, r.is_orderly)}</td>
@@ -3445,7 +3526,7 @@ function renderConsultsTable(rows, total, page) {
           <button onclick="openEditConsult(${r.id})" class="text-gray-400 hover:text-blue-600 transition-colors p-1 rounded" title="Edit record">
             <i class="fas fa-pen text-xs"></i>
           </button>
-          <button onclick="confirmDeleteConsult(${r.id}, '${(r.case_id_short||r.case_id||'').replace(/'/g,'')}', '${(r.patient_name||'').replace(/'/g,'')}')" class="text-gray-300 hover:text-red-500 transition-colors p-1 rounded" title="Delete record">
+          <button onclick="confirmDeleteConsult(${r.id}, '${(r.case_id_short||r.case_id||'').replace(/'/g,'')}', '${(csMaskName(r.patient_name)||'').replace(/'/g,'')}')" class="text-gray-300 hover:text-red-500 transition-colors p-1 rounded" title="Delete record">
             <i class="fas fa-trash text-xs"></i>
           </button>
         </div>
@@ -3528,7 +3609,7 @@ async function exportConsultsXlsx(fullExport = false) {
   const sheetRows = allRows.map(r => ({
     'Case ID':        r.case_id_short || (r.case_id || '').substring(0, 8),
     'Date':           r.decision_date ? r.decision_date.substring(0, 10) : '',
-    'Patient':        r.patient_name  || '',
+    'Patient':        consultsState.showNames ? (r.patient_name || '') : csMaskName(r.patient_name),
     'Organization':   r.organization_name || '',
     'Doctor':         r.doctor_name   || '',
     'Contractor':     r.contractor_name || '',
@@ -10368,6 +10449,61 @@ const cpState = {
   view: 'monthly',      // 'monthly' | 'clients'
   search: '',
   seeded: false,
+  showNames: false,     // HIPAA: names hidden by default, toggle requires acknowledgement
+}
+
+// ── HIPAA name-masking helpers ────────────────────────────────────────
+
+// Returns masked display: first initial + last initial + dots, e.g. "Blue Sage Wellness" → "B.S.W."
+function cpMaskName(name) {
+  if (cpState.showNames) return name
+  const words = (name || '').trim().split(/\s+/)
+  if (words.length === 0 || !words[0]) return '••••'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+// Shows the HIPAA acknowledgement modal, then reveals names on confirm
+function cpToggleNames() {
+  if (cpState.showNames) {
+    // Hide names immediately — no warning needed
+    cpState.showNames = false
+    sessionStorage.removeItem('cp_names_visible')
+    cpReRender()
+    cpUpdateNamesToggleBtn()
+    return
+  }
+  // Show warning modal
+  $('cpHipaaModal').classList.remove('hidden')
+}
+
+function cpConfirmShowNames() {
+  $('cpHipaaModal').classList.add('hidden')
+  cpState.showNames = true
+  sessionStorage.setItem('cp_names_visible', '1')
+  cpReRender()
+  cpUpdateNamesToggleBtn()
+}
+
+function cpReRender() {
+  if (cpState.view === 'monthly') cpRenderMonthly()
+  else cpRenderClientList()
+  // Re-render detail panel name if open
+  if (cpDetailState.clientId) {
+    const nameEl = $('cpDetailName')
+    if (nameEl) nameEl.textContent = cpMaskName(cpDetailState.clientName)
+  }
+}
+
+function cpUpdateNamesToggleBtn() {
+  const btn = $('cpNamesToggleBtn')
+  if (!btn) return
+  if (cpState.showNames) {
+    btn.innerHTML = '<i class="fas fa-eye-slash mr-1.5"></i>Hide Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 bg-amber-50 border border-amber-300 text-amber-700 hover:bg-amber-100 text-sm font-medium rounded-lg shadow-sm transition'
+  } else {
+    btn.innerHTML = '<i class="fas fa-eye mr-1.5"></i>Show Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium rounded-lg shadow-sm transition'
+  }
 }
 
 // ── helpers ──────────────────────────────────────────────────────────
@@ -10445,7 +10581,11 @@ async function renderClientPayments() {
             class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm w-52 focus:ring-2 focus:ring-blue-500 focus:outline-none">
         </div>
       </div>
-      <div class="flex items-center gap-2">
+      <div class="flex items-center gap-2 flex-wrap">
+        <button id="cpNamesToggleBtn" onclick="cpToggleNames()"
+          class="flex items-center gap-1 px-3 py-2 bg-white border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-eye mr-1.5"></i>Show Names
+        </button>
         <button onclick="cpExportXlsx()" title="Export to Excel"
           class="flex items-center gap-2 px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg shadow-sm transition">
           <i class="fas fa-file-excel"></i> Export XLSX
@@ -10462,6 +10602,41 @@ async function renderClientPayments() {
           class="flex items-center gap-2 px-3 py-2 bg-white hover:bg-gray-50 text-gray-700 border border-gray-200 text-sm font-medium rounded-lg shadow-sm transition">
           <i class="fas fa-user-plus"></i> Add Client
         </button>
+      </div>
+    </div>
+
+    <!-- HIPAA Warning Modal -->
+    <div id="cpHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-shield-alt text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-gray-900">HIPAA Privacy Notice</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Protected Health Information</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-2">
+          <p class="font-semibold">You are about to reveal patient names on screen.</p>
+          <ul class="list-disc list-inside space-y-1 text-xs">
+            <li>Ensure no unauthorized individuals can view your screen</li>
+            <li>Do not take screenshots or record this screen while names are visible</li>
+            <li>Names will be automatically hidden when you navigate away or close this tab</li>
+            <li>Access to this information is logged and auditable</li>
+          </ul>
+        </div>
+        <p class="text-xs text-gray-500 mb-5">By clicking <strong>I Acknowledge</strong> you confirm you are authorized to view this information and accept responsibility for its protection under HIPAA.</p>
+        <div class="flex gap-3">
+          <button onclick="$('cpHipaaModal').classList.add('hidden')"
+            class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button onclick="cpConfirmShowNames()"
+            class="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-xl transition">
+            <i class="fas fa-eye mr-1.5"></i>I Acknowledge — Show Names
+          </button>
+        </div>
       </div>
     </div>
 
@@ -10778,6 +10953,7 @@ function cpRenderMonthly() {
     const badge = entry ? cpStatusBadge(entry.status, entry.amount) : cpStatusBadge('pending', null)
     const notes = entry?.notes || ''
     const safeName = client.name.replace(/'/g,"\\'")
+    const displayName = cpMaskName(client.name)
     const inactiveBtn = isInactive && eid
       ? `<button onclick="cpToggleClientActive('${eid}',0); event.stopPropagation()"
            title="Reactivate this client for future periods"
@@ -10789,7 +10965,7 @@ function cpRenderMonthly() {
       <tr class="hover:bg-gray-50 transition group">
         <td class="py-3 pl-4 pr-2">
           <button onclick="cpOpenClientDetail(${client.id},'${safeName}')"
-            class="font-medium ${isInactive ? 'text-gray-400 hover:text-gray-600' : 'text-blue-600 hover:text-blue-800'} hover:underline text-sm text-left">${client.name}</button>
+            class="font-medium ${isInactive ? 'text-gray-400 hover:text-gray-600' : 'text-blue-600 hover:text-blue-800'} hover:underline text-sm text-left">${displayName}</button>
         </td>
         <td class="py-3 px-2">${isInactive ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500"><i class="fas fa-moon"></i> Inactive</span>' : badge}</td>
         <td class="py-3 px-2 text-sm font-semibold ${entry?.status==='paid' ? 'text-emerald-700' : 'text-gray-400'}">${isInactive ? '—' : amt}</td>
@@ -10883,12 +11059,13 @@ function cpRenderClientList() {
             const lifetime = s.lifetime_total || 0
             const paidPct = tracked > 0 ? Math.round((paid_months / tracked) * 100) : 0
             const safeName = cl.name.replace(/'/g,"\\'")
+            const displayName = cpMaskName(cl.name)
             return `
               <tr class="hover:bg-gray-50 transition group">
                 <td class="py-3 pl-4 pr-2">
                   <button onclick="cpOpenClientDetail(${cl.id},'${safeName}')"
-                    class="font-medium text-blue-600 hover:text-blue-800 hover:underline text-sm text-left">${cl.name}</button>
-                  ${cl.notes ? `<div class="text-xs text-gray-400 mt-0.5">${cl.notes}</div>` : ''}
+                    class="font-medium text-blue-600 hover:text-blue-800 hover:underline text-sm text-left">${displayName}</button>
+                  ${cl.notes && cpState.showNames ? `<div class="text-xs text-gray-400 mt-0.5">${cl.notes}</div>` : ''}
                 </td>
                 <td class="py-3 px-2 text-sm text-gray-500 text-right">${tracked}</td>
                 <td class="py-3 px-2 text-right">
@@ -10973,7 +11150,7 @@ async function cpOpenClientDetail(clientId, clientName) {
     $('cpDetailPanel').classList.remove('translate-x-full')
   })
 
-  $('cpDetailName').textContent = clientName
+  $('cpDetailName').textContent = cpMaskName(clientName)
   $('cpDetailSub').textContent = 'Loading…'
   $('cpDetailBody').innerHTML = `<div class="flex justify-center py-12"><i class="fas fa-spinner fa-spin text-2xl text-gray-400"></i></div>`
 
@@ -11238,7 +11415,7 @@ function cpQuickAdd() {
   // Populate client dropdown
   const sel = $('cpQClient')
   sel.innerHTML = '<option value="">— Select client —</option>' +
-    cpState.clients.map(cl => `<option value="${cl.id}">${cl.name}</option>`).join('')
+    cpState.clients.map(cl => `<option value="${cl.id}">${cpMaskName(cl.name)}</option>`).join('')
 
   // Populate period dropdown, default to current period
   const pSel = $('cpQPeriod')
@@ -11389,7 +11566,7 @@ function cpOpenMerge(sourceId, sourceName) {
   const sel = $('cpMergeTargetId')
   sel.innerHTML = cpState.clients
     .filter(cl => cl.id != sourceId)
-    .map(cl => `<option value="${cl.id}">${cl.name}</option>`)
+    .map(cl => `<option value="${cl.id}">${cpMaskName(cl.name)}</option>`)
     .join('')
   $('cpMergeModal').classList.remove('hidden')
 }
