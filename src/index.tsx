@@ -546,6 +546,18 @@ app.delete('/api/contractors/:id', async (c) => {
   return c.json({ ok: true })
 })
 
+// Permanent hard-delete: removes contractor and ALL associated data
+app.delete('/api/contractors/:id/permanent', requireAdmin, async (c) => {
+  const id = c.req.param('id')
+  // Delete all associated data first (FK cascade not guaranteed in D1)
+  await c.env.DB.prepare(`DELETE FROM contractor_documents WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`DELETE FROM portal_users WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`UPDATE upload_sessions SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`UPDATE consult_records SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`DELETE FROM contractors WHERE id=?`).bind(id).run()
+  return c.json({ ok: true })
+})
+
 // ──────────────────────────────────────────────────────────────────
 // DOCTOR MATCH / QUICK-ADD  (unmatched doctors on dashboard)
 // ──────────────────────────────────────────────────────────────────
