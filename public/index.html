@@ -11616,7 +11616,8 @@ async function cpSaveClient() {
   const nameInput = $('cpClientName')
   const name = (nameInput?.value || '').trim()
   if (!name) { showToast('Client name is required', 'error'); return }
-  const editId = ($('cpClientEditId')?.value || '').trim()
+  const editIdRaw = ($('cpClientEditId')?.value || '').trim()
+  const editId = (editIdRaw && editIdRaw !== 'null') ? editIdRaw : ''
 
   // Disable save button to prevent double-submit
   const saveBtn = $('cpClientSaveBtn')
@@ -11757,8 +11758,11 @@ async function cpToggleClientActive(entryId, currentActive) {
 
 function cpDetailEditName() {
   if (!cpDetailState.clientId) return
+  // Capture BEFORE cpCloseClientDetail nulls the state
+  const id = cpDetailState.clientId
+  const name = cpDetailState.clientName
   cpCloseClientDetail()
-  cpEditClient(cpDetailState.clientId, cpDetailState.clientName)
+  cpEditClient(id, name)
 }
 
 async function cpDetailToggleActive() {
