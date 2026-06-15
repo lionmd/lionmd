@@ -4098,6 +4098,35 @@ app.get('/api/client-payments/entries', requireAdmin, async (c) => {
        WHERE e.period_key = ?
        ORDER BY COALESCE(e.is_active,1) DESC, cl.name`
     ).bind(period).all()
+
+    // For clients with no entry this period, check if their most recent prior entry
+    // was cancelled or no_payment — if so, inject a virtual entry so they show as
+    // Cancelled instead of "Not Recorded".
+    const clientsWithEntry = new Set(rows.results.map((r: any) => r.client_id))
+    const allClients = await c.env.DB.prepare(`SELECT id, name FROM cp_clients WHERE is_active=1`).all()
+    const ghostEntries: any[] = []
+    for (const cl of (allClients.results as any[])) {
+      if (clientsWithEntry.has(cl.id)) continue
+      const prev = await c.env.DB.prepare(`
+        SELECT id, status, notes, is_active FROM cp_payment_entries
+        WHERE client_id=? AND period_key < ?
+        ORDER BY period_key DESC LIMIT 1
+      `).bind(cl.id, period).first() as any
+      if (prev && (prev.status === 'cancelled' || prev.status === 'no_payment')) {
+        ghostEntries.push({
+          id: null,           // no real DB row yet
+          client_id: cl.id,
+          client_name: cl.name,
+          period_key: period,
+          amount: null,
+          status: prev.status,
+          notes: prev.notes || '',
+          is_active: prev.is_active ?? 1,
+          _ghost: true,       // frontend can use this to know no DB row exists yet
+        })
+      }
+    }
+    return c.json([...rows.results, ...ghostEntries])
   } else {
     rows = await c.env.DB.prepare(
       `SELECT e.*, COALESCE(e.is_active, 1) as is_active, cl.name as client_name
@@ -4105,8 +4134,8 @@ app.get('/api/client-payments/entries', requireAdmin, async (c) => {
        JOIN cp_clients cl ON cl.id = e.client_id
        ORDER BY e.period_key DESC, COALESCE(e.is_active,1) DESC, cl.name`
     ).all()
+    return c.json(rows.results)
   }
-  return c.json(rows.results)
 })
 
 // ── GET /api/client-payments/summary ─────────────────────────────────
@@ -4188,13 +4217,35 @@ app.post('/api/client-payments/entries', requireAdmin, async (c) => {
   const { client_id, period_key, amount, status, notes } = await c.req.json() as any
   if (!client_id || !period_key) return c.json({ error: 'client_id and period_key required' }, 400)
 
-  // Inherit is_active from the most recent prior period for this client
+  // Inherit is_active AND status/notes from the most recent prior period for this client.
+  // Cancelled and no_payment entries carry forward automatically so the new month
+  // starts in the correct state without manual re-entry.
   const prev = await c.env.DB.prepare(`
-    SELECT is_active FROM cp_payment_entries
-    WHERE client_id=? AND period_key < ? AND is_active IS NOT NULL
+    SELECT is_active, status, notes FROM cp_payment_entries
+    WHERE client_id=? AND period_key < ?
     ORDER BY period_key DESC LIMIT 1
   `).bind(client_id, period_key).first() as any
-  const inheritedActive = prev ? prev.is_active : 1
+
+  const inheritedActive = prev?.is_active ?? 1
+
+  // If caller explicitly provided a status, use it; otherwise inherit cancelled/no_payment
+  // from the previous period (so those clients show up correctly each new month).
+  // For all other prior statuses (paid, past_due, venmo, pending) a new month starts fresh.
+  let resolvedStatus = status  // caller-provided
+  if (!resolvedStatus) {
+    if (prev?.status === 'cancelled' || prev?.status === 'no_payment') {
+      resolvedStatus = prev.status
+    } else {
+      resolvedStatus = 'paid'
+    }
+  }
+
+  // Only pre-fill notes for cancelled/no_payment inheritance; fresh entries start blank
+  const resolvedNotes = notes ?? (
+    (resolvedStatus === prev?.status && (resolvedStatus === 'cancelled' || resolvedStatus === 'no_payment'))
+      ? (prev?.notes || '')
+      : ''
+  )
 
   await c.env.DB.prepare(
     `INSERT INTO cp_payment_entries (client_id, period_key, amount, status, notes, is_active)
@@ -4202,7 +4253,7 @@ app.post('/api/client-payments/entries', requireAdmin, async (c) => {
      ON CONFLICT(client_id, period_key) DO UPDATE SET
        amount=excluded.amount, status=excluded.status,
        notes=excluded.notes, updated_at=CURRENT_TIMESTAMP`
-  ).bind(client_id, period_key, amount ?? null, status || 'paid', notes || '', inheritedActive).run()
+  ).bind(client_id, period_key, amount ?? null, resolvedStatus, resolvedNotes, inheritedActive).run()
   return c.json({ ok: true })
 })
 

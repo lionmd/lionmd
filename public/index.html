@@ -10940,8 +10940,8 @@ function cpRenderStats() {
       <div class="text-2xl font-bold text-blue-600">${paidCount}</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
-      <div class="text-xs text-gray-500 font-medium mb-1">Past Due / Pending</div>
-      <div class="text-2xl font-bold text-red-500">${pastDueCount + pendingCount}</div>
+      <div class="text-xs text-gray-500 font-medium mb-1">Past Due</div>
+      <div class="text-2xl font-bold text-red-500">${pastDueCount}</div>
     </div>
     <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
       <div class="text-xs text-gray-500 font-medium mb-1">All-Time Revenue</div>
@@ -11427,11 +11427,17 @@ function cpOpenAddEntryFromDetail(clientId, clientName) {
 let cpEntryContext = null  // { clientId, clientName, entryId, period }
 
 function cpOpenEntry(clientId, clientName, entryId) {
-  // Find entry
-  const entry = entryId ? cpState.entries.find(e => e.id == entryId) : null
-  cpEntryContext = { clientId, clientName, entryId: entryId || null, period: cpState.currentPeriod }
+  // Find entry — real entries have a numeric id; ghost entries have id=null
+  // so entryId will be '' (falsy) but the ghost row still lives in cpState.entries
+  const entry = entryId
+    ? cpState.entries.find(e => e.id == entryId)
+    : cpState.entries.find(e => e.client_id == clientId && e.period_key === cpState.currentPeriod) || null
 
-  $('cpEntryModalTitle').textContent = entry ? 'Edit Payment Entry' : 'Add Payment Entry'
+  // Ghost entries have no real DB id — treat as new entry (POST) but pre-fill their status
+  const realEntryId = entry?.id || null
+  cpEntryContext = { clientId, clientName, entryId: realEntryId, period: cpState.currentPeriod }
+
+  $('cpEntryModalTitle').textContent = realEntryId ? 'Edit Payment Entry' : 'Add Payment Entry'
   $('cpEntryClientName').textContent = clientName
   $('cpEntryPeriodLabel').textContent = cpPeriodLabel(cpState.currentPeriod)
   $('cpEntryStatus').value = entry?.status || 'pending'
@@ -11611,11 +11617,22 @@ async function cpSaveClient() {
   const name = (nameInput?.value || '').trim()
   if (!name) { showToast('Client name is required', 'error'); return }
   const editId = ($('cpClientEditId')?.value || '').trim()
+
+  // Disable save button to prevent double-submit
+  const saveBtn = $('cpClientSaveBtn')
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…' }
+
   try {
     if (editId) {
+      // Fetch current record so we don't blank notes or flip is_active
+      const existing = cpState.clients.find(c => String(c.id) === String(editId))
       await api(`/api/client-payments/clients/${editId}`, {
         method: 'PUT',
-        body: JSON.stringify({ name, notes: '', is_active: 1 })
+        body: JSON.stringify({
+          name,
+          notes: existing?.notes || '',
+          is_active: existing?.is_active ?? 1,
+        })
       })
       showToast('Client renamed to "' + name + '"', 'success')
     } else {
@@ -11626,7 +11643,8 @@ async function cpSaveClient() {
     cpCloseClientModal()
     await cpRefreshClientsAndRender()
   } catch(e) {
-    showToast('Error: ' + e.message, 'error')
+    showToast('Save failed: ' + e.message, 'error')
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = editId ? 'Rename' : 'Save' }
   }
 }
 
