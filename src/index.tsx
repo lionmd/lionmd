@@ -2829,7 +2829,7 @@ app.post('/api/admin/users', requireAdmin, async (c) => {
   const body = await c.req.json() as any
   const { name, email, role } = body
   if (!name || !email || !role) return c.json({ error: 'name, email, and role required' }, 400)
-  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider', 'manager']
+  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider', 'manager', 'license_editor']
   if (!validRoles.includes(role)) return c.json({ error: 'Invalid role' }, 400)
 
   // Check duplicate
@@ -2850,7 +2850,7 @@ app.post('/api/admin/users', requireAdmin, async (c) => {
 app.put('/api/admin/users/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json() as any
-  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider', 'manager']
+  const validRoles = ['admin', 'carevalidate', 'onboarding', 'provider', 'manager', 'license_editor']
   if (body.role && !validRoles.includes(body.role)) return c.json({ error: 'Invalid role' }, 400)
 
   const sets: string[] = []
@@ -3401,11 +3401,11 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
   const u = c.get('user')
   const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
   if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
-  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
   if (!state) return c.json({ error: 'state required' }, 400)
   const r = await c.env.DB.prepare(
-    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes) VALUES (?,?,?,?,?,?,?)`
-  ).bind(pu.contractor_id, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'').run()
+    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry) VALUES (?,?,?,?,?,?,?,?,?)`
+  ).bind(pu.contractor_id, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'').run()
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
@@ -3413,10 +3413,10 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
 app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
   await ensureProviderSchema(c.env.DB)
   const id = c.req.param('id')
-  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
   await c.env.DB.prepare(
-    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', id).run()
+    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', id).run()
   return c.json({ ok: true })
 })
 
@@ -3526,21 +3526,21 @@ app.get('/api/admin/contractors/:id/licenses', requireAdmin, async (c) => {
 app.post('/api/admin/contractors/:id/licenses', requireAdmin, async (c) => {
   await ensureProviderSchema(c.env.DB)
   const cid = c.req.param('id')
-  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
   if (!state) return c.json({ error: 'state required' }, 400)
   const r = await c.env.DB.prepare(
-    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes) VALUES (?,?,?,?,?,?,?)`
-  ).bind(cid, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'').run()
+    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry) VALUES (?,?,?,?,?,?,?,?,?)`
+  ).bind(cid, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'').run()
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
 // ── Admin: PUT /api/admin/licenses/:id ───────────────────────────
 app.put('/api/admin/licenses/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
-  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
   await c.env.DB.prepare(
-    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', id).run()
+    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', id).run()
   return c.json({ ok: true })
 })
 
@@ -3548,6 +3548,104 @@ app.put('/api/admin/licenses/:id', requireAdmin, async (c) => {
 app.delete('/api/admin/licenses/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
   return c.json({ ok: true })
+})
+
+// ════════════════════════════════════════════════════════════════════
+// LICENSE EDITOR ROLE  — can add/edit/delete licenses for ANY contractor
+// No payroll, consults, client payments, or admin functions
+// ════════════════════════════════════════════════════════════════════
+
+async function requireLicenseEditor(c: any, next: any) {
+  const auth = c.req.header('Authorization') || ''
+  const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  const payload = await verifyToken(token)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
+  if (payload.role !== 'admin' && payload.role !== 'license_editor') {
+    return c.json({ error: 'License editor access required' }, 403)
+  }
+  c.set('user', payload)
+  await next()
+}
+
+// ── GET /api/license-editor/contractors  — list all active providers ──
+app.get('/api/license-editor/contractors', requireLicenseEditor, async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT id, name, role_group, specialty, states_licensed FROM contractors WHERE is_active=1 ORDER BY role_group, name`
+  ).all()
+  return c.json(rows.results)
+})
+
+// ── GET /api/license-editor/contractors/:id/licenses ──────────────
+app.get('/api/license-editor/contractors/:id/licenses', requireLicenseEditor, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const rows = await c.env.DB.prepare(
+    `SELECT * FROM provider_licenses WHERE contractor_id=? ORDER BY state ASC`
+  ).bind(c.req.param('id')).all()
+  return c.json(rows.results)
+})
+
+// ── POST /api/license-editor/contractors/:id/licenses ─────────────
+app.post('/api/license-editor/contractors/:id/licenses', requireLicenseEditor, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const cid = c.req.param('id')
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
+  if (!state) return c.json({ error: 'state required' }, 400)
+  const r = await c.env.DB.prepare(
+    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry) VALUES (?,?,?,?,?,?,?,?,?)`
+  ).bind(cid, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'').run()
+  return c.json({ ok: true, id: r.meta.last_row_id })
+})
+
+// ── PUT /api/license-editor/licenses/:id ──────────────────────────
+app.put('/api/license-editor/licenses/:id', requireLicenseEditor, async (c) => {
+  const id = c.req.param('id')
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
+  await c.env.DB.prepare(
+    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', id).run()
+  return c.json({ ok: true })
+})
+
+// ── DELETE /api/license-editor/licenses/:id ───────────────────────
+app.delete('/api/license-editor/licenses/:id', requireLicenseEditor, async (c) => {
+  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
+// ════════════════════════════════════════════════════════════════════
+// LICENSING DASHBOARD  — full matrix for admin/license_editor + public view
+// ════════════════════════════════════════════════════════════════════
+
+// ── GET /api/licensing/dashboard  — admin or license_editor only ──
+app.get('/api/licensing/dashboard', requireLicenseEditor, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const [contractors, licenses] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT id, name, role_group, specialty, states_licensed FROM contractors WHERE is_active=1 ORDER BY role_group, name`
+    ).all(),
+    c.env.DB.prepare(
+      `SELECT pl.*, ct.name as contractor_name, ct.role_group FROM provider_licenses pl
+       JOIN contractors ct ON ct.id = pl.contractor_id
+       WHERE ct.is_active=1 ORDER BY ct.name, pl.state`
+    ).all(),
+  ])
+  return c.json({ contractors: contractors.results, licenses: licenses.results })
+})
+
+// ── GET /api/licensing/public  — no auth, read-only for external viewers ──
+app.get('/api/licensing/public', async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  // Only return non-sensitive data: provider name, state, license type, status, expiry, collab info
+  // No license numbers, no notes
+  const licenses = await c.env.DB.prepare(
+    `SELECT pl.state, pl.license_type, pl.expiry_date, pl.status, pl.collab_physician, pl.collab_expiry,
+            ct.name as provider_name, ct.role_group
+     FROM provider_licenses pl
+     JOIN contractors ct ON ct.id = pl.contractor_id
+     WHERE ct.is_active=1 ORDER BY ct.name, pl.state`
+  ).all()
+  return c.json(licenses.results)
 })
 
 // ── Admin: PATCH /api/admin/contractors/:id/phone ────────────────
@@ -3688,11 +3786,11 @@ app.post('/api/manager/contractors/:id/licenses', requireManager, async (c) => {
     if (!ok) return c.json({ error: 'Access denied' }, 403)
   }
   await ensureProviderSchema(c.env.DB)
-  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
   const r = await c.env.DB.prepare(
-    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes)
-     VALUES (?,?,?,?,?,?,?)`
-  ).bind(id, state || '', license_number || '', license_type || '', expiry_date || '', status || 'active', notes || '').run()
+    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry)
+     VALUES (?,?,?,?,?,?,?,?,?)`
+  ).bind(id, state || '', license_number || '', license_type || '', expiry_date || '', status || 'active', notes || '', collab_physician || '', collab_expiry || '').run()
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
@@ -3705,11 +3803,11 @@ app.put('/api/manager/contractors/:id/licenses/:lid', requireManager, async (c) 
     const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
     if (!ok) return c.json({ error: 'Access denied' }, 403)
   }
-  const { state, license_number, license_type, expiry_date, status, notes } = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
   await c.env.DB.prepare(
-    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP
+    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, updated_at=CURRENT_TIMESTAMP
      WHERE id=? AND contractor_id=?`
-  ).bind(state || '', license_number || '', license_type || '', expiry_date || '', status || 'active', notes || '', lid, id).run()
+  ).bind(state || '', license_number || '', license_type || '', expiry_date || '', status || 'active', notes || '', collab_physician || '', collab_expiry || '', lid, id).run()
   return c.json({ ok: true })
 })
 

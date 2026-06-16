@@ -1456,6 +1456,10 @@ function applySession(token, user) {
     $('loginScreen').classList.add('hidden')
     showApp()
     renderManagerPortal()
+  } else if (user.role === 'license_editor') {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    renderLicenseEditorPortal()
   } else {
     $('loginScreen').classList.add('hidden')
     showApp()
@@ -1983,6 +1987,10 @@ async function tryRestoreSession() {
       $('loginScreen').classList.add('hidden')
       showApp()
         renderManagerPortal()
+    } else if (me.role === 'license_editor') {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        renderLicenseEditorPortal()
     } else {
       $('loginScreen').classList.add('hidden')
       showApp()
@@ -2135,6 +2143,8 @@ const PAGE_PATHS = {
   provider_documents:  '/portal/documents',
   candidate_status:    '/candidate/status',
   candidate_documents: '/candidate/documents',
+  lic_dashboard:       '/licensing',
+  lic_edit:            '/licensing/edit',
   // onboarding sub-tabs
   'onboarding/kanban':    '/onboarding',
   'onboarding/onboarded': '/contractors/onboarded',
@@ -2167,10 +2177,11 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
   $('pageTitle').textContent = titles[page] || page
 
-  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults }
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults,
+  lic_dashboard: renderLicDashboard, lic_edit: renderLicEdit }
   if (pages[page]) pages[page]()
 
   if (isMobile()) closeMobileSidebar()
@@ -9905,6 +9916,7 @@ function umDrawPage() {
               <option value="onboarding">🟢 Onboarding — Onboarding pipeline only</option>
               <option value="provider">🩺 Provider — Self-service profile portal</option>
               <option value="manager">🗂️ Manager — Licenses, consults, no financials</option>
+              <option value="license_editor">📜 License Editor — Add/edit licenses only</option>
             </select>
           </div>
           <div id="umPwField">
@@ -10334,6 +10346,7 @@ function umRoleBadge(role) {
   if (role === 'provider') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800">🩺 Provider</span>'
   if (role === 'candidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800">📋 Applicant</span>'
   if (role === 'manager') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 text-teal-800">🗂️ Manager</span>'
+  if (role === 'license_editor') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800">📜 Lic. Editor</span>'
   return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">🟢 Onboarding</span>'
 }
 
@@ -12541,6 +12554,22 @@ function ppShowLicenseModal(lic) {
           <label class="block text-xs font-semibold text-gray-600 mb-1">Expiration Date</label>
           <input id="ppLicExpiry" type="date" value="${lic?.expiry_date||''}" class="w-full text-sm"/>
         </div>
+        <div class="border-t border-gray-100 pt-3">
+          <p class="text-xs font-semibold text-indigo-600 mb-2 flex items-center gap-1.5">
+            <i class="fas fa-handshake"></i> Collaborating Physician
+            <span class="font-normal text-gray-400">— if required for this state</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Physician Name</label>
+              <input id="ppLicCollab" type="text" placeholder="e.g. Dr. Jane Smith, MD" value="${escHtml(lic?.collab_physician||'')}" class="w-full text-sm"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiry</label>
+              <input id="ppLicCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
+            </div>
+          </div>
+        </div>
         <div>
           <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
           <textarea id="ppLicNotes" rows="2" placeholder="Optional notes…" class="w-full text-sm resize-none">${escHtml(lic?.notes||'')}</textarea>
@@ -12559,20 +12588,23 @@ function ppShowLicenseModal(lic) {
 }
 
 async function ppSaveLicense(licId) {
-  const state   = $('ppLicState').value
-  const status  = $('ppLicStatus').value
-  const type    = ($('ppLicType').value||'').trim()
-  const num     = ($('ppLicNum').value||'').trim()
-  const expiry  = $('ppLicExpiry').value
-  const notes   = ($('ppLicNotes').value||'').trim()
-  const errEl   = $('ppLicError')
+  const state      = $('ppLicState').value
+  const status     = $('ppLicStatus').value
+  const type       = ($('ppLicType').value||'').trim()
+  const num        = ($('ppLicNum').value||'').trim()
+  const expiry     = $('ppLicExpiry').value
+  const notes      = ($('ppLicNotes').value||'').trim()
+  const collab     = ($('ppLicCollab')?.value||'').trim()
+  const collabExp  = $('ppLicCollabExp')?.value || ''
+  const errEl      = $('ppLicError')
   errEl.classList.add('hidden')
   if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
   try {
+    const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp }
     if (licId) {
-      await api(`/api/provider/licenses/${licId}`, { method: 'PUT', body: JSON.stringify({ state, license_number: num, license_type: type, expiry_date: expiry, status, notes }) })
+      await api(`/api/provider/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(payload) })
     } else {
-      await api('/api/provider/licenses', { method: 'POST', body: JSON.stringify({ state, license_number: num, license_type: type, expiry_date: expiry, status, notes }) })
+      await api('/api/provider/licenses', { method: 'POST', body: JSON.stringify(payload) })
     }
     $('ppLicenseModal').classList.add('hidden')
     showToast(licId ? 'License updated!' : 'License added!', 'success')
@@ -13649,6 +13681,1589 @@ function mgrDebounceConsults(val) {
   }, 350)
 }
 
+// ════════════════════════════════════════════════════════════════════
+// LICENSING DASHBOARD  (admin + license_editor)
+// ════════════════════════════════════════════════════════════════════
+
+const US_STATES_ABBR = [
+  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+  'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+  'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+  'VA','WA','WV','WI','WY','DC'
+]
+
+const licState = {
+  contractors: [],
+  licenses: [],
+  view: 'matrix',      // 'matrix' | 'collab' | 'provider'
+  filterState: '',
+  filterProvider: '',
+  filterStatus: '',
+  editContractorId: null,
+  editLicenses: [],
+}
+
+// ── Entry points ──────────────────────────────────────────────────────
+
+async function renderLicDashboard() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/licensing/dashboard')
+    licState.contractors = data.contractors || []
+    licState.licenses    = data.licenses    || []
+    licState.view = 'matrix'
+    licDrawDashboard()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+async function renderLicenseEditorPortal() {
+  state.currentPage = 'lic_edit'
+  const navEl = $('nav_lic_edit'); if (navEl) navEl.classList.add('active')
+  navigate('lic_edit')
+}
+
+async function renderLicEdit() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const contractors = await api('/api/license-editor/contractors')
+    licState.contractors = contractors || []
+    licState.editContractorId = null
+    licDrawEditPortal()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+// ── Dashboard: tab bar + main draw ────────────────────────────────────
+
+function licDrawDashboard() {
+  const mc = $('mainContent')
+  const tabs = [
+    { id: 'matrix',   label: 'State Matrix',          icon: 'fa-th' },
+    { id: 'collab',   label: 'Collab Agreements',      icon: 'fa-handshake' },
+    { id: 'provider', label: 'By Provider',            icon: 'fa-user-md' },
+  ]
+
+  mc.innerHTML = `
+    <div class="flex items-center gap-3 mb-4 flex-wrap">
+      <div class="inline-flex rounded-xl overflow-hidden border border-gray-200 bg-white shadow-sm">
+        ${tabs.map(t => `
+          <button onclick="licSetView('${t.id}')" id="licTab_${t.id}"
+            class="px-4 py-2.5 text-sm font-medium flex items-center gap-2 transition ${licState.view===t.id ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}">
+            <i class="fas ${t.icon}"></i>${t.label}
+          </button>`).join('')}
+      </div>
+      <button onclick="renderLicDashboard()" class="ml-auto px-3 py-2 text-xs text-gray-500 hover:text-blue-600 border border-gray-200 rounded-lg hover:border-blue-300 transition flex items-center gap-1.5">
+        <i class="fas fa-sync-alt"></i> Refresh
+      </button>
+      ${state.role === 'admin' || state.role === 'license_editor' ? `
+      <button onclick="navigate('lic_edit')" class="px-4 py-2 text-sm font-semibold bg-blue-600 hover:bg-blue-700 text-white rounded-lg shadow-sm flex items-center gap-2 transition">
+        <i class="fas fa-edit"></i> Edit Licenses
+      </button>` : ''}
+    </div>
+
+    <!-- KPI Bar -->
+    <div id="licKpiBar" class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-4"></div>
+
+    <!-- Filter Bar -->
+    <div class="flex gap-2 mb-4 flex-wrap items-center bg-white border border-gray-200 rounded-xl p-3 shadow-sm">
+      <i class="fas fa-filter text-gray-400 text-sm"></i>
+      <input id="licFilterState" type="text" placeholder="Filter by state (e.g. FL)" maxlength="2"
+        oninput="licState.filterState=this.value.toUpperCase().trim();licRedrawBody()"
+        value="${licState.filterState}"
+        class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm w-24 focus:ring-2 focus:ring-blue-500 focus:outline-none uppercase">
+      <input id="licFilterProvider" type="text" placeholder="Filter by provider name"
+        oninput="licState.filterProvider=this.value.toLowerCase();licRedrawBody()"
+        value="${licState.filterProvider}"
+        class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm w-52 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+      <select id="licFilterStatus" onchange="licState.filterStatus=this.value;licRedrawBody()"
+        class="border border-gray-200 rounded-lg px-2.5 py-1.5 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+        <option value="">All statuses</option>
+        <option value="active" ${licState.filterStatus==='active'?'selected':''}>Active</option>
+        <option value="pending" ${licState.filterStatus==='pending'?'selected':''}>Pending</option>
+        <option value="expired" ${licState.filterStatus==='expired'?'selected':''}>Expired</option>
+      </select>
+      <button onclick="licState.filterState='';licState.filterProvider='';licState.filterStatus='';licDrawDashboard()"
+        class="text-xs text-gray-400 hover:text-red-500 px-2 py-1 rounded hover:bg-red-50 transition">
+        <i class="fas fa-times mr-1"></i>Clear
+      </button>
+    </div>
+
+    <!-- Body renders here -->
+    <div id="licBody"></div>
+
+    <!-- Legend -->
+    <div class="flex gap-4 flex-wrap mt-4 text-xs text-gray-500 bg-white border border-gray-200 rounded-xl p-3">
+      <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-green-500 inline-block"></span>Active</span>
+      <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-yellow-400 inline-block"></span>Pending</span>
+      <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded bg-red-400 inline-block"></span>Expired</span>
+      <span class="flex items-center gap-1.5"><span class="w-3 h-3 rounded border-2 border-yellow-400 bg-green-500 inline-block"></span>Active + Collab agreement on file</span>
+      <span class="flex items-center gap-1.5 ml-auto italic text-gray-400">Click any cell to edit</span>
+    </div>
+  `
+  licDrawKpis()
+  licRedrawBody()
+}
+
+function licSetView(v) {
+  licState.view = v
+  document.querySelectorAll('[id^="licTab_"]').forEach(el => {
+    const isActive = el.id === `licTab_${v}`
+    el.className = `px-4 py-2.5 text-sm font-medium flex items-center gap-2 transition ${isActive ? 'bg-blue-600 text-white' : 'text-gray-600 hover:bg-gray-50'}`
+  })
+  licRedrawBody()
+}
+
+function licRedrawBody() {
+  const body = $('licBody')
+  if (!body) return
+  if (licState.view === 'matrix')   licDrawMatrix(body)
+  else if (licState.view === 'collab')  licDrawCollab(body)
+  else if (licState.view === 'provider') licDrawByProvider(body)
+}
+
+// ── KPI bar ───────────────────────────────────────────────────────────
+
+function licDrawKpis() {
+  const bar = $('licKpiBar')
+  if (!bar) return
+  const lics = licState.licenses
+  const today = new Date()
+  const in60  = new Date(today.getTime() + 60*24*60*60*1000)
+  const activeCount  = lics.filter(l => l.status === 'active').length
+  const pendingCount = lics.filter(l => l.status === 'pending').length
+  const expiredCount = lics.filter(l => l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < today)).length
+  const expiringCount = lics.filter(l => l.expiry_date && new Date(l.expiry_date) > today && new Date(l.expiry_date) < in60 && l.status !== 'expired').length
+  const collabCount  = lics.filter(l => l.collab_physician).length
+  bar.innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-green-600">${activeCount}</div>
+      <div class="text-xs text-gray-500 font-medium mt-0.5">Active Licenses</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-yellow-600">${pendingCount}</div>
+      <div class="text-xs text-gray-500 font-medium mt-0.5">Pending</div>
+    </div>
+    <div class="bg-white rounded-xl border border-${expiredCount>0?'red':'gray'}-200 p-3 shadow-sm ${expiredCount>0?'bg-red-50':'bg-white'}">
+      <div class="text-2xl font-bold text-red-600">${expiredCount}</div>
+      <div class="text-xs text-gray-500 font-medium mt-0.5">Expired</div>
+    </div>
+    <div class="bg-white rounded-xl border border-${expiringCount>0?'orange':'gray'}-200 p-3 shadow-sm ${expiringCount>0?'bg-orange-50':'bg-white'}">
+      <div class="text-2xl font-bold text-orange-600">${expiringCount}</div>
+      <div class="text-xs text-gray-500 font-medium mt-0.5">Expiring ≤ 60d</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-indigo-600">${collabCount}</div>
+      <div class="text-xs text-gray-500 font-medium mt-0.5">With Collab MD</div>
+    </div>
+  `
+}
+
+// ── Matrix view ───────────────────────────────────────────────────────
+
+function licDrawMatrix(body) {
+  const today = new Date()
+  const in60  = new Date(today.getTime() + 60*24*60*60*1000)
+
+  // Filter providers
+  let providers = licState.contractors
+  if (licState.filterProvider) {
+    providers = providers.filter(p => p.name.toLowerCase().includes(licState.filterProvider))
+  }
+
+  // Build license map: [contractorId][state] → license
+  const licMap = {}
+  for (const l of licState.licenses) {
+    if (!licMap[l.contractor_id]) licMap[l.contractor_id] = {}
+    licMap[l.contractor_id][l.state] = l
+  }
+
+  // Determine which states appear
+  let states = US_STATES_ABBR
+  if (licState.filterState) states = states.filter(s => s === licState.filterState)
+
+  // States that have at least one license among filtered providers
+  const activeStates = states.filter(st => providers.some(p => licMap[p.id]?.[st]))
+  const displayStates = activeStates.length > 0 ? activeStates : states.slice(0, 30)
+
+  function cellHtml(provider, state) {
+    const lic = licMap[provider.id]?.[state]
+    if (!lic) return `<td class="border border-gray-100 p-0 text-center">
+      <div class="w-8 h-7 mx-auto flex items-center justify-center text-gray-200 text-xs cursor-pointer hover:bg-blue-50 hover:text-blue-400 transition rounded"
+        onclick="licQuickAdd(${provider.id},'${state}')" title="Add license for ${provider.name} — ${state}">+</div></td>`
+
+    const isExpired  = lic.status === 'expired' || (lic.expiry_date && new Date(lic.expiry_date) < today)
+    const isExpiring = !isExpired && lic.expiry_date && new Date(lic.expiry_date) < in60
+    const hasCollab  = !!lic.collab_physician
+
+    const bg = isExpired ? 'bg-red-400' : lic.status === 'pending' ? 'bg-yellow-400' : 'bg-green-500'
+    const ring = isExpiring ? 'ring-2 ring-yellow-400 ring-offset-1' : hasCollab ? 'ring-2 ring-indigo-400 ring-offset-1' : ''
+    const dot  = isExpiring ? '<span class="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-orange-400"></span>' :
+                 hasCollab  ? '<span class="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-indigo-400"></span>' : ''
+
+    const tooltip = [
+      `${provider.name} · ${state}`,
+      `Status: ${lic.status}${isExpired?' (EXPIRED)':isExpiring?' (expiring soon)':''}`,
+      lic.license_type ? `Type: ${lic.license_type}` : '',
+      lic.license_number ? `#${lic.license_number}` : '',
+      lic.expiry_date ? `Exp: ${lic.expiry_date}` : '',
+      hasCollab ? `Collab MD: ${lic.collab_physician}` : '',
+      lic.notes ? `Notes: ${lic.notes}` : '',
+    ].filter(Boolean).join('\n')
+
+    // Filter by status if set
+    if (licState.filterStatus && lic.status !== licState.filterStatus) {
+      return `<td class="border border-gray-100 p-0 text-center"><div class="w-8 h-7 mx-auto"></div></td>`
+    }
+
+    const licType = (lic.license_type||'').slice(0,2).toUpperCase() || '✓'
+    return `<td class="border border-gray-100 p-0 text-center">
+      <div class="w-8 h-7 mx-auto flex items-center justify-center cursor-pointer relative" title="${escHtml(tooltip)}"
+        onclick="licOpenEditFromMatrix(${JSON.stringify(lic).replace(/"/g,'&quot;')})">
+        <span class="${bg} ${ring} text-white text-xs font-bold rounded w-6 h-5 flex items-center justify-center relative transition hover:scale-110">
+          ${licType}${dot}
+        </span>
+      </div></td>`
+  }
+
+  if (providers.length === 0) {
+    body.innerHTML = `<div class="text-center py-12 text-gray-400"><i class="fas fa-user-slash text-3xl mb-3"></i><p>No providers match your filter.</p></div>`
+    return
+  }
+
+  body.innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-auto max-h-[calc(100vh-400px)]">
+      <table class="border-collapse text-xs min-w-full">
+        <thead class="sticky top-0 z-10 bg-gray-50">
+          <tr>
+            <th class="sticky left-0 z-20 bg-gray-50 border border-gray-200 px-3 py-2 text-left font-semibold text-gray-700 min-w-[200px]">Provider</th>
+            ${displayStates.map(s => `<th class="border border-gray-200 px-1 py-2 font-semibold text-gray-600 w-9">${s}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${providers.map(p => `
+            <tr class="hover:bg-gray-50 transition group">
+              <td class="sticky left-0 bg-white border border-gray-100 px-3 py-2 font-medium text-gray-800 group-hover:bg-gray-50 min-w-[200px]">
+                <div class="flex items-center gap-2">
+                  <div>
+                    <div class="font-semibold">${escHtml(p.name)}</div>
+                    ${p.role_group ? `<div class="text-xs text-gray-400">${escHtml(p.role_group)}</div>` : ''}
+                  </div>
+                </div>
+              </td>
+              ${displayStates.map(st => cellHtml(p, st)).join('')}
+            </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+}
+
+// ── Collab Agreements view ─────────────────────────────────────────────
+
+function licDrawCollab(body) {
+  const today = new Date()
+  const in60  = new Date(today.getTime() + 60*24*60*60*1000)
+
+  // Group licenses that have a collab physician
+  const withCollab = licState.licenses.filter(l => l.collab_physician)
+
+  if (licState.filterProvider) {
+    // filter by contractor name
+  }
+
+  // Group by collab physician name
+  const byMD = {}
+  for (const l of withCollab) {
+    const mdName = l.collab_physician || 'Unknown'
+    if (!byMD[mdName]) byMD[mdName] = []
+    byMD[mdName].push(l)
+  }
+
+  // Also show providers that have NO collab for states they should have it
+  const noCollab = licState.licenses.filter(l => !l.collab_physician && (l.license_type === 'NP' || l.license_type === 'PA' || (l.role_group && (l.role_group.includes('NP') || l.role_group.includes('PA')))))
+
+  if (withCollab.length === 0 && noCollab.length === 0) {
+    body.innerHTML = `
+      <div class="bg-white rounded-xl border border-gray-200 p-10 text-center">
+        <i class="fas fa-handshake text-4xl text-gray-300 mb-4"></i>
+        <h3 class="font-bold text-gray-600 mb-1">No collaborating agreements on file yet</h3>
+        <p class="text-sm text-gray-400 mb-4">Add a collaborating physician when editing a license for NP/PA providers.</p>
+        <button onclick="navigate('lic_edit')" class="px-4 py-2 bg-blue-600 text-white rounded-lg text-sm font-semibold hover:bg-blue-700 transition">
+          <i class="fas fa-edit mr-2"></i>Edit Licenses
+        </button>
+      </div>`
+    return
+  }
+
+  const licStatusBadge = l => {
+    const isExp = l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < today)
+    const isWarn = !isExp && l.expiry_date && new Date(l.expiry_date) < in60
+    if (isExp)  return '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-700">Expired</span>'
+    if (isWarn) return '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-orange-100 text-orange-700">Expiring</span>'
+    if (l.status === 'pending') return '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-yellow-100 text-yellow-700">Pending</span>'
+    return '<span class="px-1.5 py-0.5 rounded text-xs font-bold bg-green-100 text-green-700">Active</span>'
+  }
+
+  body.innerHTML = `
+    <div class="space-y-4">
+      ${Object.entries(byMD).sort().map(([mdName, lics]) => `
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 bg-gradient-to-r from-indigo-50 to-purple-50 border-b border-indigo-100">
+            <div class="flex items-center gap-3">
+              <div class="w-9 h-9 rounded-full bg-indigo-100 flex items-center justify-center">
+                <i class="fas fa-user-md text-indigo-600"></i>
+              </div>
+              <div>
+                <div class="font-bold text-indigo-900 text-sm">${escHtml(mdName)}</div>
+                <div class="text-xs text-indigo-500">${lics.length} provider${lics.length!==1?'s':''} under this collaborating agreement</div>
+              </div>
+            </div>
+          </div>
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="bg-gray-50 text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+                <th class="px-4 py-2 text-left font-medium">Provider</th>
+                <th class="px-3 py-2 text-left font-medium">State</th>
+                <th class="px-3 py-2 text-left font-medium">License</th>
+                <th class="px-3 py-2 text-left font-medium">Collab Expires</th>
+                <th class="px-3 py-2 text-left font-medium">Status</th>
+                <th class="px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-50">
+              ${lics.map(l => {
+                const collabExp = l.collab_expiry ? new Date(l.collab_expiry) : null
+                const collabExpired = collabExp && collabExp < today
+                const collabWarning = collabExp && !collabExpired && collabExp < in60
+                return `<tr class="hover:bg-gray-50 transition ${collabExpired?'bg-red-50':''}">
+                  <td class="px-4 py-2.5 font-medium text-gray-800">${escHtml(l.contractor_name||'')}</td>
+                  <td class="px-3 py-2.5"><span class="font-bold text-blue-700">${escHtml(l.state)}</span></td>
+                  <td class="px-3 py-2.5 text-gray-500 text-xs">${escHtml(l.license_type||'')} ${l.license_number?'#'+escHtml(l.license_number):''}</td>
+                  <td class="px-3 py-2.5 text-xs ${collabExpired?'text-red-600 font-bold':collabWarning?'text-orange-600 font-semibold':'text-gray-500'}">
+                    ${l.collab_expiry || '<span class="text-gray-300 italic">No date set</span>'}
+                    ${collabExpired?'<span class="ml-1 text-xs bg-red-100 text-red-700 px-1.5 py-0.5 rounded font-bold">EXPIRED</span>':''}
+                    ${collabWarning?'<span class="ml-1 text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded">⚠ Soon</span>':''}
+                  </td>
+                  <td class="px-3 py-2.5">${licStatusBadge(l)}</td>
+                  <td class="px-3 py-2.5 text-right">
+                    <button onclick="licOpenEditFromMatrix(${JSON.stringify(l).replace(/"/g,'&quot;')})"
+                      class="text-xs text-indigo-600 hover:text-indigo-800 px-2 py-1 rounded hover:bg-indigo-50 transition">
+                      <i class="fas fa-edit mr-1"></i>Edit
+                    </button>
+                  </td>
+                </tr>`
+              }).join('')}
+            </tbody>
+          </table>
+        </div>`).join('')}
+
+      ${noCollab.length > 0 ? `
+        <div class="bg-orange-50 rounded-xl border border-orange-200 p-4">
+          <div class="flex items-center gap-2 mb-3">
+            <i class="fas fa-exclamation-triangle text-orange-500"></i>
+            <span class="font-semibold text-orange-800 text-sm">NP/PA licenses with no collaborating physician on file (${noCollab.length})</span>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            ${noCollab.map(l => `
+              <span class="inline-flex items-center gap-1.5 bg-white border border-orange-200 rounded-lg px-2 py-1 text-xs font-medium text-orange-800 cursor-pointer hover:border-orange-400 transition"
+                onclick="licOpenEditFromMatrix(${JSON.stringify(l).replace(/"/g,'&quot;')})">
+                ${escHtml(l.contractor_name||'')} · ${escHtml(l.state)}
+                <i class="fas fa-edit text-orange-400 ml-1"></i>
+              </span>`).join('')}
+          </div>
+        </div>` : ''}
+    </div>
+  `
+}
+
+// ── By Provider view ──────────────────────────────────────────────────
+
+function licDrawByProvider(body) {
+  const today = new Date()
+  const in60  = new Date(today.getTime() + 60*24*60*60*1000)
+
+  let providers = licState.contractors
+  if (licState.filterProvider) providers = providers.filter(p => p.name.toLowerCase().includes(licState.filterProvider))
+
+  const licMap = {}
+  for (const l of licState.licenses) {
+    if (!licMap[l.contractor_id]) licMap[l.contractor_id] = []
+    licMap[l.contractor_id].push(l)
+  }
+
+  if (providers.length === 0) {
+    body.innerHTML = `<div class="text-center py-12 text-gray-400">No providers match your filter.</div>`
+    return
+  }
+
+  const licBadge = l => {
+    const isExp = l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < today)
+    const isWarn = !isExp && l.expiry_date && new Date(l.expiry_date) < in60
+    if (isExp)  return 'bg-red-100 text-red-700 border-red-200'
+    if (isWarn) return 'bg-orange-100 text-orange-700 border-orange-200'
+    if (l.status === 'pending') return 'bg-yellow-100 text-yellow-700 border-yellow-200'
+    return 'bg-green-100 text-green-700 border-green-200'
+  }
+
+  body.innerHTML = `
+    <div class="space-y-3">
+      ${providers.map(p => {
+        const lics = (licMap[p.id] || []).filter(l => !licState.filterStatus || l.status === licState.filterStatus)
+        if (licState.filterState) lics.length > 0  // handled below
+        const filteredLics = lics.filter(l => !licState.filterState || l.state === licState.filterState)
+        return `
+        <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+          <div class="flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 cursor-pointer"
+            onclick="this.parentElement.querySelector('.lic-prov-body').classList.toggle('hidden')">
+            <div class="flex items-center gap-3">
+              <div class="font-bold text-gray-800">${escHtml(p.name)}</div>
+              ${p.role_group ? `<span class="text-xs bg-gray-200 text-gray-600 px-1.5 py-0.5 rounded font-medium">${escHtml(p.role_group)}</span>` : ''}
+            </div>
+            <div class="flex items-center gap-3 text-sm text-gray-500">
+              <span class="text-green-600 font-semibold">${lics.filter(l=>l.status==='active').length} active</span>
+              ${lics.filter(l=>l.status==='expired'||(l.expiry_date&&new Date(l.expiry_date)<today)).length > 0 ?
+                `<span class="text-red-600 font-semibold">${lics.filter(l=>l.status==='expired'||(l.expiry_date&&new Date(l.expiry_date)<today)).length} expired</span>` : ''}
+              <span class="text-gray-400">${lics.length} total</span>
+              <i class="fas fa-chevron-down text-gray-300"></i>
+            </div>
+          </div>
+          <div class="lic-prov-body">
+            ${filteredLics.length === 0 ?
+              `<div class="px-4 py-3 text-sm text-gray-400 italic">No licenses${licState.filterState ? ` for ${licState.filterState}` : ''} on file.
+                <button onclick="licQuickAdd(${p.id},'')" class="text-blue-500 hover:underline ml-2">Add one →</button>
+              </div>` :
+              `<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 p-3">
+                ${filteredLics.map(l => {
+                  const isExp = l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < today)
+                  const isWarn = !isExp && l.expiry_date && new Date(l.expiry_date) < in60
+                  return `
+                  <div class="border ${licBadge(l)} rounded-lg p-2.5 cursor-pointer hover:shadow-sm transition"
+                    onclick="licOpenEditFromMatrix(${JSON.stringify(l).replace(/"/g,'&quot;')})">
+                    <div class="flex items-center justify-between mb-1">
+                      <span class="font-bold text-lg text-gray-800">${escHtml(l.state)}</span>
+                      <span class="text-xs px-1.5 py-0.5 rounded font-semibold border ${licBadge(l)}">${l.status}</span>
+                    </div>
+                    ${l.license_type ? `<div class="text-xs text-gray-500">${escHtml(l.license_type)}</div>` : ''}
+                    ${l.license_number ? `<div class="text-xs text-gray-400">#${escHtml(l.license_number)}</div>` : ''}
+                    ${l.expiry_date ? `<div class="text-xs ${isWarn?'text-orange-600 font-semibold':isExp?'text-red-600 font-bold':'text-gray-400'} mt-0.5">
+                      <i class="fas fa-calendar mr-0.5"></i>${l.expiry_date}${isExp?' ⚠':''}${isWarn?' ⏰':''}
+                    </div>` : ''}
+                    ${l.collab_physician ? `<div class="text-xs text-indigo-600 mt-0.5"><i class="fas fa-handshake mr-0.5"></i>${escHtml(l.collab_physician)}</div>` : ''}
+                  </div>`
+                }).join('')}
+                <div class="border border-dashed border-gray-200 rounded-lg p-2.5 flex items-center justify-center cursor-pointer hover:border-blue-300 hover:bg-blue-50 transition text-gray-300 hover:text-blue-400"
+                  onclick="licQuickAdd(${p.id},'')">
+                  <i class="fas fa-plus text-lg"></i>
+                </div>
+              </div>`
+            }
+          </div>
+        </div>`
+      }).join('')}
+    </div>
+  `
+}
+
+// ── Modal: edit license from matrix / provider view ───────────────────
+
+function licOpenEditFromMatrix(lic) {
+  licShowModal({
+    mode: 'edit',
+    lic,
+    contractorId: lic.contractor_id,
+    contractorName: lic.contractor_name || '',
+    onSave: async (formData) => {
+      const endpoint = state.role === 'license_editor'
+        ? `/api/license-editor/licenses/${lic.id}`
+        : `/api/admin/licenses/${lic.id}`
+      await api(endpoint, { method: 'PUT', body: JSON.stringify(formData) })
+      showToast('License updated', 'success')
+      await renderLicDashboard()
+    },
+    onDelete: async () => {
+      if (!confirm(`Delete ${lic.state} license for ${lic.contractor_name}?`)) return
+      const endpoint = state.role === 'license_editor'
+        ? `/api/license-editor/licenses/${lic.id}`
+        : `/api/admin/licenses/${lic.id}`
+      await api(endpoint, { method: 'DELETE' })
+      showToast('License deleted', 'success')
+      await renderLicDashboard()
+    }
+  })
+}
+
+function licQuickAdd(contractorId, prefilledState) {
+  const provider = licState.contractors.find(c => c.id === contractorId)
+  licShowModal({
+    mode: 'add',
+    contractorId,
+    contractorName: provider?.name || '',
+    prefilledState,
+    onSave: async (formData) => {
+      const endpoint = state.role === 'license_editor'
+        ? `/api/license-editor/contractors/${contractorId}/licenses`
+        : `/api/admin/contractors/${contractorId}/licenses`
+      await api(endpoint, { method: 'POST', body: JSON.stringify(formData) })
+      showToast('License added', 'success')
+      await renderLicDashboard()
+    }
+  })
+}
+
+function licShowModal({ mode, lic, contractorId, contractorName, prefilledState, onSave, onDelete }) {
+  let modal = $('licModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'licModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  const isEdit = mode === 'edit'
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div>
+          <h3 class="font-bold text-gray-800">${isEdit ? 'Edit License' : 'Add License'}</h3>
+          <p class="text-xs text-gray-400 mt-0.5">${escHtml(contractorName)}</p>
+        </div>
+        <button onclick="$('licModal').remove()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div class="grid grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+            <select id="licMState" class="w-full text-sm">
+              <option value="">Select…</option>
+              ${US_STATES_ABBR.map(s => `<option value="${s}" ${(lic?.state||prefilledState)===s?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+            <select id="licMStatus" class="w-full text-sm">
+              <option value="active"   ${(!lic||lic.status==='active'  )?'selected':''}>Active</option>
+              <option value="pending"  ${lic?.status==='pending' ?'selected':''}>Pending</option>
+              <option value="expired"  ${lic?.status==='expired' ?'selected':''}>Expired</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+            <select id="licMType" class="w-full text-sm">
+              <option value="">Select…</option>
+              ${['MD','DO','NP','PA','APRN','CRNA','CNM','LCSW','Other'].map(t => `<option value="${t}" ${lic?.license_type===t?'selected':''}>${t}</option>`).join('')}
+            </select>
+          </div>
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">License Number</label>
+            <input id="licMNum" type="text" placeholder="e.g. AP123456" value="${escHtml(lic?.license_number||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Expiration Date</label>
+            <input id="licMExpiry" type="date" value="${lic?.expiry_date||''}" class="w-full text-sm"/>
+          </div>
+        </div>
+        <div class="border-t border-gray-100 pt-4">
+          <p class="text-xs font-semibold text-indigo-700 mb-2 flex items-center gap-1.5">
+            <i class="fas fa-handshake"></i> Collaborating Physician (NP/PA)
+            <span class="font-normal text-gray-400">— required for states that mandate physician oversight</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Collaborating Physician Name</label>
+              <input id="licMCollab" type="text" placeholder="e.g. Dr. Jane Smith, MD" value="${escHtml(lic?.collab_physician||'')}" class="w-full text-sm"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiry</label>
+              <input id="licMCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
+            </div>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+          <input id="licMNotes" type="text" placeholder="Optional notes" value="${escHtml(lic?.notes||'')}" class="w-full text-sm"/>
+        </div>
+        <div id="licMError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+        <div class="flex gap-3 pt-1">
+          ${isEdit && onDelete ? `<button onclick="licModalDelete()" class="px-3 py-2 rounded-xl border border-red-200 text-red-500 text-sm hover:bg-red-50 transition"><i class="fas fa-trash"></i></button>` : ''}
+          <button onclick="$('licModal').remove()" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+          <button onclick="licModalSave()" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+            ${isEdit ? 'Save Changes' : 'Add License'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `
+  modal.classList.remove('hidden')
+
+  // Store callbacks on modal element
+  modal._onSave = onSave
+  if (onDelete) modal._onDelete = onDelete
+}
+
+async function licModalSave() {
+  const modal = $('licModal')
+  const errEl = $('licMError')
+  errEl.classList.add('hidden')
+  const state_val = $('licMState').value
+  if (!state_val) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  const formData = {
+    state:           state_val,
+    status:          $('licMStatus').value,
+    license_type:    $('licMType').value,
+    license_number:  $('licMNum').value.trim(),
+    expiry_date:     $('licMExpiry').value,
+    collab_physician:$('licMCollab').value.trim(),
+    collab_expiry:   $('licMCollabExp').value,
+    notes:           $('licMNotes').value.trim(),
+  }
+  try {
+    await modal._onSave(formData)
+    modal.remove()
+  } catch(e) {
+    errEl.textContent = e.message || 'Save failed'
+    errEl.classList.remove('hidden')
+  }
+}
+
+async function licModalDelete() {
+  const modal = $('licModal')
+  try {
+    await modal._onDelete()
+    modal.remove()
+  } catch(e) {
+    $('licMError').textContent = e.message || 'Delete failed'
+    $('licMError').classList.remove('hidden')
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════
+// LICENSE EDITOR PORTAL  (license_editor role)
+// Simple: pick a provider → view/add/edit/delete their licenses
+// ════════════════════════════════════════════════════════════════════
+
+const leState = {
+  contractors: [],
+  selectedId: null,
+  licenses: [],
+  search: '',
+}
+
+function licDrawEditPortal() {
+  const mc = $('mainContent')
+  leState.contractors = licState.contractors
+  mc.innerHTML = `
+    <div class="max-w-4xl">
+      <div class="mb-5">
+        <h2 class="text-lg font-bold text-gray-800 mb-1">License Editor</h2>
+        <p class="text-sm text-gray-400">Select a provider to view and edit their state licenses. Use the matrix view to see everyone at a glance.</p>
+      </div>
+
+      <!-- Provider picker -->
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm mb-5 p-4">
+        <div class="flex gap-3 items-center mb-3">
+          <input id="leSearch" type="text" placeholder="Search providers…"
+            oninput="leState.search=this.value.toLowerCase();leDrawProviderList()"
+            class="border border-gray-200 rounded-lg px-3 py-2 text-sm w-64 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          <span class="text-xs text-gray-400">${leState.contractors.length} providers</span>
+        </div>
+        <div id="leProviderList" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 max-h-52 overflow-y-auto"></div>
+      </div>
+
+      <!-- License editor area -->
+      <div id="leEditorArea">
+        <div class="bg-white rounded-xl border border-dashed border-gray-200 p-10 text-center text-gray-400">
+          <i class="fas fa-arrow-up text-2xl mb-2"></i>
+          <p class="text-sm">Select a provider above to manage their licenses</p>
+        </div>
+      </div>
+    </div>
+  `
+  leDrawProviderList()
+}
+
+function leDrawProviderList() {
+  const list = $('leProviderList')
+  if (!list) return
+  const q = leState.search
+  const filtered = leState.contractors.filter(c => !q || c.name.toLowerCase().includes(q))
+  list.innerHTML = filtered.map(c => `
+    <button onclick="leSelectProvider(${c.id})" id="leBtn_${c.id}"
+      class="flex items-center gap-2 p-2.5 rounded-lg border text-left transition ${leState.selectedId===c.id ? 'border-blue-500 bg-blue-50 text-blue-800' : 'border-gray-100 hover:border-blue-200 hover:bg-blue-50 text-gray-700'}">
+      <div class="w-7 h-7 rounded-full bg-gradient-to-br from-blue-400 to-indigo-500 flex items-center justify-center text-white text-xs font-bold flex-shrink-0">
+        ${escHtml(c.name.charAt(0))}
+      </div>
+      <div class="min-w-0">
+        <div class="font-semibold text-sm truncate">${escHtml(c.name)}</div>
+        ${c.role_group ? `<div class="text-xs text-gray-400">${escHtml(c.role_group)}</div>` : ''}
+      </div>
+    </button>
+  `).join('')
+}
+
+async function leSelectProvider(id) {
+  leState.selectedId = id
+  leDrawProviderList()
+  const area = $('leEditorArea')
+  area.innerHTML = `<div class="flex items-center justify-center h-24"><div class="spinner"></div></div>`
+  try {
+    const endpoint = state.role === 'license_editor'
+      ? `/api/license-editor/contractors/${id}/licenses`
+      : `/api/admin/contractors/${id}/licenses`
+    const lics = await api(endpoint)
+    leState.licenses = lics || []
+    leDrawEditorArea(id)
+  } catch(e) {
+    area.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+function leDrawEditorArea(contractorId) {
+  const area = $('leEditorArea')
+  const provider = leState.contractors.find(c => c.id === contractorId)
+  const lics = leState.licenses
+  const today = new Date()
+  const in60  = new Date(today.getTime() + 60*24*60*60*1000)
+
+  const licBadge = l => {
+    const isExp = l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < today)
+    const isWarn = !isExp && l.expiry_date && new Date(l.expiry_date) < in60
+    if (isExp)  return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-red-100 text-red-700">Expired</span>`
+    if (isWarn) return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-orange-100 text-orange-700"><i class="fas fa-clock mr-0.5"></i>Expiring</span>`
+    if (l.status === 'pending') return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-yellow-100 text-yellow-700">Pending</span>`
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-bold bg-green-100 text-green-700">Active</span>`
+  }
+
+  area.innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-gray-100">
+        <div>
+          <h3 class="font-bold text-gray-800">${escHtml(provider?.name||'Provider')}</h3>
+          <p class="text-xs text-gray-400 mt-0.5">${lics.length} license${lics.length!==1?'s':''} on file</p>
+        </div>
+        <button onclick="leAddLicense(${contractorId})" class="btn-primary px-3 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
+          <i class="fas fa-plus"></i> Add License
+        </button>
+      </div>
+
+      ${lics.length === 0 ? `
+        <div class="p-10 text-center text-gray-400">
+          <i class="fas fa-map-marked-alt text-3xl mb-3"></i>
+          <p class="text-sm mb-3">No licenses on file for this provider.</p>
+          <button onclick="leAddLicense(${contractorId})" class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+            <i class="fas fa-plus mr-2"></i>Add First License
+          </button>
+        </div>` : `
+        <div class="divide-y divide-gray-50">
+          ${lics.map(l => {
+            const isExp = l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < today)
+            const isWarn = !isExp && l.expiry_date && new Date(l.expiry_date) < in60
+            return `
+            <div class="flex items-center gap-3 px-4 py-3 hover:bg-gray-50 transition group ${isExp?'bg-red-50':isWarn?'bg-orange-50':''}">
+              <div class="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 font-bold text-sm ${isExp?'bg-red-100 text-red-600':isWarn?'bg-orange-100 text-orange-600':l.status==='pending'?'bg-yellow-100 text-yellow-700':'bg-green-100 text-green-700'}">
+                ${escHtml(l.state)}
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  ${licBadge(l)}
+                  ${l.license_type ? `<span class="text-xs bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded font-medium">${escHtml(l.license_type)}</span>` : ''}
+                </div>
+                <div class="flex items-center gap-3 mt-0.5 text-xs text-gray-400 flex-wrap">
+                  ${l.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(l.license_number)}</span>` : ''}
+                  ${l.expiry_date ? `<span class="${isWarn?'text-orange-600 font-semibold':isExp?'text-red-600 font-bold':''}"><i class="fas fa-calendar mr-0.5"></i>${l.expiry_date}</span>` : '<span class="italic">No expiry date</span>'}
+                  ${l.collab_physician ? `<span class="text-indigo-500"><i class="fas fa-handshake mr-0.5"></i>${escHtml(l.collab_physician)}</span>` : ''}
+                </div>
+              </div>
+              <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition flex-shrink-0">
+                <button onclick="leEditLicense(${JSON.stringify(l).replace(/"/g,'&quot;')}, ${contractorId})"
+                  class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-50 text-gray-300 hover:text-blue-600 transition">
+                  <i class="fas fa-pencil text-sm"></i>
+                </button>
+                <button onclick="leDeleteLicense(${l.id}, ${contractorId})"
+                  class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500 transition">
+                  <i class="fas fa-trash text-sm"></i>
+                </button>
+              </div>
+            </div>`
+          }).join('')}
+        </div>`}
+    </div>
+  `
+}
+
+function leAddLicense(contractorId) {
+  const provider = leState.contractors.find(c => c.id === contractorId)
+  licShowModal({
+    mode: 'add',
+    contractorId,
+    contractorName: provider?.name || '',
+    prefilledState: '',
+    onSave: async (formData) => {
+      const endpoint = state.role === 'license_editor'
+        ? `/api/license-editor/contractors/${contractorId}/licenses`
+        : `/api/admin/contractors/${contractorId}/licenses`
+      await api(endpoint, { method: 'POST', body: JSON.stringify(formData) })
+      showToast('License added', 'success')
+      await leSelectProvider(contractorId)
+    }
+  })
+}
+
+function leEditLicense(lic, contractorId) {
+  const provider = leState.contractors.find(c => c.id === contractorId)
+  licShowModal({
+    mode: 'edit',
+    lic,
+    contractorId,
+    contractorName: provider?.name || '',
+    onSave: async (formData) => {
+      const endpoint = state.role === 'license_editor'
+        ? `/api/license-editor/licenses/${lic.id}`
+        : `/api/admin/licenses/${lic.id}`
+      await api(endpoint, { method: 'PUT', body: JSON.stringify(formData) })
+      showToast('License updated', 'success')
+      await leSelectProvider(contractorId)
+    },
+    onDelete: async () => leDeleteLicense(lic.id, contractorId),
+  })
+}
+
+async function leDeleteLicense(licId, contractorId) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  const endpoint = state.role === 'license_editor'
+    ? `/api/license-editor/licenses/${licId}`
+    : `/api/admin/licenses/${licId}`
+  await api(endpoint, { method: 'DELETE' })
+  showToast('License deleted', 'success')
+  await leSelectProvider(contractorId)
+}
+
+// ════════════════════════════════════════════════════
+// LICENSING DASHBOARD — admin + license_editor views
+// ════════════════════════════════════════════════════
+
+const licState = {
+  contractors: [],
+  licenses: [],
+  view: 'matrix',       // 'matrix' | 'collab' | 'provider'
+  filterStatus: 'all',  // 'all'|'active'|'pending'|'expired'
+  filterProvider: '',
+  filterState: '',
+}
+
+// ── Entry points ──────────────────────────────────────────────────
+async function renderLicDashboard() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/licensing/dashboard')
+    licState.contractors = data.contractors || []
+    licState.licenses    = data.licenses    || []
+    licDrawDashboard()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+async function renderLicenseEditorPortal() {
+  state.currentPage = 'lic_edit'
+  const navEl = $('nav_lic_edit'); if (navEl) navEl.classList.add('active')
+  buildNav()
+  navigate('lic_edit')
+}
+
+// ── Main dashboard shell ──────────────────────────────────────────
+function licDrawDashboard() {
+  const mc = $('mainContent')
+
+  // KPI counts
+  const all      = licState.licenses
+  const active   = all.filter(l => l.status === 'active')
+  const pending  = all.filter(l => l.status === 'pending')
+  const expired  = all.filter(l => l.status === 'expired')
+  const expiring = active.filter(l => licIsExpiringSoon(l.expiry_date))
+  const withCollab = all.filter(l => l.collab_physician && l.collab_physician.trim())
+  const collabExpiring = withCollab.filter(l => licIsExpiringSoon(l.collab_expiry))
+
+  mc.innerHTML = `
+  <!-- KPI bar -->
+  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-gray-800">${licState.contractors.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Providers</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-gray-800">${all.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Total Licenses</div>
+    </div>
+    <div class="bg-white rounded-xl border border-green-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-green-600">${active.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Active</div>
+    </div>
+    <div class="bg-white rounded-xl border border-yellow-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-yellow-600">${pending.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Pending</div>
+    </div>
+    <div class="bg-white rounded-xl border ${expired.length > 0 ? 'border-red-300 bg-red-50' : 'border-gray-200'} p-3 shadow-sm">
+      <div class="text-2xl font-bold ${expired.length > 0 ? 'text-red-600' : 'text-gray-400'}">${expired.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Expired</div>
+    </div>
+    <div class="bg-white rounded-xl border ${expiring.length > 0 ? 'border-orange-300 bg-orange-50' : 'border-gray-200'} p-3 shadow-sm">
+      <div class="text-2xl font-bold ${expiring.length > 0 ? 'text-orange-500' : 'text-gray-400'}">${expiring.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Exp. ≤60 days</div>
+    </div>
+  </div>
+
+  <!-- Alerts -->
+  ${expiring.length > 0 || expired.length > 0 || collabExpiring.length > 0 ? `
+  <div class="mb-4 space-y-2">
+    ${expired.length > 0 ? `
+    <div class="p-3 rounded-xl bg-red-50 border border-red-200 flex items-start gap-2 text-sm">
+      <i class="fas fa-times-circle text-red-500 mt-0.5 flex-shrink-0"></i>
+      <div><span class="font-semibold text-red-800">${expired.length} expired license${expired.length > 1 ? 's' : ''}:</span>
+      <span class="text-red-600 ml-1">${expired.slice(0,5).map(l => l.contractor_name + ' / ' + l.state).join(' · ')}${expired.length > 5 ? ' …' : ''}</span></div>
+    </div>` : ''}
+    ${expiring.length > 0 ? `
+    <div class="p-3 rounded-xl bg-orange-50 border border-orange-200 flex items-start gap-2 text-sm">
+      <i class="fas fa-exclamation-triangle text-orange-500 mt-0.5 flex-shrink-0"></i>
+      <div><span class="font-semibold text-orange-800">${expiring.length} license${expiring.length > 1 ? 's' : ''} expiring within 60 days:</span>
+      <span class="text-orange-700 ml-1">${expiring.slice(0,5).map(l => l.contractor_name + ' / ' + l.state + ' (' + l.expiry_date + ')').join(' · ')}${expiring.length > 5 ? ' …' : ''}</span></div>
+    </div>` : ''}
+    ${collabExpiring.length > 0 ? `
+    <div class="p-3 rounded-xl bg-purple-50 border border-purple-200 flex items-start gap-2 text-sm">
+      <i class="fas fa-user-md text-purple-500 mt-0.5 flex-shrink-0"></i>
+      <div><span class="font-semibold text-purple-800">${collabExpiring.length} collab agreement${collabExpiring.length > 1 ? 's' : ''} expiring within 60 days:</span>
+      <span class="text-purple-700 ml-1">${collabExpiring.slice(0,4).map(l => l.contractor_name + ' / ' + l.state).join(' · ')}</span></div>
+    </div>` : ''}
+  </div>` : ''}
+
+  <!-- View tabs + filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm mb-4">
+    <div class="flex items-center justify-between px-4 pt-3 border-b border-gray-100 flex-wrap gap-2">
+      <div class="flex gap-0">
+        ${['matrix','collab','provider'].map(v => `
+          <button onclick="licSetView('${v}')" id="licTab_${v}"
+            class="px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap
+            ${licState.view === v ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+            ${v === 'matrix' ? '<i class="fas fa-th mr-1.5"></i>State Matrix' : v === 'collab' ? '<i class="fas fa-user-md mr-1.5"></i>Collab Agreements' : '<i class="fas fa-list mr-1.5"></i>By Provider'}
+          </button>`).join('')}
+      </div>
+      <div class="flex items-center gap-2 pb-2 flex-wrap">
+        <select id="licFilterStatus" onchange="licState.filterStatus=this.value;licRefreshView()"
+          class="text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+          <option value="all">All statuses</option>
+          <option value="active">Active only</option>
+          <option value="pending">Pending only</option>
+          <option value="expired">Expired only</option>
+        </select>
+        <input id="licFilterProvider" type="text" placeholder="Filter provider…" oninput="licState.filterProvider=this.value;licRefreshView()"
+          class="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-36 focus:ring-2 focus:ring-blue-500 outline-none">
+        <input id="licFilterState" type="text" placeholder="Filter state…" oninput="licState.filterState=this.value;licRefreshView()"
+          class="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-24 focus:ring-2 focus:ring-blue-500 outline-none">
+        ${(state.role === 'admin' || state.role === 'license_editor') ? `
+        <button onclick="navigate('lic_edit')"
+          class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-edit"></i> Edit Licenses
+        </button>` : ''}
+      </div>
+    </div>
+    <div id="licViewBody" class="overflow-auto" style="max-height:calc(100vh - 340px)">
+    </div>
+  </div>
+  `
+  licRefreshView()
+}
+
+// ── View router ────────────────────────────────────────────────────
+function licSetView(v) {
+  licState.view = v
+  ;['matrix','collab','provider'].forEach(tab => {
+    const el = $('licTab_' + tab)
+    if (!el) return
+    if (tab === v) {
+      el.className = 'px-4 py-2.5 text-sm font-semibold border-b-2 border-blue-600 text-blue-700 transition-colors whitespace-nowrap'
+    } else {
+      el.className = 'px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors whitespace-nowrap'
+    }
+  })
+  licRefreshView()
+}
+
+function licRefreshView() {
+  if (licState.view === 'matrix')   licDrawMatrix()
+  else if (licState.view === 'collab')  licDrawCollab()
+  else licDrawByProvider()
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+function licIsExpiringSoon(dateStr) {
+  if (!dateStr) return false
+  const d = new Date(dateStr), now = new Date()
+  return d > now && d < new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000)
+}
+function licIsExpired(l) {
+  return l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < new Date())
+}
+function licStatusColor(l) {
+  if (licIsExpired(l))                  return { bg: 'bg-red-500',    text: 'Exp',   ring: 'ring-red-300' }
+  if (l.status === 'pending')           return { bg: 'bg-yellow-400', text: 'Pend',  ring: 'ring-yellow-300' }
+  if (licIsExpiringSoon(l.expiry_date)) return { bg: 'bg-orange-400', text: '!Exp',  ring: 'ring-orange-300' }
+  return                                       { bg: 'bg-green-500',  text: 'Act',   ring: 'ring-green-300' }
+}
+function licFilteredLicenses() {
+  return licState.licenses.filter(l => {
+    if (licState.filterStatus !== 'all' && l.status !== licState.filterStatus) return false
+    if (licState.filterProvider && !l.contractor_name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
+    if (licState.filterState && !l.state.toLowerCase().includes(licState.filterState.toLowerCase())) return false
+    return true
+  })
+}
+
+// ── Matrix View ────────────────────────────────────────────────────
+function licDrawMatrix() {
+  const body = $('licViewBody')
+  if (!body) return
+
+  const filtered = licFilteredLicenses()
+  const providers = licState.contractors.filter(ct => {
+    if (licState.filterProvider && !ct.name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
+    return true
+  })
+
+  // Collect all unique states from filtered licenses
+  const stateSet = new Set(filtered.map(l => l.state))
+  const states = [...stateSet].sort()
+
+  if (states.length === 0 || providers.length === 0) {
+    body.innerHTML = `<div class="p-10 text-center text-gray-400"><i class="fas fa-map text-4xl mb-3 block"></i>No licenses match current filters.</div>`
+    return
+  }
+
+  // Build lookup: contractor_id + state → license row
+  const licMap = {}
+  for (const l of filtered) {
+    licMap[l.contractor_id + '_' + l.state] = l
+  }
+
+  const cellHtml = (lic) => {
+    if (!lic) return `<td class="p-0 border-r border-b border-gray-100"><div class="w-10 h-8 mx-auto"></div></td>`
+    const c = licStatusColor(lic)
+    const hasCollab = lic.collab_physician && lic.collab_physician.trim()
+    const collabExp = hasCollab && licIsExpiringSoon(lic.collab_expiry)
+    const tooltipParts = [
+      lic.license_type || '',
+      lic.license_number ? '#' + lic.license_number : '',
+      lic.expiry_date ? 'Exp: ' + lic.expiry_date : '',
+      hasCollab ? 'Collab: ' + lic.collab_physician : '',
+      lic.notes ? lic.notes : '',
+    ].filter(Boolean).join(' | ')
+    return `<td class="p-0 border-r border-b border-gray-100" title="${escHtml(tooltipParts)}">
+      <div class="w-10 h-8 mx-auto flex items-center justify-center">
+        <div class="w-7 h-6 rounded flex items-center justify-center text-white text-[9px] font-bold relative cursor-pointer
+          ${c.bg} ${hasCollab ? 'ring-2 ring-purple-400 ring-offset-1' : ''} ${collabExp ? 'ring-2 ring-orange-400' : ''}
+          hover:scale-110 transition-transform shadow-sm"
+          onclick="licShowDetail(${lic.id})">
+          ${c.text}
+          ${hasCollab ? '<span class="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-purple-500 border border-white text-[6px] flex items-center justify-center">C</span>' : ''}
+        </div>
+      </div>
+    </td>`
+  }
+
+  body.innerHTML = `
+  <div class="p-2">
+    <!-- Legend -->
+    <div class="flex items-center gap-4 mb-3 flex-wrap px-2 text-xs text-gray-500">
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-green-500 inline-block"></span>Active</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-orange-400 inline-block"></span>Expiring ≤60d</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-yellow-400 inline-block"></span>Pending</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-red-500 inline-block"></span>Expired</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-green-500 ring-2 ring-purple-400 ring-offset-1 inline-block"></span><span class="relative inline-block w-2.5 h-2.5 rounded-full bg-purple-500 border border-white -ml-2.5 mr-0.5"></span>Has Collab Agreement</span>
+    </div>
+    <div class="overflow-x-auto">
+      <table class="border-collapse text-xs">
+        <thead>
+          <tr>
+            <th class="sticky left-0 bg-gray-50 z-10 border-r border-b border-gray-200 px-3 py-2 text-left font-semibold text-gray-600 min-w-[220px]">Provider</th>
+            ${states.map(s => `<th class="border-r border-b border-gray-200 px-1 py-2 font-semibold text-gray-500 text-center w-10">${s}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${providers.map(ct => {
+            // Check if this provider has any license in the filtered set
+            const hasAny = states.some(s => licMap[ct.id + '_' + s])
+            if (!hasAny && licState.filterProvider === '' && licState.filterStatus === 'all') {
+              return '' // skip providers with no licenses in view only if no filter
+            }
+            const typeLabel = ct.role_group || ct.specialty || ''
+            return `<tr class="hover:bg-blue-50 transition-colors">
+              <td class="sticky left-0 bg-white border-r border-b border-gray-200 px-3 py-1.5 font-semibold text-gray-800 text-xs whitespace-nowrap z-10">
+                ${escHtml(ct.name)}
+                ${typeLabel ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500">${escHtml(typeLabel)}</span>` : ''}
+                <span class="block text-[10px] text-gray-400 font-normal">${states.filter(s => licMap[ct.id + '_' + s]).length} licensed state${states.filter(s => licMap[ct.id + '_' + s]).length !== 1 ? 's' : ''}</span>
+              </td>
+              ${states.map(s => cellHtml(licMap[ct.id + '_' + s])).join('')}
+            </tr>`
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`
+}
+
+// ── Collab Agreements View ─────────────────────────────────────────
+function licDrawCollab() {
+  const body = $('licViewBody')
+  if (!body) return
+
+  const filtered = licFilteredLicenses().filter(l => l.collab_physician && l.collab_physician.trim())
+
+  if (filtered.length === 0) {
+    body.innerHTML = `<div class="p-10 text-center text-gray-400"><i class="fas fa-user-md text-4xl mb-3 block"></i><p class="font-medium mb-1">No collaborating physician agreements on file.</p><p class="text-sm">Add collab agreements when editing a license.</p></div>`
+    return
+  }
+
+  // Group by collaborating physician
+  const byCollab = {}
+  for (const l of filtered) {
+    const key = l.collab_physician.trim()
+    if (!byCollab[key]) byCollab[key] = []
+    byCollab[key].push(l)
+  }
+
+  body.innerHTML = `<div class="p-4 space-y-4">
+    ${Object.entries(byCollab).sort((a,b) => a[0].localeCompare(b[0])).map(([physician, lics]) => {
+      const expiring = lics.filter(l => licIsExpiringSoon(l.collab_expiry))
+      const expired  = lics.filter(l => l.collab_expiry && new Date(l.collab_expiry) < new Date())
+      return `
+      <div class="bg-white rounded-xl border ${expired.length > 0 ? 'border-red-200' : expiring.length > 0 ? 'border-orange-200' : 'border-gray-200'} shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 ${expired.length > 0 ? 'bg-red-50' : expiring.length > 0 ? 'bg-orange-50' : 'bg-purple-50'} border-b border-gray-100">
+          <div class="flex items-center gap-2">
+            <i class="fas fa-user-md ${expired.length > 0 ? 'text-red-500' : expiring.length > 0 ? 'text-orange-500' : 'text-purple-600'}"></i>
+            <span class="font-bold text-gray-800">${escHtml(physician)}</span>
+            ${expired.length > 0 ? '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">Agreement Expired</span>' : expiring.length > 0 ? '<span class="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-bold">Expiring Soon</span>' : ''}
+          </div>
+          <span class="text-xs text-gray-500 font-medium">${lics.length} provider${lics.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="divide-y divide-gray-50">
+          ${lics.map(l => {
+            const collabExpSoon = licIsExpiringSoon(l.collab_expiry)
+            const collabExpired = l.collab_expiry && new Date(l.collab_expiry) < new Date()
+            const licC = licStatusColor(l)
+            return `<div class="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50 transition-colors">
+              <div class="w-8 h-6 rounded flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0 ${licC.bg}">${l.state}</div>
+              <div class="flex-1 min-w-0">
+                <span class="font-medium text-sm text-gray-800">${escHtml(l.contractor_name)}</span>
+                ${l.license_type ? `<span class="ml-1.5 text-xs text-gray-400">${escHtml(l.license_type)}</span>` : ''}
+                ${l.expiry_date ? `<span class="ml-2 text-xs ${licC.bg === 'bg-red-500' ? 'text-red-500 font-semibold' : 'text-gray-400'}">Lic exp: ${l.expiry_date}</span>` : ''}
+              </div>
+              <div class="text-right flex-shrink-0">
+                <div class="text-xs font-semibold ${collabExpired ? 'text-red-600' : collabExpSoon ? 'text-orange-600' : 'text-gray-600'}">
+                  ${l.collab_expiry ? (collabExpired ? '⚠ Expired ' : collabExpSoon ? '⏰ ' : '') + l.collab_expiry : '<span class="text-gray-300 italic">No expiry set</span>'}
+                </div>
+              </div>
+              ${(state.role === 'admin' || state.role === 'license_editor') ? `
+              <button onclick="licEditEntry(${l.id})" class="text-gray-300 hover:text-blue-500 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 transition flex-shrink-0">
+                <i class="fas fa-pencil text-xs"></i>
+              </button>` : ''}
+            </div>`
+          }).join('')}
+        </div>
+      </div>`
+    }).join('')}
+  </div>`
+}
+
+// ── By Provider View ───────────────────────────────────────────────
+function licDrawByProvider() {
+  const body = $('licViewBody')
+  if (!body) return
+
+  const filtered = licFilteredLicenses()
+  const providers = licState.contractors.filter(ct => {
+    if (licState.filterProvider && !ct.name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
+    return filtered.some(l => l.contractor_id === ct.id)
+  })
+
+  if (providers.length === 0) {
+    body.innerHTML = `<div class="p-10 text-center text-gray-400"><i class="fas fa-users text-4xl mb-3 block"></i>No providers match current filters.</div>`
+    return
+  }
+
+  body.innerHTML = `<div class="divide-y divide-gray-100">
+    ${providers.map(ct => {
+      const ctLics = filtered.filter(l => l.contractor_id === ct.id)
+      if (ctLics.length === 0) return ''
+      const expCt = ctLics.filter(l => licIsExpiringSoon(l.expiry_date))
+      const expiredCt = ctLics.filter(l => licIsExpired(l))
+      return `
+      <details class="group" open>
+        <summary class="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors list-none">
+          <i class="fas fa-chevron-right group-open:rotate-90 transition-transform text-gray-400 text-xs w-3 flex-shrink-0"></i>
+          <div class="flex-1 flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-gray-800">${escHtml(ct.name)}</span>
+            ${ct.role_group ? `<span class="px-2 py-0.5 rounded text-xs font-bold bg-gray-100 text-gray-500">${escHtml(ct.role_group)}</span>` : ''}
+            <span class="text-xs text-gray-400">${ctLics.length} state${ctLics.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            ${expiredCt.length > 0 ? `<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">${expiredCt.length} expired</span>` : ''}
+            ${expCt.length > 0 ? `<span class="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-bold">${expCt.length} expiring</span>` : ''}
+          </div>
+          ${(state.role === 'admin' || state.role === 'license_editor') ? `
+          <button onclick="event.preventDefault();event.stopPropagation();licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+            class="text-xs px-2 py-1 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition font-medium flex-shrink-0">
+            <i class="fas fa-plus mr-1"></i>Add
+          </button>` : ''}
+        </summary>
+        <div class="px-4 pb-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            ${ctLics.map(l => {
+              const c = licStatusColor(l)
+              const hasCollab = l.collab_physician && l.collab_physician.trim()
+              const collabExp = hasCollab && licIsExpiringSoon(l.collab_expiry)
+              return `
+              <div class="flex items-start gap-2.5 p-3 rounded-lg border ${licIsExpired(l) ? 'border-red-200 bg-red-50' : licIsExpiringSoon(l.expiry_date) ? 'border-orange-200 bg-orange-50' : 'border-gray-200 bg-white'} hover:shadow-sm transition-shadow">
+                <div class="w-10 h-8 rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 ${c.bg} shadow-sm">${l.state}</div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="font-semibold text-sm text-gray-800">${l.state}</span>
+                    <span class="px-1.5 py-0.5 rounded text-xs font-bold ${licIsExpired(l) ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : licIsExpiringSoon(l.expiry_date) ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}">${l.status}</span>
+                  </div>
+                  ${l.license_type ? `<div class="text-xs text-gray-500 mt-0.5">${escHtml(l.license_type)}</div>` : ''}
+                  ${l.license_number ? `<div class="text-xs text-gray-400"><i class="fas fa-hashtag text-[10px] mr-0.5"></i>${escHtml(l.license_number)}</div>` : ''}
+                  ${l.expiry_date ? `<div class="text-xs ${licIsExpiringSoon(l.expiry_date) ? 'text-orange-600 font-semibold' : 'text-gray-400'}"><i class="fas fa-calendar text-[10px] mr-0.5"></i>${l.expiry_date}</div>` : ''}
+                  ${hasCollab ? `<div class="text-xs text-purple-600 mt-1 flex items-center gap-1">
+                    <i class="fas fa-user-md text-[10px]"></i>
+                    <span class="truncate">${escHtml(l.collab_physician)}</span>
+                    ${collabExp ? '<span class="text-orange-500 font-bold">⏰</span>' : ''}
+                  </div>` : ''}
+                </div>
+                ${(state.role === 'admin' || state.role === 'license_editor') ? `
+                <button onclick="licEditEntry(${l.id})" class="text-gray-300 hover:text-blue-500 w-7 h-7 flex items-center justify-center rounded hover:bg-blue-50 transition flex-shrink-0 mt-0.5">
+                  <i class="fas fa-pencil text-xs"></i>
+                </button>` : ''}
+              </div>`
+            }).join('')}
+          </div>
+        </div>
+      </details>`
+    }).join('')}
+  </div>`
+}
+
+// ── License detail tooltip / inline view ──────────────────────────
+function licShowDetail(licId) {
+  const lic = licState.licenses.find(l => l.id === licId)
+  if (!lic) return
+  // Open edit if can edit, otherwise show a simple toast-style info
+  if (state.role === 'admin' || state.role === 'license_editor') {
+    licEditEntry(licId)
+  } else {
+    showToast(`${lic.contractor_name} / ${lic.state}: ${lic.status}${lic.expiry_date ? ', exp ' + lic.expiry_date : ''}`, 'info')
+  }
+}
+
+// ── Inline edit/add modal ──────────────────────────────────────────
+function licAddForProvider(contractorId, contractorName, roleGroup) {
+  licShowModal(null, contractorId, contractorName, roleGroup)
+}
+function licEditEntry(licId) {
+  const lic = licState.licenses.find(l => l.id === licId)
+  if (!lic) return
+  licShowModal(lic, lic.contractor_id, lic.contractor_name, lic.role_group || '')
+}
+function licShowModal(lic, contractorId, contractorName, roleGroup) {
+  const isEdit = !!lic
+  let modal = $('licModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'licModal'
+    modal.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  const isAdmin = state.role === 'admin' || state.role === 'license_editor'
+  const apiBase = isAdmin ? '' : '/api/provider'
+
+  modal.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <div>
+        <h3 class="font-bold text-gray-800">${isEdit ? 'Edit License' : 'Add License'}</h3>
+        <p class="text-xs text-gray-400 mt-0.5">${escHtml(contractorName)}${roleGroup ? ' · ' + escHtml(roleGroup) : ''}</p>
+      </div>
+      <button onclick="$('licModal').remove()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+    <div class="p-5 space-y-4">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+          <select id="licMState" class="w-full text-sm">
+            <option value="">Select state…</option>
+            ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select id="licMStatus" class="w-full text-sm">
+            <option value="active"  ${(!lic||lic.status==='active') ?'selected':''}>Active</option>
+            <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+            <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+          <input id="licMType" type="text" placeholder="e.g. NP, MD, PA" value="${escHtml(lic?.license_type||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Number</label>
+          <input id="licMNum" type="text" placeholder="e.g. AP123456" value="${escHtml(lic?.license_number||'')}" class="w-full text-sm"/>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Expiration Date</label>
+        <input id="licMExpiry" type="date" value="${lic?.expiry_date||''}" class="w-full text-sm"/>
+      </div>
+      <!-- Collab Agreement section -->
+      <div class="p-3 rounded-xl bg-purple-50 border border-purple-100 space-y-3">
+        <div class="text-xs font-bold text-purple-700 uppercase tracking-wide flex items-center gap-1.5">
+          <i class="fas fa-user-md"></i> Collaborating Physician Agreement
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Collaborating Physician Name</label>
+          <input id="licMCollab" type="text" placeholder="Dr. Jane Smith, MD" value="${escHtml(lic?.collab_physician||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiration Date</label>
+          <input id="licMCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+        <textarea id="licMNotes" rows="2" placeholder="Optional notes…" class="w-full text-sm resize-none">${escHtml(lic?.notes||'')}</textarea>
+      </div>
+      <div id="licMErr" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+      <div class="flex gap-2 pt-1">
+        ${isEdit ? `<button onclick="licDeleteEntry(${lic.id},${contractorId})"
+          class="px-3 py-2 rounded-xl border border-red-200 text-red-500 text-sm hover:bg-red-50 transition">
+          <i class="fas fa-trash text-xs"></i>
+        </button>` : ''}
+        <button onclick="$('licModal').remove()" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+        <button onclick="licSaveModal(${isEdit ? lic.id : 'null'},${contractorId},'${isAdmin ? 'admin' : 'provider'}')"
+          id="licMSaveBtn" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+          ${isEdit ? 'Save Changes' : 'Add License'}
+        </button>
+      </div>
+    </div>
+  </div>`
+  modal.classList.remove('hidden')
+}
+
+async function licSaveModal(licId, contractorId, mode) {
+  const state_val = $('licMState').value
+  const status    = $('licMStatus').value
+  const type      = ($('licMType').value||'').trim()
+  const num       = ($('licMNum').value||'').trim()
+  const expiry    = $('licMExpiry').value
+  const collab    = ($('licMCollab').value||'').trim()
+  const collabExp = $('licMCollabExp').value
+  const notes     = ($('licMNotes').value||'').trim()
+  const errEl     = $('licMErr')
+  const saveBtn   = $('licMSaveBtn')
+  if (!state_val) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…' }
+  errEl.classList.add('hidden')
+  const body = { state: state_val, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp }
+  try {
+    if (mode === 'admin') {
+      if (licId) {
+        await api(`/api/license-editor/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(body) })
+      } else {
+        await api(`/api/license-editor/contractors/${contractorId}/licenses`, { method: 'POST', body: JSON.stringify(body) })
+      }
+    } else {
+      if (licId) {
+        await api(`/api/provider/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(body) })
+      } else {
+        await api('/api/provider/licenses', { method: 'POST', body: JSON.stringify(body) })
+      }
+    }
+    $('licModal').remove()
+    showToast(licId ? 'License updated' : 'License added', 'success')
+    // Refresh the current view
+    if (state.currentPage === 'lic_dashboard') {
+      await renderLicDashboard()
+    } else if (state.currentPage === 'lic_edit') {
+      await renderLicEdit()
+    } else if (state.currentPage === 'provider_licenses') {
+      renderProviderLicenses()
+    }
+  } catch(e) {
+    errEl.textContent = e.message
+    errEl.classList.remove('hidden')
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = licId ? 'Save Changes' : 'Add License' }
+  }
+}
+
+async function licDeleteEntry(licId, contractorId) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  try {
+    await api(`/api/license-editor/licenses/${licId}`, { method: 'DELETE' })
+    $('licModal').remove()
+    showToast('License deleted', 'success')
+    if (state.currentPage === 'lic_dashboard') renderLicDashboard()
+    else if (state.currentPage === 'lic_edit') renderLicEdit()
+  } catch(e) { showToast('Delete failed: ' + e.message, 'error') }
+}
+
+// ════════════════════════════════════════════════════
+// LICENSE EDITOR PORTAL  — dedicated role UI
+// ════════════════════════════════════════════════════
+
+const licEditState = {
+  contractors: [],
+  activeCt: null,      // { id, name, role_group }
+  licenses: [],
+  loading: false,
+}
+
+async function renderLicEdit() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const contractors = await api('/api/license-editor/contractors')
+    licEditState.contractors = contractors || []
+    licEditState.activeCt = licEditState.activeCt || (contractors[0] ? { id: contractors[0].id, name: contractors[0].name, role_group: contractors[0].role_group || '' } : null)
+    if (licEditState.activeCt) {
+      const lics = await api(`/api/license-editor/contractors/${licEditState.activeCt.id}/licenses`)
+      licEditState.licenses = lics || []
+    }
+    licEditDrawShell()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+function licEditDrawShell() {
+  const mc = $('mainContent')
+  const ct = licEditState.activeCt
+
+  mc.innerHTML = `
+  <div class="flex gap-4" style="min-height: calc(100vh - 140px)">
+    <!-- Left: provider list -->
+    <div class="w-64 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col">
+      <div class="px-3 pt-3 pb-2 border-b border-gray-100">
+        <input id="licEditSearch" type="text" placeholder="Search providers…"
+          oninput="licEditFilterList(this.value)"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none">
+      </div>
+      <div id="licEditProvList" class="overflow-y-auto flex-1 p-2 space-y-0.5">
+        ${licEditState.contractors.map(ct => licEditProvRow(ct)).join('')}
+      </div>
+    </div>
+
+    <!-- Right: license list + add -->
+    <div class="flex-1 min-w-0">
+      ${ct ? `
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <div>
+            <h3 class="font-bold text-gray-800">${escHtml(ct.name)}</h3>
+            <p class="text-xs text-gray-400 mt-0.5">${ct.role_group ? escHtml(ct.role_group) + ' · ' : ''}${licEditState.licenses.length} license${licEditState.licenses.length !== 1 ? 's' : ''} on file</p>
+          </div>
+          <button onclick="licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+            class="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl shadow-sm transition">
+            <i class="fas fa-plus"></i> Add License
+          </button>
+        </div>
+
+        ${licEditState.licenses.length === 0 ? `
+        <div class="p-12 text-center text-gray-400">
+          <i class="fas fa-map-marked-alt text-4xl mb-3 block text-gray-200"></i>
+          <p class="font-medium mb-1">No licenses on file for ${escHtml(ct.name)}.</p>
+          <button onclick="licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+            class="mt-3 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition">
+            <i class="fas fa-plus mr-1"></i> Add First License
+          </button>
+        </div>` : `
+        <div class="divide-y divide-gray-100">
+          ${licEditState.licenses.map(l => licEditLicRow(l, ct)).join('')}
+        </div>`}
+      </div>` : `
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center text-gray-400">
+        <i class="fas fa-arrow-left text-3xl mb-3 block"></i><p>Select a provider to manage their licenses.</p>
+      </div>`}
+    </div>
+  </div>`
+}
+
+function licEditProvRow(ct) {
+  const isActive = licEditState.activeCt?.id === ct.id
+  return `<button onclick="licEditSelectProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+    class="w-full text-left px-3 py-2.5 rounded-lg transition-colors ${isActive ? 'bg-blue-50 text-blue-800' : 'hover:bg-gray-50 text-gray-700'}">
+    <div class="font-medium text-sm leading-tight">${escHtml(ct.name)}</div>
+    ${ct.role_group ? `<div class="text-xs ${isActive ? 'text-blue-500' : 'text-gray-400'} mt-0.5">${escHtml(ct.role_group)}</div>` : ''}
+  </button>`
+}
+
+function licEditLicRow(l, ct) {
+  const c = licStatusColor(l)
+  const hasCollab = l.collab_physician && l.collab_physician.trim()
+  const collabExpSoon = hasCollab && licIsExpiringSoon(l.collab_expiry)
+  return `
+  <div class="flex items-start gap-3 px-5 py-3.5 hover:bg-gray-50 transition-colors group">
+    <div class="w-12 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 shadow-sm ${c.bg}">${escHtml(l.state)}</div>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="font-semibold text-gray-800">${escHtml(l.state)}</span>
+        <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${licIsExpired(l) ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : licIsExpiringSoon(l.expiry_date) ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}">${l.status}</span>
+        ${l.license_type ? `<span class="text-xs text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">${escHtml(l.license_type)}</span>` : ''}
+        ${l.license_number ? `<span class="text-xs text-gray-400">#${escHtml(l.license_number)}</span>` : ''}
+      </div>
+      <div class="flex items-center gap-3 mt-1 flex-wrap">
+        ${l.expiry_date ? `<span class="text-xs ${licIsExpiringSoon(l.expiry_date) ? 'text-orange-600 font-semibold' : licIsExpired(l) ? 'text-red-500 font-semibold' : 'text-gray-400'}"><i class="fas fa-calendar text-[10px] mr-0.5"></i>Expires ${l.expiry_date}</span>` : '<span class="text-xs text-gray-300 italic">No expiry date</span>'}
+        ${hasCollab ? `<span class="text-xs text-purple-600 flex items-center gap-1"><i class="fas fa-user-md text-[10px]"></i>${escHtml(l.collab_physician)}${l.collab_expiry ? ' · ' + l.collab_expiry : ''}${collabExpSoon ? ' ⏰' : ''}</span>` : ''}
+      </div>
+      ${l.notes ? `<p class="text-xs text-gray-400 mt-1 italic">"${escHtml(l.notes)}"</p>` : ''}
+    </div>
+    <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
+      <button onclick="licEditEntry(${l.id})"
+        class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-50 text-gray-400 hover:text-blue-600 transition">
+        <i class="fas fa-pencil text-xs"></i>
+      </button>
+    </div>
+  </div>`
+}
+
+async function licEditSelectProvider(id, name, roleGroup) {
+  licEditState.activeCt = { id, name, role_group: roleGroup }
+  try {
+    const lics = await api(`/api/license-editor/contractors/${id}/licenses`)
+    licEditState.licenses = lics || []
+  } catch(e) {
+    licEditState.licenses = []
+  }
+  licEditDrawShell()
+}
+
+function licEditFilterList(query) {
+  const list = $('licEditProvList')
+  if (!list) return
+  const q = query.toLowerCase()
+  const filtered = licEditState.contractors.filter(ct => ct.name.toLowerCase().includes(q) || (ct.role_group||'').toLowerCase().includes(q))
+  list.innerHTML = filtered.map(ct => licEditProvRow(ct)).join('')
+}
+
 // ════════════════════════════════════════════════════
 // APP INITIALIZATION
 // ════════════════════════════════════════════════════
@@ -13690,6 +15305,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     '/portal/consults':    'provider_consults',
     '/portal/licenses':    'provider_licenses',
     '/portal/documents':   'provider_documents',
+    '/licensing':          'lic_dashboard',
+    '/licensing/edit':     'lic_edit',
   }
 
   const appPage = PATH_TO_PAGE[path]
