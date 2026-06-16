@@ -1,0 +1,701 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>LionMDs · Provider Licensing Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com"/>
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin/>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+  <style>
+    :root {
+      --ink: #0f172a;
+      --muted: #64748b;
+      --border: #e2e8f0;
+      --active: #16a34a;
+      --active-bg: #dcfce7;
+      --pending: #d97706;
+      --pending-bg: #fef3c7;
+      --expired: #dc2626;
+      --expired-bg: #fee2e2;
+      --accent: #2563eb;
+      --md-c: #7c3aed;
+      --np-c: #0284c7;
+      --pa-c: #0d9488;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+      background: #f1f5f9;
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.5;
+      min-height: 100vh;
+    }
+
+    /* ── Header ── */
+    header {
+      background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
+      color: #fff;
+      padding: 18px 24px;
+      border-bottom: 3px solid var(--accent);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+    header .header-left { display: flex; align-items: center; gap: 14px; }
+    header .lion-mark {
+      width: 42px; height: 42px; border-radius: 10px;
+      background: linear-gradient(135deg, #C9A84C, #a07830);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 22px; font-weight: 900; color: #fff; letter-spacing: -1px;
+      flex-shrink: 0;
+    }
+    header h1 { font-size: 20px; font-weight: 700; letter-spacing: -.02em; margin-bottom: 2px; }
+    header p { color: #94a3b8; font-size: 12px; }
+    header .badge-public {
+      background: rgba(255,255,255,.12);
+      border: 1px solid rgba(255,255,255,.2);
+      color: #cbd5e1;
+      padding: 5px 12px;
+      border-radius: 20px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: .03em;
+    }
+
+    /* ── KPI Bar ── */
+    .kpi-bar {
+      display: flex; gap: 10px; flex-wrap: wrap;
+      padding: 14px 24px; background: #fff;
+      border-bottom: 1px solid var(--border);
+    }
+    .kpi {
+      flex: 1; min-width: 120px; padding: 10px 14px;
+      border: 1px solid var(--border); border-radius: 10px;
+      background: #fafbfc;
+    }
+    .kpi .num { font-size: 22px; font-weight: 700; line-height: 1; }
+    .kpi .lbl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin-top: 3px; font-weight: 600; }
+    .kpi.green  .num { color: var(--active); }
+    .kpi.amber  .num { color: var(--pending); }
+    .kpi.red    .num { color: var(--expired); }
+    .kpi.warn   { border-color: #fbbf24; background: #fffbeb; }
+    .kpi.warn   .num { color: #b45309; }
+    .kpi.blue   .num { color: var(--accent); }
+
+    /* ── Tabs ── */
+    .tab-bar {
+      display: flex; gap: 0; background: #fff;
+      padding: 0 24px; border-bottom: 1px solid var(--border);
+      overflow-x: auto;
+    }
+    .tab-btn {
+      padding: 13px 18px; cursor: pointer; border: none; background: none;
+      font-size: 13px; font-weight: 600; color: var(--muted);
+      border-bottom: 3px solid transparent; font-family: inherit;
+      white-space: nowrap; transition: color .15s;
+    }
+    .tab-btn:hover { color: var(--ink); }
+    .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+    /* ── Toolbar ── */
+    .toolbar {
+      display: flex; gap: 10px; flex-wrap: wrap; align-items: center;
+      padding: 12px 24px; background: #fff;
+      border-bottom: 1px solid var(--border);
+    }
+    .toolbar input, .toolbar select {
+      padding: 7px 11px; border: 1px solid var(--border); border-radius: 7px;
+      font-size: 13px; font-family: inherit; outline: none; background: #fff;
+    }
+    .toolbar input:focus, .toolbar select:focus {
+      border-color: var(--accent); box-shadow: 0 0 0 3px rgba(37,99,235,.12);
+    }
+    .toolbar input { min-width: 200px; }
+
+    /* ── Legend ── */
+    .legend-bar {
+      padding: 10px 24px; background: #fff; border-bottom: 1px solid var(--border);
+      display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px;
+    }
+    .leg { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); }
+    .swatch {
+      display: inline-block; width: 14px; height: 14px; border-radius: 3px;
+      position: relative; flex-shrink: 0;
+    }
+    .swatch.active  { background: var(--active); }
+    .swatch.pending { background: var(--pending); }
+    .swatch.expired { background: #94a3b8; }
+    .swatch.collab  { background: var(--active); box-shadow: inset 0 0 0 2px #fbbf24; }
+    .swatch.collab::after {
+      content: ''; position: absolute; top: 1px; right: 1px;
+      width: 4px; height: 4px; border-radius: 50%;
+      background: #fbbf24; box-shadow: 0 0 0 1px #fff;
+    }
+    .leg b { color: var(--ink); font-weight: 600; }
+
+    /* ── Matrix ── */
+    .matrix-wrap { overflow: auto; background: #fff; max-height: calc(100vh - 290px); }
+    table.matrix { border-collapse: separate; border-spacing: 0; font-size: 12px; width: max-content; }
+    .matrix th, .matrix td { border-right: 1px solid var(--border); border-bottom: 1px solid var(--border); padding: 0; text-align: center; vertical-align: middle; white-space: nowrap; }
+    .matrix thead th {
+      background: #f8fafc; font-weight: 600; color: #334155;
+      position: sticky; top: 0; z-index: 3; padding: 8px 6px; font-size: 11px;
+    }
+    .matrix thead th.corner {
+      left: 0; z-index: 5; background: #f1f5f9; text-align: left;
+      padding-left: 14px; min-width: 220px;
+    }
+    .matrix tbody th {
+      background: #fff; text-align: left; padding: 8px 12px;
+      position: sticky; left: 0; z-index: 2;
+      font-weight: 600; color: #1e293b; border-right: 2px solid var(--border);
+      min-width: 220px; font-size: 12px;
+    }
+    .matrix tbody th .ptype {
+      display: inline-block; font-size: 9px; padding: 1px 5px; border-radius: 3px;
+      margin-left: 6px; font-weight: 700;
+    }
+    .matrix tbody th .ptype.MD { background: #f3e8ff; color: var(--md-c); }
+    .matrix tbody th .ptype.NP { background: #e0f2fe; color: var(--np-c); }
+    .matrix tbody th .ptype.PA { background: #ccfbf1; color: var(--pa-c); }
+    .matrix tbody tr:hover th { background: #f8fafc; }
+    .matrix tbody tr:hover td { background: #f8fafc; }
+    .cell { width: 34px; height: 30px; position: relative; cursor: default; }
+    .cell .fill {
+      position: absolute; inset: 3px; border-radius: 4px;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 9px; font-weight: 700; color: #fff;
+      transition: transform .1s;
+    }
+    .cell.active  .fill { background: var(--active); }
+    .cell.pending .fill { background: var(--pending); }
+    .cell.expired .fill { background: #94a3b8; }
+    .cell.empty   .fill { background: #f1f5f9; }
+    .cell.collab-dep .fill { box-shadow: inset 0 0 0 2px #fbbf24; }
+    .cell.collab-dep .fill::before {
+      content: ''; position: absolute; top: 1px; right: 1px;
+      width: 5px; height: 5px; border-radius: 50%;
+      background: #fbbf24; box-shadow: 0 0 0 1px #fff;
+    }
+    .cell:not(.empty):hover .fill { transform: scale(1.15); box-shadow: 0 4px 12px rgba(0,0,0,.18); z-index: 2; }
+
+    /* ── Tooltip ── */
+    #tip {
+      position: fixed; background: #0f172a; color: #fff;
+      padding: 10px 14px; border-radius: 8px; font-size: 12px;
+      max-width: 320px; box-shadow: 0 8px 28px rgba(0,0,0,.4);
+      pointer-events: none; opacity: 0; transition: opacity .12s;
+      z-index: 1000; line-height: 1.5;
+    }
+    #tip.show { opacity: 1; }
+    #tip .tt-title { font-weight: 700; font-size: 13px; margin-bottom: 4px; }
+    #tip .tt-status {
+      display: inline-block; padding: 2px 8px; border-radius: 4px;
+      font-size: 10px; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .05em; margin-bottom: 6px;
+    }
+    #tip .tt-status.active  { background: var(--active);  color: #fff; }
+    #tip .tt-status.pending { background: var(--pending); color: #fff; }
+    #tip .tt-status.expired { background: var(--expired); color: #fff; }
+    #tip .tt-row { display: flex; gap: 8px; margin-top: 3px; }
+    #tip .tt-k { color: #94a3b8; min-width: 60px; font-size: 11px; }
+    #tip .tt-v { color: #fff; font-weight: 500; font-size: 11px; }
+    #tip .tt-flag { margin-top: 6px; padding: 5px 8px; background: #fef3c7; color: #92400e; border-radius: 4px; font-size: 11px; font-weight: 600; }
+
+    /* ── By-Provider View ── */
+    .provider-list { padding: 20px 24px; }
+    .prov-card { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 10px; background: #fff; overflow: hidden; }
+    .prov-head {
+      display: flex; align-items: center; gap: 12px;
+      padding: 14px 18px; background: #fafbfc; cursor: pointer;
+      border-bottom: 1px solid transparent; user-select: none;
+    }
+    .prov-head:hover { background: #f1f5f9; }
+    .prov-head .ph-name { flex: 1; font-weight: 700; font-size: 14px; }
+    .prov-head .ph-role {
+      display: inline-block; font-size: 9px; padding: 2px 6px; border-radius: 3px; font-weight: 700; margin-left: 6px;
+    }
+    .ph-role.MD { background: #f3e8ff; color: var(--md-c); }
+    .ph-role.NP { background: #e0f2fe; color: var(--np-c); }
+    .ph-role.PA { background: #ccfbf1; color: var(--pa-c); }
+    .prov-head .ph-counts { display: flex; gap: 10px; font-size: 12px; color: var(--muted); }
+    .prov-head .ph-counts span b { color: var(--ink); }
+    .prov-head .ph-arrow { color: var(--muted); font-size: 12px; transition: transform .2s; }
+    .prov-head.open .ph-arrow { transform: rotate(180deg); }
+    .prov-body { padding: 12px 18px; display: none; border-top: 1px solid var(--border); }
+    .prov-body.open { display: flex; flex-wrap: wrap; gap: 8px; }
+    .lic-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 5px 11px; border-radius: 18px; font-size: 12px; font-weight: 500;
+    }
+    .lic-chip.active  { background: var(--active-bg); color: #15803d; border: 1px solid #86efac; }
+    .lic-chip.pending { background: var(--pending-bg); color: #92400e; border: 1px solid #fcd34d; }
+    .lic-chip.expired { background: #f1f5f9; color: var(--muted); border: 1px solid var(--border); }
+    .lic-chip.collab  { box-shadow: 0 0 0 2px #fbbf24; }
+    .lic-chip .chip-dot { width: 7px; height: 7px; border-radius: 50%; }
+    .chip-dot.active  { background: var(--active); }
+    .chip-dot.pending { background: var(--pending); }
+    .chip-dot.expired { background: #94a3b8; }
+
+    /* ── Collab View ── */
+    .collab-list { padding: 20px 24px; }
+    .collab-card { border: 1px solid var(--border); border-radius: 12px; margin-bottom: 12px; background: #fff; overflow: hidden; }
+    .collab-head {
+      padding: 14px 18px; background: linear-gradient(135deg, #7c3aed, #6d28d9);
+      color: #fff; display: flex; justify-content: space-between; align-items: center;
+    }
+    .collab-head h4 { font-size: 14px; font-weight: 700; }
+    .collab-head .c-badge {
+      background: rgba(255,255,255,.2); padding: 3px 10px;
+      border-radius: 12px; font-size: 12px; font-weight: 600;
+    }
+    .collab-row {
+      display: grid; grid-template-columns: 50px 1fr 120px 120px;
+      gap: 10px; align-items: center;
+      padding: 8px 18px; border-top: 1px solid #f1f5f9; font-size: 12px;
+    }
+    .collab-row:first-child { border-top: none; }
+    .collab-row .st { font-weight: 700; color: #1e293b; }
+    .collab-row .cr-provider { color: #1e293b; font-weight: 500; }
+    .collab-row .cr-expiry { color: var(--muted); }
+    .cr-expiry.warn { color: #b45309; font-weight: 600; }
+    .cr-expiry.expired { color: var(--expired); font-weight: 600; }
+    .collab-none {
+      background: #fef2f2; border: 1px dashed #fca5a5; border-radius: 10px;
+      padding: 12px 16px; margin: 12px 18px; font-size: 12px; color: #991b1b;
+      display: flex; align-items: center; gap: 8px;
+    }
+
+    /* ── Loading / Error ── */
+    .loading-wrap { display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 60px 24px; gap: 12px; color: var(--muted); }
+    .spinner { width: 32px; height: 32px; border: 3px solid #e2e8f0; border-top-color: var(--accent); border-radius: 50%; animation: spin .7s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .error-msg { background: #fef2f2; border: 1px solid #fca5a5; border-radius: 10px; padding: 16px 20px; color: #991b1b; margin: 20px 24px; }
+
+    /* ── Footer ── */
+    footer { padding: 16px 24px; background: #fff; border-top: 1px solid var(--border); font-size: 12px; color: var(--muted); display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; }
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    /* ── View visibility ── */
+    .view { display: none; }
+    .view.active { display: block; }
+
+    @media (max-width: 600px) {
+      header, .kpi-bar, .toolbar, .legend-bar, .tab-bar { padding-left: 14px; padding-right: 14px; }
+      .collab-row { grid-template-columns: 40px 1fr 90px; }
+      .collab-row .cr-expiry { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- Header -->
+  <header>
+    <div class="header-left">
+      <div class="lion-mark">L</div>
+      <div>
+        <h1>LionMDs · Provider Licensing</h1>
+        <p>State licensing status across all active providers</p>
+      </div>
+    </div>
+    <span class="badge-public">🔒 View-Only Dashboard</span>
+  </header>
+
+  <!-- KPI bar -->
+  <div class="kpi-bar" id="kpiBar">
+    <div class="loading-wrap" style="flex:1; padding: 10px 0;">
+      <div class="spinner"></div>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="tab-bar">
+    <button class="tab-btn active" onclick="setView('matrix')">📊 State Matrix</button>
+    <button class="tab-btn" onclick="setView('collab')">🤝 Collab Agreements</button>
+    <button class="tab-btn" onclick="setView('providers')">👤 By Provider</button>
+  </div>
+
+  <!-- Toolbar -->
+  <div class="toolbar">
+    <input type="text" id="filterProvider" placeholder="🔍  Filter by provider name…" oninput="applyFilters()"/>
+    <select id="filterStatus" onchange="applyFilters()">
+      <option value="all">All statuses</option>
+      <option value="active">Active only</option>
+      <option value="pending">Pending only</option>
+      <option value="expired">Expired only</option>
+    </select>
+    <select id="filterState" onchange="applyFilters()">
+      <option value="">All states</option>
+    </select>
+    <span id="countBadge" style="margin-left:auto; font-size:12px; color:var(--muted);"></span>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend-bar">
+    <span class="leg"><span class="swatch active"></span> <b>Active</b></span>
+    <span class="leg"><span class="swatch pending"></span> <b>Pending</b></span>
+    <span class="leg"><span class="swatch expired"></span> <b>Expired / Inactive</b></span>
+    <span class="leg"><span class="swatch collab"></span> <b>Has Collab Agreement</b></span>
+  </div>
+
+  <!-- Matrix view -->
+  <div id="viewMatrix" class="view active">
+    <div class="loading-wrap"><div class="spinner"></div><span>Loading…</span></div>
+  </div>
+
+  <!-- Collab view -->
+  <div id="viewCollab" class="view"></div>
+
+  <!-- Providers view -->
+  <div id="viewProviders" class="view"></div>
+
+  <!-- Tooltip -->
+  <div id="tip"></div>
+
+  <!-- Footer -->
+  <footer>
+    <span>LionMDs · Provider Licensing Dashboard</span>
+    <span id="lastUpdated"></span>
+  </footer>
+
+  <script>
+    // ── State ──────────────────────────────────────────────────────────
+    const US_STATES = [
+      'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA',
+      'HI','ID','IL','IN','IA','KS','KY','LA','ME','MD',
+      'MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+      'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC',
+      'SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC'
+    ]
+
+    let rawLicenses = []
+    let currentView = 'matrix'
+    let filterProvider = ''
+    let filterStatus = 'all'
+    let filterState = ''
+
+    // ── Boot ───────────────────────────────────────────────────────────
+    async function boot() {
+      try {
+        const res = await fetch('/api/licensing/public')
+        if (!res.ok) throw new Error(`Server error ${res.status}`)
+        rawLicenses = await res.json()
+        populateStateFilter()
+        buildKpis()
+        applyFilters()
+        document.getElementById('lastUpdated').textContent =
+          'Last refreshed: ' + new Date().toLocaleString('en-US', { dateStyle:'medium', timeStyle:'short' })
+      } catch (err) {
+        document.getElementById('kpiBar').innerHTML =
+          `<div class="error-msg">⚠️ Could not load licensing data: ${err.message}</div>`
+        document.getElementById('viewMatrix').innerHTML =
+          `<div class="error-msg">⚠️ ${err.message}</div>`
+      }
+    }
+
+    // ── Populate state filter ──────────────────────────────────────────
+    function populateStateFilter() {
+      const sel = document.getElementById('filterState')
+      const states = [...new Set(rawLicenses.map(l => l.state))].sort()
+      states.forEach(s => {
+        const o = document.createElement('option')
+        o.value = s; o.textContent = s; sel.appendChild(o)
+      })
+    }
+
+    // ── KPIs ──────────────────────────────────────────────────────────
+    function buildKpis() {
+      const active  = rawLicenses.filter(l => normalizeStatus(l.status) === 'active').length
+      const pending = rawLicenses.filter(l => normalizeStatus(l.status) === 'pending').length
+      const expired = rawLicenses.filter(l => normalizeStatus(l.status) === 'expired').length
+      const withCollab = rawLicenses.filter(l => l.collab_physician).length
+      const expiringSoon = rawLicenses.filter(l => {
+        if (!l.expiry_date) return false
+        const diff = (new Date(l.expiry_date) - new Date()) / 86400000
+        return diff >= 0 && diff <= 60
+      }).length
+      const total = rawLicenses.length
+
+      document.getElementById('kpiBar').innerHTML = `
+        <div class="kpi green"><div class="num">${active}</div><div class="lbl">Active Licenses</div></div>
+        <div class="kpi amber"><div class="num">${pending}</div><div class="lbl">Pending</div></div>
+        <div class="kpi red"><div class="num">${expired}</div><div class="lbl">Expired</div></div>
+        <div class="kpi warn"><div class="num">${expiringSoon}</div><div class="lbl">Expiring ≤60 Days</div></div>
+        <div class="kpi blue"><div class="num">${withCollab}</div><div class="lbl">With Collab MD</div></div>
+        <div class="kpi"><div class="num">${total}</div><div class="lbl">Total Licenses</div></div>
+      `
+    }
+
+    // ── Status normalization ───────────────────────────────────────────
+    function normalizeStatus(s) {
+      if (!s) return 'expired'
+      const v = s.toLowerCase()
+      if (v === 'active' || v === 'ready' || v === 'ready - no crx') return 'active'
+      if (v === 'pending' || v === 'in progress') return 'pending'
+      return 'expired'
+    }
+
+    // ── Filter ────────────────────────────────────────────────────────
+    function applyFilters() {
+      filterProvider = document.getElementById('filterProvider').value.toLowerCase()
+      filterStatus   = document.getElementById('filterStatus').value
+      filterState    = document.getElementById('filterState').value
+
+      let filtered = rawLicenses.filter(l => {
+        if (filterProvider && !(l.provider_name || '').toLowerCase().includes(filterProvider)) return false
+        if (filterStatus !== 'all' && normalizeStatus(l.status) !== filterStatus) return false
+        if (filterState && l.state !== filterState) return false
+        return true
+      })
+
+      document.getElementById('countBadge').textContent =
+        filtered.length === rawLicenses.length
+          ? `${rawLicenses.length} licenses`
+          : `${filtered.length} of ${rawLicenses.length} licenses`
+
+      if (currentView === 'matrix') drawMatrix(filtered)
+      else if (currentView === 'collab') drawCollab(filtered)
+      else drawProviders(filtered)
+    }
+
+    // ── Tab switching ─────────────────────────────────────────────────
+    function setView(v) {
+      currentView = v
+      document.querySelectorAll('.tab-btn').forEach((b, i) => {
+        b.classList.toggle('active', ['matrix','collab','providers'][i] === v)
+      })
+      document.querySelectorAll('.view').forEach(el => el.classList.remove('active'))
+      document.getElementById('view' + v.charAt(0).toUpperCase() + v.slice(1)).classList.add('active')
+      applyFilters()
+    }
+
+    // ── MATRIX VIEW ────────────────────────────────────────────────────
+    function drawMatrix(licenses) {
+      const container = document.getElementById('viewMatrix')
+
+      // Build lookup: providerName → state → license
+      const byProvider = {}
+      const providerMeta = {}
+      licenses.forEach(l => {
+        const name = l.provider_name || 'Unknown'
+        if (!byProvider[name]) { byProvider[name] = {}; providerMeta[name] = l.role_group || '' }
+        byProvider[name][l.state] = l
+      })
+
+      const providers = Object.keys(byProvider).sort()
+      // Only show states that have at least one license in current filtered set
+      const statesInUse = US_STATES.filter(s => licenses.some(l => l.state === s))
+
+      if (!providers.length) {
+        container.innerHTML = '<div class="loading-wrap"><span>No licenses match your filters.</span></div>'
+        return
+      }
+
+      let html = `<div class="matrix-wrap"><table class="matrix"><thead><tr>
+        <th class="corner">Provider</th>
+        ${statesInUse.map(s => `<th title="${s}">${s}</th>`).join('')}
+      </tr></thead><tbody>`
+
+      providers.forEach(name => {
+        const rg = providerMeta[name]
+        const roleLabel = rg === 'MD' ? 'MD' : rg === 'NP' ? 'NP' : rg === 'PA' ? 'PA' : ''
+        html += `<tr><th>${escHtml(name)}${roleLabel ? `<span class="ptype ${roleLabel}">${roleLabel}</span>` : ''}</th>`
+        statesInUse.forEach(st => {
+          const lic = byProvider[name][st]
+          if (!lic) {
+            html += `<td><div class="cell empty"><div class="fill"></div></div></td>`
+            return
+          }
+          const ns = normalizeStatus(lic.status)
+          const hasCollab = !!lic.collab_physician
+          const cellClass = `${ns}${hasCollab ? ' collab-dep' : ''}`
+          const abbr = ns === 'active' ? '✓' : ns === 'pending' ? '⋯' : '×'
+          const tipData = buildTipData(lic, name, st)
+          html += `<td>
+            <div class="cell ${cellClass}"
+              onmouseenter="showTip(event, ${JSON.stringify(tipData).replace(/"/g, '&quot;')})"
+              onmouseleave="hideTip()">
+              <div class="fill">${abbr}</div>
+            </div></td>`
+        })
+        html += `</tr>`
+      })
+
+      html += `</tbody></table></div>`
+      container.innerHTML = html
+    }
+
+    function buildTipData(lic, name, state) {
+      return {
+        provider: name,
+        state: state,
+        status: normalizeStatus(lic.status),
+        statusRaw: lic.status,
+        type: lic.license_type || '',
+        expiry: lic.expiry_date || '',
+        collab: lic.collab_physician || '',
+        collabExp: lic.collab_expiry || '',
+      }
+    }
+
+    // ── Tooltip ───────────────────────────────────────────────────────
+    const tip = document.getElementById('tip')
+    function showTip(e, data) {
+      const days = data.expiry ? Math.round((new Date(data.expiry) - new Date()) / 86400000) : null
+      const expLabel = data.expiry
+        ? (days < 0 ? `${data.expiry} <b style="color:#f87171">(${Math.abs(days)}d expired)</b>`
+         : days <= 60 ? `${data.expiry} <b style="color:#fbbf24">(${days}d left)</b>`
+         : data.expiry)
+        : '—'
+      tip.innerHTML = `
+        <div class="tt-title">${escHtml(data.provider)} · ${data.state}</div>
+        <span class="tt-status ${data.status}">${data.statusRaw || data.status}</span>
+        <div class="tt-row"><span class="tt-k">Type</span><span class="tt-v">${escHtml(data.type) || '—'}</span></div>
+        <div class="tt-row"><span class="tt-k">Expires</span><span class="tt-v">${expLabel}</span></div>
+        ${data.collab ? `
+        <div class="tt-flag">🤝 Collab: ${escHtml(data.collab)}${data.collabExp ? ' · exp ' + data.collabExp : ''}</div>
+        ` : ''}
+      `
+      moveTip(e)
+      tip.classList.add('show')
+    }
+    function moveTip(e) {
+      const x = e.clientX + 14, y = e.clientY + 14
+      tip.style.left = Math.min(x, window.innerWidth - 340) + 'px'
+      tip.style.top  = Math.min(y, window.innerHeight - 160) + 'px'
+    }
+    function hideTip() { tip.classList.remove('show') }
+    document.addEventListener('mousemove', e => { if (tip.classList.contains('show')) moveTip(e) })
+
+    // ── COLLAB VIEW ───────────────────────────────────────────────────
+    function drawCollab(licenses) {
+      const container = document.getElementById('viewCollab')
+      // Group by collaborating physician
+      const byCollab = {}
+      licenses.filter(l => l.collab_physician).forEach(l => {
+        const md = l.collab_physician
+        if (!byCollab[md]) byCollab[md] = []
+        byCollab[md].push(l)
+      })
+
+      // NP/PA with NO collab agreement
+      const noCollab = licenses.filter(l => {
+        const rg = (l.role_group||'').toUpperCase()
+        return (rg === 'NP' || rg === 'PA') && !l.collab_physician
+      })
+
+      if (!Object.keys(byCollab).length && !noCollab.length) {
+        container.innerHTML = '<div class="collab-list"><div class="loading-wrap"><span>No collab agreements match your filters.</span></div></div>'
+        return
+      }
+
+      let html = '<div class="collab-list">'
+
+      if (noCollab.length) {
+        html += `<div class="collab-none">⚠️ <strong>${noCollab.length} NP/PA license${noCollab.length > 1 ? 's' : ''}</strong> with no collaborating physician on file</div>`
+      }
+
+      Object.entries(byCollab).sort(([a],[b]) => a.localeCompare(b)).forEach(([md, lics]) => {
+        html += `<div class="collab-card">
+          <div class="collab-head">
+            <h4>🩺 ${escHtml(md)}</h4>
+            <span class="c-badge">${lics.length} agreement${lics.length > 1 ? 's' : ''}</span>
+          </div>
+          <div>`
+        lics.sort((a,b) => (a.state||'').localeCompare(b.state||'')).forEach(l => {
+          const collabExpLabel = getCollabExpLabel(l.collab_expiry)
+          const expClass = collabExpLabel.cls
+          html += `<div class="collab-row">
+            <span class="st">${l.state}</span>
+            <span class="cr-provider">${escHtml(l.provider_name||'')} <span style="font-size:10px;color:var(--muted)">${l.role_group||''}</span></span>
+            <span class="cr-expiry ${expClass}">${collabExpLabel.text}</span>
+          </div>`
+        })
+        html += `</div></div>`
+      })
+
+      html += '</div>'
+      container.innerHTML = html
+    }
+
+    function getCollabExpLabel(expiry) {
+      if (!expiry) return { text: 'No expiry', cls: '' }
+      const days = Math.round((new Date(expiry) - new Date()) / 86400000)
+      if (days < 0)   return { text: `Expired ${expiry}`, cls: 'expired' }
+      if (days <= 60) return { text: `Exp ${expiry} (${days}d)`, cls: 'warn' }
+      return { text: expiry, cls: '' }
+    }
+
+    // ── BY-PROVIDER VIEW ──────────────────────────────────────────────
+    function drawProviders(licenses) {
+      const container = document.getElementById('viewProviders')
+
+      const byProvider = {}
+      const providerMeta = {}
+      licenses.forEach(l => {
+        const name = l.provider_name || 'Unknown'
+        if (!byProvider[name]) { byProvider[name] = []; providerMeta[name] = l.role_group || '' }
+        byProvider[name].push(l)
+      })
+
+      const providers = Object.keys(byProvider).sort()
+      if (!providers.length) {
+        container.innerHTML = '<div class="loading-wrap"><span>No licenses match your filters.</span></div>'
+        return
+      }
+
+      let html = '<div class="provider-list">'
+      providers.forEach((name, idx) => {
+        const lics = byProvider[name].sort((a,b) => (a.state||'').localeCompare(b.state||''))
+        const rg = providerMeta[name] || ''
+        const active  = lics.filter(l => normalizeStatus(l.status) === 'active').length
+        const pending = lics.filter(l => normalizeStatus(l.status) === 'pending').length
+        const expired = lics.filter(l => normalizeStatus(l.status) === 'expired').length
+
+        html += `<div class="prov-card">
+          <div class="prov-head" id="ph-${idx}" onclick="toggleProvider(${idx})">
+            <span class="ph-name">${escHtml(name)}${rg ? `<span class="ph-role ${rg}">${rg}</span>` : ''}</span>
+            <span class="ph-counts">
+              <span><b style="color:var(--active)">${active}</b> active</span>
+              ${pending ? `<span><b style="color:var(--pending)">${pending}</b> pending</span>` : ''}
+              ${expired ? `<span><b style="color:var(--muted)">${expired}</b> expired</span>` : ''}
+            </span>
+            <span class="ph-arrow">▼</span>
+          </div>
+          <div class="prov-body" id="pb-${idx}">`
+        lics.forEach(l => {
+          const ns = normalizeStatus(l.status)
+          const hasCollab = !!l.collab_physician
+          html += `<span class="lic-chip ${ns}${hasCollab ? ' collab' : ''}"
+              title="${escHtml(l.license_type||'')}${l.expiry_date ? ' · exp '+l.expiry_date : ''}${hasCollab ? ' · Collab: '+escHtml(l.collab_physician) : ''}">
+            <span class="chip-dot ${ns}"></span>${l.state}
+          </span>`
+        })
+        html += `</div></div>`
+      })
+      html += '</div>'
+      container.innerHTML = html
+    }
+
+    function toggleProvider(idx) {
+      const head = document.getElementById(`ph-${idx}`)
+      const body = document.getElementById(`pb-${idx}`)
+      head.classList.toggle('open')
+      body.classList.toggle('open')
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────
+    function escHtml(s) {
+      return String(s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+    }
+
+    // ── Start ─────────────────────────────────────────────────────────
+    boot()
+  </script>
+</body>
+</html>

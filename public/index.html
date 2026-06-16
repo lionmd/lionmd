@@ -15313,6 +15313,12 @@ window.addEventListener('DOMContentLoaded', async () => {
 
 
 
+  if (path === '/licensing/public') {
+    history.replaceState({}, '', '/licensing/public')
+    renderPublicLicensing()
+    return
+  }
+
   if (path === '/apply') {
     history.replaceState({}, '', '/apply')
     showApplyForm()

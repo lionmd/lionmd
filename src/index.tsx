@@ -5032,6 +5032,16 @@ app.get('/presentation', async (c) => {
 // Cloudflare Pages serves static files; for paths the Worker handles,
 // we delegate to the ASSETS binding (which serves index.html).
 // All /api/* routes above take priority and are never caught here.
+
+// ── Public licensing dashboard — no auth required ──────────────────────────
+// Serves licensing.html (standalone view-only page) at /licensing/view
+app.get('/licensing/view', async (c) => {
+  if ((c.env as any).ASSETS) {
+    return (c.env as any).ASSETS.fetch(new Request(new URL('/licensing.html', c.req.url)))
+  }
+  return c.redirect('/', 302)
+})
+
 const frontendPaths = [
   '/apply', '/login', '/invite',
   '/portal', '/portal/*',
@@ -5041,6 +5051,7 @@ const frontendPaths = [
   '/rates', '/carevalidate',
   '/cv', '/cv/*',
   '/users', '/payments',
+  '/licensing', '/licensing/edit',
 ]
 for (const path of frontendPaths) {
   app.get(path, async (c) => {
