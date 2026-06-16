@@ -14415,6 +14415,50 @@ function licEditFilterList(query) {
 // PUBLIC LICENSING PAGE  — no auth, shareable URL
 // ════════════════════════════════════════════════════
 async function renderPublicLicensing() {
+  // ── Password gate ─────────────────────────────────────────────────
+  const PUB_KEY = 'lmd_pub_auth'
+  const CORRECT = 'LionProviders2026!'
+  if (sessionStorage.getItem(PUB_KEY) !== '1') {
+    document.body.innerHTML = `
+    <div class="min-h-screen bg-gray-50 flex items-center justify-center font-sans">
+      <div class="bg-white rounded-2xl shadow-lg border border-gray-200 w-full max-w-sm mx-4 p-8">
+        <div class="flex items-center gap-3 mb-6">
+          <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow">
+            <i class="fas fa-shield-alt text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-base font-bold text-gray-800 leading-none">LionMDs Licensing</h1>
+            <p class="text-xs text-gray-400 mt-0.5">Enter password to view</p>
+          </div>
+        </div>
+        <div id="pubGateError" class="hidden mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          Incorrect password. Please try again.
+        </div>
+        <input id="pubGatePw" type="password" placeholder="Password"
+          class="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3"
+          onkeydown="if(event.key==='Enter')pubGateSubmit()"/>
+        <button onclick="pubGateSubmit()"
+          class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl py-2.5 text-sm transition">
+          <i class="fas fa-unlock mr-2"></i>View Licensing Dashboard
+        </button>
+      </div>
+    </div>`
+    document.title = 'LionMDs — Licensing'
+    window.pubGateSubmit = function() {
+      const val = document.getElementById('pubGatePw').value
+      if (val === CORRECT) {
+        sessionStorage.setItem(PUB_KEY, '1')
+        renderPublicLicensing()
+      } else {
+        document.getElementById('pubGateError').classList.remove('hidden')
+        document.getElementById('pubGatePw').value = ''
+        document.getElementById('pubGatePw').focus()
+      }
+    }
+    setTimeout(() => document.getElementById('pubGatePw')?.focus(), 100)
+    return
+  }
+
   // Hide all authenticated UI — show a standalone public shell
   document.body.innerHTML = `
   <div id="pubRoot" class="min-h-screen bg-gray-50 font-sans">
@@ -14427,11 +14471,11 @@ async function renderPublicLicensing() {
           </div>
           <div>
             <h1 class="text-lg font-bold text-gray-800 leading-none">LionMDs Provider Licensing</h1>
-            <p class="text-xs text-gray-400 mt-0.5">Read-only public view &mdash; no login required</p>
+            <p class="text-xs text-gray-400 mt-0.5">Provider licensing status &mdash; read-only view</p>
           </div>
         </div>
-        <span class="text-xs bg-green-50 text-green-700 border border-green-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
-          <i class="fas fa-lock-open text-green-500"></i> Public View
+        <span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
+          <i class="fas fa-lock text-blue-500"></i> Password Protected
         </span>
       </div>
     </header>
