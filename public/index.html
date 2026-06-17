@@ -14122,9 +14122,13 @@ function licAddForProvider(contractorId, contractorName, roleGroup) {
   licShowModal(null, contractorId, contractorName, roleGroup)
 }
 function licEditEntry(licId) {
+  // Search both licState (dashboard) and licEditState (editor) for the license
   const lic = licState.licenses.find(l => l.id === licId)
+           || licEditState.licenses.find(l => l.id === licId)
   if (!lic) return
-  licShowModal(lic, lic.contractor_id, lic.contractor_name, lic.role_group || '')
+  const ctName = lic.contractor_name || licEditState.activeCt?.name || ''
+  const ctRole = lic.role_group || licEditState.activeCt?.role_group || ''
+  licShowModal(lic, lic.contractor_id, ctName, ctRole)
 }
 function licShowModal(lic, contractorId, contractorName, roleGroup) {
   const isEdit = !!lic
@@ -14195,6 +14199,34 @@ function licShowModal(lic, contractorId, contractorName, roleGroup) {
           <input id="licMCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
         </div>
       </div>
+      <!-- Permitted Actions / Practice Authority -->
+      <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
+        <div class="text-xs font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5">
+          <i class="fas fa-stethoscope"></i> Practice Authority
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions</label>
+          <select id="licMPermitted" class="w-full text-sm">
+            <option value="" ${!lic?.permitted_actions?'selected':''}>— Select —</option>
+            <option value="Can See Patients + Prescribe" ${lic?.permitted_actions==='Can See Patients + Prescribe'?'selected':''}>✅ Can See Patients + Prescribe (Full CRx)</option>
+            <option value="Can See Patients (No CRx)" ${lic?.permitted_actions==='Can See Patients (No CRx)'?'selected':''}>🟡 Can See Patients (No CRx)</option>
+            <option value="Can See Patients + Prescribe (Collab)" ${lic?.permitted_actions==='Can See Patients + Prescribe (Collab)'?'selected':''}>🤝 Can See Patients + Prescribe (Collab MD)</option>
+            <option value="Can See Patients (No CRx, Collab)" ${lic?.permitted_actions==='Can See Patients (No CRx, Collab)'?'selected':''}>🤝 Can See Patients (No CRx, Collab MD)</option>
+            <option value="Pending License" ${lic?.permitted_actions==='Pending License'?'selected':''}>⏳ Pending License</option>
+            <option value="Not Licensed" ${lic?.permitted_actions==='Not Licensed'?'selected':''}>❌ Not Licensed</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+          <select id="licMPracticeType" class="w-full text-sm">
+            <option value="" ${!lic?.practice_type?'selected':''}>— Select —</option>
+            <option value="independent" ${lic?.practice_type==='independent'?'selected':''}>Independent (Full Practice Authority)</option>
+            <option value="collab_md" ${lic?.practice_type==='collab_md'?'selected':''}>Requires Collaborating MD</option>
+            <option value="md_self" ${lic?.practice_type==='md_self'?'selected':''}>Physician (Self-supervised)</option>
+            <option value="unclear" ${lic?.practice_type==='unclear'?'selected':''}>Unclear / Needs Review</option>
+          </select>
+        </div>
+      </div>
       <div>
         <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
         <textarea id="licMNotes" rows="2" placeholder="Optional notes…" class="w-full text-sm resize-none">${escHtml(lic?.notes||'')}</textarea>
@@ -14230,7 +14262,9 @@ async function licSaveModal(licId, contractorId, mode) {
   if (!state_val) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…' }
   errEl.classList.add('hidden')
-  const body = { state: state_val, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp }
+  const permitted_actions = ($('licMPermitted').value||'').trim()
+  const practice_type     = ($('licMPracticeType').value||'').trim()
+  const body = { state: state_val, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp, permitted_actions, practice_type }
   try {
     if (mode === 'admin') {
       if (licId) {
@@ -14381,6 +14415,7 @@ function licEditLicRow(l, ct) {
         ${l.expiry_date ? `<span class="text-xs ${licIsExpiringSoon(l.expiry_date) ? 'text-orange-600 font-semibold' : licIsExpired(l) ? 'text-red-500 font-semibold' : 'text-gray-400'}"><i class="fas fa-calendar text-[10px] mr-0.5"></i>Expires ${l.expiry_date}</span>` : '<span class="text-xs text-gray-300 italic">No expiry date</span>'}
         ${hasCollab ? `<span class="text-xs text-purple-600 flex items-center gap-1"><i class="fas fa-user-md text-[10px]"></i>${escHtml(l.collab_physician)}${l.collab_expiry ? ' · ' + l.collab_expiry : ''}${collabExpSoon ? ' ⏰' : ''}</span>` : ''}
       </div>
+      ${l.permitted_actions ? `<span class="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-xs font-semibold ${l.permitted_actions.includes('Prescribe') ? 'bg-green-100 text-green-700' : l.permitted_actions.includes('No CRx') ? 'bg-purple-100 text-purple-700' : l.permitted_actions.includes('Pending') ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}">${l.permitted_actions}</span>` : ''}
       ${l.notes ? `<p class="text-xs text-gray-400 mt-1 italic">"${escHtml(l.notes)}"</p>` : ''}
     </div>
     <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
