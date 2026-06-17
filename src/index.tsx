@@ -3242,14 +3242,36 @@ app.get('/api/provider/profile', requireProvider, async (c) => {
   if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
   const contractor = await c.env.DB.prepare(`SELECT * FROM contractors WHERE id=?`).bind(pu.contractor_id).first() as any
   if (!contractor) return c.json({ error: 'Contractor record not found' }, 404)
-  const licenses = await c.env.DB.prepare(
-    `SELECT * FROM provider_licenses WHERE contractor_id=? ORDER BY state ASC`
-  ).bind(pu.contractor_id).all()
-  // Pull onboarding candidate record for any extra fields (photo fallback, specialty, states)
-  const ob = await c.env.DB.prepare(
-    `SELECT id, full_name, specialty, states_licensed, photo_data, photo_mime FROM onboarding_candidates WHERE converted_contractor_id=? LIMIT 1`
-  ).bind(pu.contractor_id).first() as any
-  return c.json({ contractor, licenses: licenses.results, portal_user: { id: pu.id, name: pu.name, email: pu.email, phone: pu.phone || '' }, ob_candidate: ob || null })
+  const [licensesRes, ob, allCollabRes] = await Promise.all([
+    c.env.DB.prepare(`SELECT * FROM provider_licenses WHERE contractor_id=? ORDER BY state ASC`).bind(pu.contractor_id).all(),
+    // Pull onboarding candidate record for any extra fields (photo fallback, specialty, states)
+    c.env.DB.prepare(`SELECT id, full_name, specialty, states_licensed, photo_data, photo_mime FROM onboarding_candidates WHERE converted_contractor_id=? LIMIT 1`).bind(pu.contractor_id).first() as Promise<any>,
+    // Find all NP/PA licenses that list this contractor as collab physician (by last name)
+    c.env.DB.prepare(`
+      SELECT pl.id, pl.contractor_id, pl.state, pl.license_number, pl.collab_physician, pl.collab_expiry,
+             pl.expiry_date, pl.status, pl.permitted_actions,
+             ct.name as provider_name, ct.role_group, ct.specialty
+      FROM provider_licenses pl
+      JOIN contractors ct ON ct.id = pl.contractor_id
+      WHERE pl.collab_physician != '' AND pl.collab_physician IS NOT NULL AND ct.id != ?
+      ORDER BY ct.name, pl.state
+    `).bind(pu.contractor_id).all(),
+  ])
+
+  const ctLastName = (contractor.last_name || contractor.name || '').split(' ').pop()?.toLowerCase() || ''
+  const collabProviders = ctLastName
+    ? (allCollabRes.results as any[]).filter((r: any) => r.collab_physician && r.collab_physician.toLowerCase().includes(ctLastName))
+    : []
+  const collabAgreements = (licensesRes.results as any[]).filter((l: any) => l.collab_physician && l.collab_physician.trim())
+
+  return c.json({
+    contractor,
+    licenses: licensesRes.results,
+    portal_user: { id: pu.id, name: pu.name, email: pu.email, phone: pu.phone || '' },
+    ob_candidate: ob || null,
+    collab_agreements: collabAgreements,  // states where this provider has a collab MD (as NP/PA)
+    collab_providers: collabProviders,    // NPs/PAs who list this MD as their collab
+  })
 })
 
 // ── PUT /api/provider/profile ─────────────────────────────────────
@@ -3668,17 +3690,82 @@ app.patch('/api/admin/contractors/:id/phone', requireAdmin, async (c) => {
 
 // ── Admin: GET /api/admin/contractors/:id/full-profile ───────────
 // Returns complete profile: contractor row + licenses + linked portal user + onboarding record (with photo)
+// Also returns:
+//   collab_agreements  — states where THIS provider has a collab physician (for NPs/PAs)
+//   collab_providers   — NPs/PAs who list THIS contractor as their collab physician (for MDs)
 app.get('/api/admin/contractors/:id/full-profile', requireAdmin, async (c) => {
   await ensureProviderSchema(c.env.DB)
   const cid = c.req.param('id')
   const contractor = await c.env.DB.prepare(`SELECT * FROM contractors WHERE id=?`).bind(cid).first() as any
   if (!contractor) return c.json({ error: 'Not found' }, 404)
-  const [licensesRes, portalUser, obCandidate] = await Promise.all([
+  const [licensesRes, portalUser, obCandidate, collabProvidersRes] = await Promise.all([
     c.env.DB.prepare(`SELECT * FROM provider_licenses WHERE contractor_id=? ORDER BY state ASC`).bind(cid).all(),
     c.env.DB.prepare(`SELECT id, name, email, role, is_active, last_login, contractor_id FROM portal_users WHERE contractor_id=? LIMIT 1`).bind(cid).first() as Promise<any>,
     c.env.DB.prepare(`SELECT * FROM onboarding_candidates WHERE converted_contractor_id=? LIMIT 1`).bind(cid).first() as Promise<any>,
+    // Find all NP/PA licenses that name this contractor as collab physician (by last name match)
+    c.env.DB.prepare(`
+      SELECT pl.id, pl.contractor_id, pl.state, pl.license_number, pl.license_type,
+             pl.collab_physician, pl.collab_expiry, pl.expiry_date, pl.status,
+             pl.permitted_actions, pl.practice_type,
+             ct.name as provider_name, ct.role_group, ct.specialty
+      FROM provider_licenses pl
+      JOIN contractors ct ON ct.id = pl.contractor_id
+      WHERE pl.collab_physician != '' AND pl.collab_physician IS NOT NULL
+        AND ct.id != ?
+      ORDER BY ct.name, pl.state
+    `).bind(cid).all(),
   ])
-  return c.json({ contractor, licenses: licensesRes.results, portal_user: portalUser || null, ob_candidate: obCandidate || null })
+  // Filter collab_providers to those whose collab_physician matches this contractor's last name
+  const ctLastName = (contractor.last_name || contractor.name || '').split(' ').pop()?.toLowerCase() || ''
+  const allCollabRows = collabProvidersRes.results as any[]
+  const collabProviders = ctLastName
+    ? allCollabRows.filter((r: any) => r.collab_physician && r.collab_physician.toLowerCase().includes(ctLastName))
+    : []
+
+  // collab_agreements: licenses belonging to this contractor that have a collab physician set
+  const collabAgreements = (licensesRes.results as any[]).filter((l: any) => l.collab_physician && l.collab_physician.trim())
+
+  return c.json({
+    contractor,
+    licenses: licensesRes.results,
+    portal_user: portalUser || null,
+    ob_candidate: obCandidate || null,
+    collab_agreements: collabAgreements,   // states where this NP/PA has a collab MD
+    collab_providers: collabProviders,     // NPs/PAs who list this MD as their collab
+  })
+})
+
+// ── Admin/LicEditor: GET /api/contractors/:id/collab-summary ─────
+// Lightweight endpoint accessible by license_editor — returns collab data for both sides
+app.get('/api/contractors/:id/collab-summary', requireLicenseEditor, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const cid = parseInt(c.req.param('id'))
+  const contractor = await c.env.DB.prepare(`SELECT id, name, last_name, role_group FROM contractors WHERE id=?`).bind(cid).first() as any
+  if (!contractor) return c.json({ error: 'Not found' }, 404)
+
+  const [myLicenses, allCollabRes] = await Promise.all([
+    c.env.DB.prepare(`SELECT id, state, collab_physician, collab_expiry, expiry_date, status, license_number, permitted_actions FROM provider_licenses WHERE contractor_id=? AND collab_physician != '' AND collab_physician IS NOT NULL ORDER BY state`).bind(cid).all(),
+    c.env.DB.prepare(`
+      SELECT pl.id, pl.contractor_id, pl.state, pl.license_number, pl.collab_physician, pl.collab_expiry,
+             pl.expiry_date, pl.status, pl.permitted_actions,
+             ct.name as provider_name, ct.role_group, ct.specialty
+      FROM provider_licenses pl
+      JOIN contractors ct ON ct.id = pl.contractor_id
+      WHERE pl.collab_physician != '' AND pl.collab_physician IS NOT NULL AND ct.id != ?
+      ORDER BY ct.name, pl.state
+    `).bind(cid).all(),
+  ])
+
+  const ctLastName = (contractor.last_name || contractor.name || '').split(' ').pop()?.toLowerCase() || ''
+  const collabProviders = ctLastName
+    ? (allCollabRes.results as any[]).filter((r: any) => r.collab_physician && r.collab_physician.toLowerCase().includes(ctLastName))
+    : []
+
+  return c.json({
+    contractor,
+    collab_agreements: myLicenses.results,  // this provider's own collab agreements (as NP/PA)
+    collab_providers: collabProviders,       // NPs/PAs naming this contractor as their collab MD
+  })
 })
 
 // ── Admin: PUT /api/admin/users/:id/link-contractor ──────────────

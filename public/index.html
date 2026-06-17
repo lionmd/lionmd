@@ -6797,7 +6797,7 @@ function obContractorsSearch(val) {
 }
 
 // ── Contractor Detail Slide-Over Panel ───────────────────────────
-const ctDetailState = { tab: 'payroll', contractorId: null, licenses: [], fullProfile: null, docs: [] }
+const ctDetailState = { tab: 'payroll', contractorId: null, licenses: [], fullProfile: null, docs: [], collabAgreements: [], collabProviders: [] }
 
 async function obOpenContractorDetail(contractorId) {
   ctDetailState.contractorId = contractorId
@@ -6841,6 +6841,8 @@ async function obOpenContractorDetail(contractorId) {
     ctDetailState.licenses = licenses
     ctDetailState.fullProfile = fullProfile
     ctDetailState.docs = docs || []
+    ctDetailState.collabAgreements = fullProfile?.collab_agreements || []
+    ctDetailState.collabProviders  = fullProfile?.collab_providers  || []
     obRenderContractorDetail(data)
   } catch(e) {
     $('ctDetailBody').innerHTML = `<p class="text-red-500 text-sm text-center py-10">${e.message}</p>`
@@ -6877,6 +6879,8 @@ function obRenderContractorDetail(data) {
   const licenses = ctDetailState.licenses || []
   const fp = ctDetailState.fullProfile  // full profile from /api/admin/contractors/:id/full-profile
   const ctDocs = ctDetailState.docs || []
+  const collabAgreements = ctDetailState.collabAgreements || []
+  const collabProviders  = ctDetailState.collabProviders  || []
 
   // Merge: contractor row fields take priority; fall back to ob_candidate for photo/specialty
   const photoData = ct.photo_data || ob_candidate?.photo_data || ''
@@ -7145,6 +7149,52 @@ function obRenderContractorDetail(data) {
               Converted ${ob_candidate.converted_at ? new Date(ob_candidate.converted_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}) : 'Unknown'}
             </div>
           </div>
+        </div>` : ''}
+
+        <!-- Collaborating Agreements: states where this NP/PA has a collab MD -->
+        ${collabAgreements.length > 0 ? `
+        <div class="p-4 rounded-xl bg-purple-50 border border-purple-100">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-purple-700 uppercase tracking-wider"><i class="fas fa-handshake mr-1"></i>Collaborating Agreements (${collabAgreements.length} state${collabAgreements.length!==1?'s':''})</p>
+            <button onclick="ctSwitchTab('licenses')" class="text-xs text-purple-500 hover:underline">Edit →</button>
+          </div>
+          <div class="space-y-1.5">
+            ${collabAgreements.map(l => {
+              const expPast = l.collab_expiry && new Date(l.collab_expiry) < new Date()
+              const expSoon = l.collab_expiry && (() => { const d=new Date(l.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+              return `<div class="flex items-center gap-2 text-sm">
+                <span class="w-9 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
+                <span class="font-medium text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+                ${l.collab_expiry ? `<span class="text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500':'text-gray-400'}">· exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+                ${l.permitted_actions ? `<span class="ml-auto text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+              </div>`
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+        <!-- Collaborating Providers: NPs/PAs who list this MD as their collab physician -->
+        ${collabProviders.length > 0 ? `
+        <div class="p-4 rounded-xl bg-indigo-50 border border-indigo-100">
+          <p class="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-3"><i class="fas fa-users mr-1"></i>Providers Under This Agreement</p>
+          ${(() => {
+            const byProvider = {}
+            for (const r of collabProviders) {
+              if (!byProvider[r.contractor_id]) byProvider[r.contractor_id] = { name: r.provider_name, role_group: r.role_group, states: [] }
+              byProvider[r.contractor_id].states.push(r)
+            }
+            return Object.values(byProvider).map(prov => `
+              <div class="mb-2 last:mb-0 p-2.5 rounded-xl bg-white border border-indigo-100">
+                <p class="text-sm font-semibold text-gray-800 mb-1.5"><i class="fas fa-user-nurse mr-1 text-indigo-400 text-xs"></i>${escHtml(prov.name)} <span class="text-xs font-normal text-indigo-400">${escHtml(prov.role_group||'')}</span></p>
+                <div class="flex flex-wrap gap-1">
+                  ${prov.states.map(s => {
+                    const expPast = s.collab_expiry && new Date(s.collab_expiry) < new Date()
+                    const expSoon = s.collab_expiry && (() => { const d=new Date(s.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+                    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold border border-indigo-200 text-indigo-700 bg-indigo-50" title="${escHtml(s.collab_expiry?'Exp: '+s.collab_expiry:'')}">${escHtml(s.state)}${expPast?' ⚠️':expSoon?' ⏰':''}</span>`
+                  }).join('')}
+                </div>
+              </div>
+            `).join('')
+          })()}
         </div>` : ''}
       </div>
     </div>
@@ -12116,7 +12166,7 @@ async function renderProviderProfile() {
 
 function ppDrawProfile(data) {
   const mc = $('mainContent')
-  const { contractor: ct, portal_user: pu, licenses, ob_candidate: ob } = data
+  const { contractor: ct, portal_user: pu, licenses, ob_candidate: ob, collab_agreements, collab_providers } = data
   if (!ct) { mc.innerHTML = '<p class="text-red-500 p-4">No profile linked.</p>'; return }
 
   // Resolve photo: contractor row first, then onboarding candidate as fallback
@@ -12253,7 +12303,7 @@ function ppDrawProfile(data) {
 
     <!-- Licensing summary snippet -->
     ${(licenses||[]).length > 0 ? `
-    <div class="card p-5">
+    <div class="card p-5 mb-5">
       <div class="flex items-center justify-between mb-3">
         <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">State Licenses (${licenses.length})</h3>
         <button onclick="navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline">Manage All →</button>
@@ -12264,6 +12314,56 @@ function ppDrawProfile(data) {
           return `<span class="px-2.5 py-1 rounded-full text-xs font-semibold ${cls}">${escHtml(l.state)}</span>`
         }).join('')}
       </div>
+    </div>` : ''}
+
+    <!-- Collaborating Agreements: states where this provider has a collab MD -->
+    ${(collab_agreements||[]).length > 0 ? `
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider"><i class="fas fa-handshake mr-1 text-purple-400"></i>Collaborating Agreements (${collab_agreements.length} state${collab_agreements.length!==1?'s':''})</h3>
+        <button onclick="navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline">Edit →</button>
+      </div>
+      <div class="space-y-2">
+        ${collab_agreements.map(l => {
+          const expSoon = l.collab_expiry && (() => { const d=new Date(l.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+          const expPast = l.collab_expiry && new Date(l.collab_expiry) < new Date()
+          return `<div class="flex items-center gap-3 p-2.5 rounded-xl bg-purple-50 border border-purple-100">
+            <span class="w-10 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded-lg py-1">${escHtml(l.state)}</span>
+            <div class="flex-1 min-w-0">
+              <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+              ${l.collab_expiry ? `<span class="ml-2 text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500 font-semibold':'text-gray-400'}"><i class="fas fa-calendar mr-0.5 text-[10px]"></i>Exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+            </div>
+            ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+          </div>`
+        }).join('')}
+      </div>
+    </div>` : ''}
+
+    <!-- Collaborating Providers: NPs/PAs who list this MD as their collab physician -->
+    ${(collab_providers||[]).length > 0 ? `
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider"><i class="fas fa-users mr-1 text-indigo-400"></i>Providers Under My Agreement (${[...new Set((collab_providers||[]).map(p=>p.contractor_id))].length})</h3>
+      </div>
+      ${(() => {
+        const byProvider = {}
+        for (const r of (collab_providers||[])) {
+          if (!byProvider[r.contractor_id]) byProvider[r.contractor_id] = { name: r.provider_name, role_group: r.role_group, states: [] }
+          byProvider[r.contractor_id].states.push(r)
+        }
+        return Object.values(byProvider).map(prov => `
+          <div class="mb-2 p-3 rounded-xl bg-indigo-50 border border-indigo-100">
+            <p class="text-sm font-semibold text-gray-800 mb-2"><i class="fas fa-user-nurse mr-1.5 text-indigo-400"></i>${escHtml(prov.name)} <span class="text-xs font-normal text-indigo-500">${escHtml(prov.role_group||'')}</span></p>
+            <div class="flex flex-wrap gap-1.5">
+              ${prov.states.map(s => {
+                const expPast = s.collab_expiry && new Date(s.collab_expiry) < new Date()
+                const expSoon = s.collab_expiry && (() => { const d=new Date(s.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+                return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-white border border-indigo-200 text-indigo-700" title="${escHtml(s.collab_expiry?'Exp. '+s.collab_expiry:'')}">${escHtml(s.state)}${expPast?' ⚠️':expSoon?' ⏰':''}</span>`
+              }).join('')}
+            </div>
+          </div>
+        `).join('')
+      })()}
     </div>` : ''}
   </div>
   `
@@ -14316,6 +14416,7 @@ const licEditState = {
   activeCt: null,      // { id, name, role_group }
   licenses: [],
   loading: false,
+  collabData: null,    // { collab_agreements, collab_providers } for active provider
 }
 
 async function renderLicEdit() {
@@ -14326,8 +14427,12 @@ async function renderLicEdit() {
     licEditState.contractors = contractors || []
     licEditState.activeCt = licEditState.activeCt || (contractors[0] ? { id: contractors[0].id, name: contractors[0].name, role_group: contractors[0].role_group || '' } : null)
     if (licEditState.activeCt) {
-      const lics = await api(`/api/license-editor/contractors/${licEditState.activeCt.id}/licenses`)
+      const [lics, collab] = await Promise.all([
+        api(`/api/license-editor/contractors/${licEditState.activeCt.id}/licenses`),
+        api(`/api/contractors/${licEditState.activeCt.id}/collab-summary`).catch(() => null)
+      ])
       licEditState.licenses = lics || []
+      licEditState.collabData = collab
     }
     licEditDrawShell()
   } catch(e) {
@@ -14380,7 +14485,9 @@ function licEditDrawShell() {
         <div class="divide-y divide-gray-100">
           ${licEditState.licenses.map(l => licEditLicRow(l, ct)).join('')}
         </div>`}
-      </div>` : `
+      </div>
+      ${licEditDrawCollabPanel()}
+      ` : `
       <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center text-gray-400">
         <i class="fas fa-arrow-left text-3xl mb-3 block"></i><p>Select a provider to manage their licenses.</p>
       </div>`}
@@ -14427,13 +14534,90 @@ function licEditLicRow(l, ct) {
   </div>`
 }
 
+function licEditDrawCollabPanel() {
+  const cd = licEditState.collabData
+  if (!cd) return ''
+  const agreements = cd.collab_agreements || []
+  const providers  = cd.collab_providers  || []
+  if (agreements.length === 0 && providers.length === 0) return ''
+
+  const expCheck = (dateStr) => {
+    if (!dateStr) return ''
+    const d = new Date(dateStr), n = new Date()
+    if (d < n) return ' ⚠️'
+    if (d < new Date(n.getTime() + 60*24*60*60*1000)) return ' ⏰'
+    return ''
+  }
+
+  let html = '<div class="space-y-3">'
+
+  // Collab Agreements (this provider has these collab MDs)
+  if (agreements.length > 0) {
+    html += `
+    <div class="bg-white rounded-xl border border-purple-200 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-purple-100 bg-purple-50">
+        <h4 class="font-semibold text-purple-800 text-sm"><i class="fas fa-handshake mr-1.5 text-purple-500"></i>Collaborating Agreements <span class="font-normal text-purple-500">(${agreements.length} state${agreements.length!==1?'s':''})</span></h4>
+        <span class="text-xs text-purple-400">MD agreement per state</span>
+      </div>
+      <div class="divide-y divide-purple-50">`
+    for (const l of agreements) {
+      const flag = expCheck(l.collab_expiry)
+      html += `<div class="flex items-center gap-3 px-4 py-2.5">
+        <span class="w-10 text-center text-xs font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-md py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
+        <div class="flex-1 min-w-0">
+          <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+          ${l.collab_expiry ? `<span class="ml-2 text-xs text-gray-400">· Agr. exp. ${l.collab_expiry}${flag}</span>` : ''}
+        </div>
+        ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+      </div>`
+    }
+    html += `</div></div>`
+  }
+
+  // Collab Providers (NPs/PAs who list this MD as their collab physician)
+  if (providers.length > 0) {
+    const byProvider = {}
+    for (const r of providers) {
+      if (!byProvider[r.contractor_id]) byProvider[r.contractor_id] = { name: r.provider_name, role_group: r.role_group, states: [] }
+      byProvider[r.contractor_id].states.push(r)
+    }
+    const provList = Object.values(byProvider)
+    html += `
+    <div class="bg-white rounded-xl border border-indigo-200 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-indigo-100 bg-indigo-50">
+        <h4 class="font-semibold text-indigo-800 text-sm"><i class="fas fa-users mr-1.5 text-indigo-500"></i>Providers Under This Agreement <span class="font-normal text-indigo-500">(${provList.length})</span></h4>
+        <span class="text-xs text-indigo-400">NPs/PAs naming this MD</span>
+      </div>
+      <div class="divide-y divide-indigo-50">`
+    for (const prov of provList) {
+      html += `<div class="px-4 py-2.5">
+        <p class="text-sm font-semibold text-gray-800 mb-1.5"><i class="fas fa-user-nurse mr-1.5 text-indigo-400 text-xs"></i>${escHtml(prov.name)} <span class="text-xs font-normal text-indigo-400">${escHtml(prov.role_group||'')}</span></p>
+        <div class="flex flex-wrap gap-1">`
+      for (const s of prov.states) {
+        const flag = expCheck(s.collab_expiry)
+        html += `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 border border-indigo-200 text-indigo-700" title="${escHtml(s.collab_expiry?'Agr exp: '+s.collab_expiry:'')}">${escHtml(s.state)}${flag}</span>`
+      }
+      html += `</div></div>`
+    }
+    html += `</div></div>`
+  }
+
+  html += '</div>'
+  return html
+}
+
 async function licEditSelectProvider(id, name, roleGroup) {
   licEditState.activeCt = { id, name, role_group: roleGroup }
   try {
-    const lics = await api(`/api/license-editor/contractors/${id}/licenses`)
+    const [lics, collab] = await Promise.all([
+      api(`/api/license-editor/contractors/${id}/licenses`),
+      api(`/api/contractors/${id}/collab-summary`).catch(() => null)
+    ])
     licEditState.licenses = lics || []
+    licEditState.collabData = collab
   } catch(e) {
     licEditState.licenses = []
+    licEditState.collabData = null
   }
   licEditDrawShell()
 }
