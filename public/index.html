@@ -12606,7 +12606,8 @@ function ppDrawLicenses(licenses) {
 function ppOpenAddLicense()      { ppShowLicenseModal(null) }
 function ppOpenEditLicense(lic)  { ppShowLicenseModal(lic) }
 
-function ppShowLicenseModal(lic) {
+async function ppShowLicenseModal(lic) {
+  await ensurePhysicianList('provider')
   const isEdit = !!lic
   let modal = $('ppLicenseModal')
   if (!modal) {
@@ -12661,7 +12662,11 @@ function ppShowLicenseModal(lic) {
           <div class="grid grid-cols-2 gap-3">
             <div>
               <label class="block text-xs font-semibold text-gray-600 mb-1">Physician Name</label>
-              <input id="ppLicCollab" type="text" placeholder="e.g. Dr. Jane Smith, MD" value="${escHtml(lic?.collab_physician||'')}" class="w-full text-sm"/>
+              <select id="ppLicCollab" class="w-full text-sm">
+                <option value="">— None / Not Required —</option>
+                ${(ppPhysicianList||[]).map(p => `<option value="${escHtml(p.last_name)}" ${(lic?.collab_physician||'')=== p.last_name?'selected':''}>${escHtml(p.name)}</option>`).join('')}
+                ${(lic?.collab_physician && !(ppPhysicianList||[]).find(p=>p.last_name===lic.collab_physician)) ? `<option value="${escHtml(lic.collab_physician)}" selected>${escHtml(lic.collab_physician)} (existing)</option>` : ''}
+              </select>
             </div>
             <div>
               <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiry</label>
@@ -14230,7 +14235,8 @@ function licEditEntry(licId) {
   const ctRole = lic.role_group || licEditState.activeCt?.role_group || ''
   licShowModal(lic, lic.contractor_id, ctName, ctRole)
 }
-function licShowModal(lic, contractorId, contractorName, roleGroup) {
+async function licShowModal(lic, contractorId, contractorName, roleGroup) {
+  await ensurePhysicianList('admin')
   const isEdit = !!lic
   let modal = $('licModal')
   if (!modal) {
@@ -14291,8 +14297,12 @@ function licShowModal(lic, contractorId, contractorName, roleGroup) {
           <i class="fas fa-user-md"></i> Collaborating Physician Agreement
         </div>
         <div>
-          <label class="block text-xs font-semibold text-gray-600 mb-1">Collaborating Physician Name</label>
-          <input id="licMCollab" type="text" placeholder="Dr. Jane Smith, MD" value="${escHtml(lic?.collab_physician||'')}" class="w-full text-sm"/>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Collaborating Physician</label>
+          <select id="licMCollab" class="w-full text-sm">
+            <option value="">— None / Not Required —</option>
+            ${(licPhysicianList||[]).map(p => `<option value="${escHtml(p.last_name)}" ${(lic?.collab_physician||'')=== p.last_name?'selected':''}>${escHtml(p.name)}</option>`).join('')}
+            ${(lic?.collab_physician && !(licPhysicianList||[]).find(p=>p.last_name===lic.collab_physician)) ? `<option value="${escHtml(lic.collab_physician)}" selected>${escHtml(lic.collab_physician)} (existing)</option>` : ''}
+          </select>
         </div>
         <div>
           <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiration Date</label>
@@ -14410,6 +14420,25 @@ async function licDeleteEntry(licId, contractorId) {
 // ════════════════════════════════════════════════════
 // LICENSE EDITOR PORTAL  — dedicated role UI
 // ════════════════════════════════════════════════════
+
+// Cached physician list for collab dropdowns — fetched once per session
+let licPhysicianList = []   // for admin/license-editor modal
+let ppPhysicianList  = []   // for provider license modal
+
+async function ensurePhysicianList(endpoint) {
+  // Returns the appropriate cached list, fetching if needed
+  if (endpoint === 'provider') {
+    if (ppPhysicianList.length === 0) {
+      try { ppPhysicianList = await api('/api/physicians') } catch(e) { ppPhysicianList = [] }
+    }
+    return ppPhysicianList
+  } else {
+    if (licPhysicianList.length === 0) {
+      try { licPhysicianList = await api('/api/license-editor/physicians') } catch(e) { licPhysicianList = [] }
+    }
+    return licPhysicianList
+  }
+}
 
 const licEditState = {
   contractors: [],

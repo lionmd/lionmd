@@ -3598,6 +3598,36 @@ app.get('/api/license-editor/contractors', requireLicenseEditor, async (c) => {
   return c.json(rows.results)
 })
 
+// ── GET /api/license-editor/physicians  — list of collaborating MDs for dropdown ──
+// Returns id, name, last_name for all active Physicians, sorted by name.
+// The dropdown value is stored as last_name (matching existing collab_physician data),
+// or falls back to last word of name if last_name is empty.
+app.get('/api/license-editor/physicians', requireLicenseEditor, async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT id, name, last_name FROM contractors WHERE role_group='Physician' AND is_active=1 ORDER BY name`
+  ).all()
+  // Compute display_last: use last_name if set, else last word of name
+  const result = (rows.results as any[]).map((r: any) => ({
+    id: r.id,
+    name: r.name,
+    last_name: r.last_name && r.last_name.trim() ? r.last_name.trim() : r.name.split(' ').pop() || r.name,
+  }))
+  return c.json(result)
+})
+
+// ── GET /api/physicians  — same but accessible to providers (requireProvider) ──
+app.get('/api/physicians', requireProvider, async (c) => {
+  const rows = await c.env.DB.prepare(
+    `SELECT id, name, last_name FROM contractors WHERE role_group='Physician' AND is_active=1 ORDER BY name`
+  ).all()
+  const result = (rows.results as any[]).map((r: any) => ({
+    id: r.id,
+    name: r.name,
+    last_name: r.last_name && r.last_name.trim() ? r.last_name.trim() : r.name.split(' ').pop() || r.name,
+  }))
+  return c.json(result)
+})
+
 // ── GET /api/license-editor/contractors/:id/licenses ──────────────
 app.get('/api/license-editor/contractors/:id/licenses', requireLicenseEditor, async (c) => {
   await ensureProviderSchema(c.env.DB)
