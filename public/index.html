@@ -14544,10 +14544,18 @@ async function renderPublicLicensing() {
   const body = document.getElementById('pubBody')
 
   try {
-    const rows = await fetch('/api/licensing/public').then(r => {
+    const data = await fetch('/api/licensing/public').then(r => {
       if (!r.ok) throw new Error('Failed to load licensing data')
       return r.json()
     })
+    // API now returns { contractors, licenses } — deduplicate double-import rows
+    const seen = new Map()
+    for (const r of (data.licenses || [])) {
+      const key = r.contractor_id + '-' + r.state
+      const ex = seen.get(key)
+      if (!ex || (r.license_number && !ex.license_number)) seen.set(key, r)
+    }
+    const rows = Array.from(seen.values())
 
     // Timestamp
     const ts = document.getElementById('pubTimestamp')
