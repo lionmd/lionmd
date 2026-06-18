@@ -3774,7 +3774,7 @@ app.get('/api/contractors/:id/collab-summary', requireLicenseEditor, async (c) =
   if (!contractor) return c.json({ error: 'Not found' }, 404)
 
   const [myLicenses, allCollabRes] = await Promise.all([
-    c.env.DB.prepare(`SELECT id, state, collab_physician, collab_expiry, expiry_date, status, license_number, permitted_actions FROM provider_licenses WHERE contractor_id=? AND collab_physician != '' AND collab_physician IS NOT NULL ORDER BY state`).bind(cid).all(),
+    c.env.DB.prepare(`SELECT id, state, collab_physician, collab_expiry, expiry_date, status, license_number, permitted_actions, notes FROM provider_licenses WHERE contractor_id=? AND collab_physician != '' AND collab_physician IS NOT NULL ORDER BY state`).bind(cid).all(),
     c.env.DB.prepare(`
       SELECT pl.id, pl.contractor_id, pl.state, pl.license_number, pl.collab_physician, pl.collab_expiry,
              pl.expiry_date, pl.status, pl.permitted_actions,

@@ -7162,11 +7162,14 @@ function obRenderContractorDetail(data) {
             ${collabAgreements.map(l => {
               const expPast = l.collab_expiry && new Date(l.collab_expiry) < new Date()
               const expSoon = l.collab_expiry && (() => { const d=new Date(l.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
-              return `<div class="flex items-center gap-2 text-sm">
-                <span class="w-9 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
-                <span class="font-medium text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
-                ${l.collab_expiry ? `<span class="text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500':'text-gray-400'}">· exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
-                ${l.permitted_actions ? `<span class="ml-auto text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+              return `<div class="space-y-0.5">
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="w-9 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
+                  <span class="font-medium text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+                  ${l.collab_expiry ? `<span class="text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500':'text-gray-400'}">· exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+                  ${l.permitted_actions ? `<span class="ml-auto text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+                </div>
+                ${l.notes ? `<div class="pl-11"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : ''}
               </div>`
             }).join('')}
           </div>
@@ -12356,13 +12359,16 @@ function ppDrawProfile(data) {
         ${collab_agreements.map(l => {
           const expSoon = l.collab_expiry && (() => { const d=new Date(l.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
           const expPast = l.collab_expiry && new Date(l.collab_expiry) < new Date()
-          return `<div class="flex items-center gap-3 p-2.5 rounded-xl bg-purple-50 border border-purple-100">
-            <span class="w-10 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded-lg py-1">${escHtml(l.state)}</span>
-            <div class="flex-1 min-w-0">
-              <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
-              ${l.collab_expiry ? `<span class="ml-2 text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500 font-semibold':'text-gray-400'}"><i class="fas fa-calendar mr-0.5 text-[10px]"></i>Exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+          return `<div class="p-2.5 rounded-xl bg-purple-50 border border-purple-100 space-y-1.5">
+            <div class="flex items-center gap-3">
+              <span class="w-10 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded-lg py-1 flex-shrink-0">${escHtml(l.state)}</span>
+              <div class="flex-1 min-w-0">
+                <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+                ${l.collab_expiry ? `<span class="ml-2 text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500 font-semibold':'text-gray-400'}"><i class="fas fa-calendar mr-0.5 text-[10px]"></i>Exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+              </div>
+              ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
             </div>
-            ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+            ${l.notes ? `<div class="pl-13"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : ''}
           </div>`
         }).join('')}
       </div>
@@ -14620,13 +14626,16 @@ function licEditDrawCollabPanel() {
       <div class="divide-y divide-purple-50">`
     for (const l of agreements) {
       const flag = expCheck(l.collab_expiry)
-      html += `<div class="flex items-center gap-3 px-4 py-2.5">
-        <span class="w-10 text-center text-xs font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-md py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
-        <div class="flex-1 min-w-0">
-          <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
-          ${l.collab_expiry ? `<span class="ml-2 text-xs text-gray-400">· Agr. exp. ${l.collab_expiry}${flag}</span>` : ''}
+      html += `<div class="px-4 py-2.5 space-y-1">
+        <div class="flex items-center gap-3">
+          <span class="w-10 text-center text-xs font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-md py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
+          <div class="flex-1 min-w-0">
+            <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+            ${l.collab_expiry ? `<span class="ml-2 text-xs text-gray-400">· Agr. exp. ${l.collab_expiry}${flag}</span>` : ''}
+          </div>
+          ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
         </div>
-        ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+        ${l.notes ? `<div class="pl-13"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : ''}
       </div>`
     }
     html += `</div></div>`
