@@ -12708,10 +12708,19 @@ async function ppShowLicenseModal(lic) {
               <input id="ppLicCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
             </div>
           </div>
-        </div>
-        <div>
-          <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
-          <textarea id="ppLicNotes" rows="2" placeholder="Optional notes…" class="w-full text-sm resize-none">${escHtml(lic?.notes||'')}</textarea>
+          <div class="mt-3">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">CPA Status</label>
+            <select id="ppLicNotes" class="w-full text-sm">
+              <option value="">— No Status —</option>
+              <option value="CPA: Not Required" ${(lic?.notes||'')==='CPA: Not Required'?'selected':''}>CPA: Not Required</option>
+              <option value="CPA: Sent for Signatures" ${(lic?.notes||'')==='CPA: Sent for Signatures'?'selected':''}>CPA: Sent for Signatures</option>
+              <option value="CPA: Signed &amp; Active" ${(lic?.notes||'')==='CPA: Signed & Active'?'selected':''}>CPA: Signed &amp; Active</option>
+              <option value="CPA: Expired" ${(lic?.notes||'')==='CPA: Expired'?'selected':''}>CPA: Expired</option>
+              <option value="CPA: Pending Renewal" ${(lic?.notes||'')==='CPA: Pending Renewal'?'selected':''}>CPA: Pending Renewal</option>
+              <option value="CPA: Needs New MD" ${(lic?.notes||'')==='CPA: Needs New MD'?'selected':''}>CPA: Needs New MD</option>
+              ${(lic?.notes && !['','CPA: Not Required','CPA: Sent for Signatures','CPA: Signed & Active','CPA: Expired','CPA: Pending Renewal','CPA: Needs New MD'].includes(lic.notes)) ? `<option value="${escHtml(lic.notes)}" selected>${escHtml(lic.notes)}</option>` : ''}
+            </select>
+          </div>
         </div>
         <div id="ppLicError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
         <div class="flex gap-3 pt-1">
@@ -14343,6 +14352,19 @@ async function licShowModal(lic, contractorId, contractorName, roleGroup) {
           <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiration Date</label>
           <input id="licMCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
         </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">CPA Status</label>
+          <select id="licMNotes" class="w-full text-sm">
+            <option value="">— No Status —</option>
+            <option value="CPA: Not Required" ${(lic?.notes||'')==='CPA: Not Required'?'selected':''}>CPA: Not Required</option>
+            <option value="CPA: Sent for Signatures" ${(lic?.notes||'')==='CPA: Sent for Signatures'?'selected':''}>CPA: Sent for Signatures</option>
+            <option value="CPA: Signed &amp; Active" ${(lic?.notes||'')==='CPA: Signed & Active'?'selected':''}>CPA: Signed &amp; Active</option>
+            <option value="CPA: Expired" ${(lic?.notes||'')==='CPA: Expired'?'selected':''}>CPA: Expired</option>
+            <option value="CPA: Pending Renewal" ${(lic?.notes||'')==='CPA: Pending Renewal'?'selected':''}>CPA: Pending Renewal</option>
+            <option value="CPA: Needs New MD" ${(lic?.notes||'')==='CPA: Needs New MD'?'selected':''}>CPA: Needs New MD</option>
+            ${(lic?.notes && !['','CPA: Not Required','CPA: Sent for Signatures','CPA: Signed & Active','CPA: Expired','CPA: Pending Renewal','CPA: Needs New MD'].includes(lic.notes)) ? `<option value="${escHtml(lic.notes)}" selected>${escHtml(lic.notes)}</option>` : ''}
+          </select>
+        </div>
       </div>
       <!-- Permitted Actions / Practice Authority -->
       <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
@@ -14372,10 +14394,7 @@ async function licShowModal(lic, contractorId, contractorName, roleGroup) {
           </select>
         </div>
       </div>
-      <div>
-        <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
-        <textarea id="licMNotes" rows="2" placeholder="Optional notes…" class="w-full text-sm resize-none">${escHtml(lic?.notes||'')}</textarea>
-      </div>
+
       <div id="licMErr" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
       <div class="flex gap-2 pt-1">
         ${isEdit ? `<button onclick="licDeleteEntry(${lic.id},${contractorId})"
