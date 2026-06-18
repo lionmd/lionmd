@@ -552,6 +552,7 @@ app.delete('/api/contractors/:id/permanent', requireAdmin, async (c) => {
   // Delete all associated data first (FK cascade not guaranteed in D1)
   await c.env.DB.prepare(`DELETE FROM contractor_documents WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`DELETE FROM portal_users WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`UPDATE upload_sessions SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`UPDATE consult_records SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`DELETE FROM contractors WHERE id=?`).bind(id).run()
@@ -3986,6 +3987,73 @@ app.get('/api/manager/contractors/:id/documents/:did/download', requireManager, 
   })
 })
 
+// ── PUT /api/manager/contractors/:id/profile ──────────────────────────
+// Manager can edit a contractor's basic profile fields (no financial data)
+app.put('/api/manager/contractors/:id/profile', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  const { first_name, last_name, email, phone, bio, specialty, npi, states_licensed } = await c.req.json() as any
+  const name = [first_name, last_name].filter(Boolean).join(' ')
+  await c.env.DB.prepare(`
+    UPDATE contractors SET
+      first_name=?, last_name=?, name=?, email=?, phone=?, bio=?,
+      specialty=?, npi=?, states_licensed=?
+    WHERE id=?
+  `).bind(
+    first_name || '', last_name || '', name || first_name || last_name || '',
+    email || '', phone || '', bio || '',
+    specialty || '', npi || '', states_licensed || '',
+    id
+  ).run()
+  return c.json({ ok: true })
+})
+
+// ── POST /api/manager/contractors/:id/documents ───────────────────────
+// Manager uploads a document for a contractor
+app.post('/api/manager/contractors/:id/documents', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  const formData = await c.req.formData()
+  const file = formData.get('file') as File | null
+  const doc_type = (formData.get('doc_type') as string) || 'Other'
+  const notes = (formData.get('notes') as string) || ''
+
+  if (!file) return c.json({ error: 'file required' }, 400)
+
+  const arrayBuffer = await file.arrayBuffer()
+  const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)))
+
+  const uploaderName = user.name || user.email || 'manager'
+  const r = await c.env.DB.prepare(`
+    INSERT INTO contractor_documents (contractor_id, doc_type, file_name, file_size, mime_type, file_data, notes, uploaded_by)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).bind(id, doc_type, file.name, file.size, file.type || 'application/octet-stream', base64, notes, uploaderName).run()
+
+  return c.json({ ok: true, id: r.meta.last_row_id })
+})
+
+// ── DELETE /api/manager/contractors/:id/documents/:did ────────────────
+// Manager deletes a document they can access
+app.delete('/api/manager/contractors/:id/documents/:did', requireManager, async (c) => {
+  const user = c.get('user') as any
+  const id = parseInt(c.req.param('id'))
+  const did = c.req.param('did')
+  if (user.role !== 'admin') {
+    const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
+    if (!ok) return c.json({ error: 'Access denied' }, 403)
+  }
+  await c.env.DB.prepare(`DELETE FROM contractor_documents WHERE id=? AND contractor_id=?`).bind(did, id).run()
+  return c.json({ ok: true })
+})
+
 // ── GET /api/manager/consults ─────────────────────────────────────────
 // Returns consult records for all allowed contractors — NO fee columns
 app.get('/api/manager/consults', requireManager, async (c) => {
@@ -4224,20 +4292,21 @@ async function ensureClientPaymentsSchema(db: D1Database) {
     CREATE TABLE IF NOT EXISTS cp_payment_entries (
       id           INTEGER PRIMARY KEY AUTOINCREMENT,
       client_id    INTEGER NOT NULL,
-      period_key   TEXT    NOT NULL,   -- 'YYYY-MM'
-      amount       REAL,               -- NULL = no payment recorded
-      status       TEXT    DEFAULT 'paid',  -- 'paid'|'cancelled'|'past_due'|'venmo'|'pending'|'no_payment'
-      notes        TEXT,               -- dates, breakdown, extra info
-      is_active    INTEGER DEFAULT 1,  -- 0 = client inactive for this period (carries forward)
+      period_key   TEXT    NOT NULL,          -- 'YYYY-MM'
+      payment_date TEXT    DEFAULT NULL,      -- 'YYYY-MM-DD' optional explicit date
+      amount       REAL,                      -- NULL = no payment recorded
+      status       TEXT    DEFAULT 'paid',    -- 'paid'|'cancelled'|'past_due'|'venmo'|'pending'|'no_payment'
+      notes        TEXT,                      -- dates, breakdown, extra info
+      is_active    INTEGER DEFAULT 1,         -- 0 = client inactive for this period
       created_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
       updated_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (client_id) REFERENCES cp_clients(id),
-      UNIQUE(client_id, period_key)
+      FOREIGN KEY (client_id) REFERENCES cp_clients(id)
     )
   `).run().catch(() => {})
 
-  // Add is_active column to existing tables if it doesn't exist yet (safe migration)
+  // Safe column additions for existing tables
   await db.prepare(`ALTER TABLE cp_payment_entries ADD COLUMN is_active INTEGER DEFAULT 1`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE cp_payment_entries ADD COLUMN payment_date TEXT DEFAULT NULL`).run().catch(() => {})
 }
 
 // ── GET /api/client-payments/clients ────────────────────────────────
@@ -4366,12 +4435,12 @@ app.get('/api/client-payments/summary', requireAdmin, async (c) => {
 
   const byPeriod = await c.env.DB.prepare(`
     SELECT period_key,
-           COUNT(*)                                            as total_entries,
-           SUM(CASE WHEN status='paid'      THEN 1 ELSE 0 END) as paid_count,
-           SUM(CASE WHEN status='cancelled' THEN 1 ELSE 0 END) as cancelled_count,
-           SUM(CASE WHEN status='past_due'  THEN 1 ELSE 0 END) as past_due_count,
-           SUM(CASE WHEN status='pending'   THEN 1 ELSE 0 END) as pending_count,
-           SUM(CASE WHEN amount IS NOT NULL THEN amount ELSE 0 END) as total_amount
+           COUNT(*)                                                           as total_entries,
+           COUNT(DISTINCT CASE WHEN status='paid'      THEN client_id END)   as paid_count,
+           COUNT(DISTINCT CASE WHEN status='cancelled' THEN client_id END)   as cancelled_count,
+           COUNT(DISTINCT CASE WHEN status='past_due'  THEN client_id END)   as past_due_count,
+           COUNT(DISTINCT CASE WHEN status='pending'   THEN client_id END)   as pending_count,
+           SUM(CASE WHEN amount IS NOT NULL THEN amount ELSE 0 END)          as total_amount
     FROM cp_payment_entries
     GROUP BY period_key
     ORDER BY period_key DESC
@@ -4395,10 +4464,10 @@ app.get('/api/client-payments/summary', requireAdmin, async (c) => {
 // ── PUT /api/client-payments/entries/:id ─────────────────────────────
 app.put('/api/client-payments/entries/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
-  const { amount, status, notes } = await c.req.json() as any
+  const { amount, status, notes, payment_date } = await c.req.json() as any
   await c.env.DB.prepare(
-    `UPDATE cp_payment_entries SET amount=?, status=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(amount ?? null, status || 'paid', notes || '', id).run()
+    `UPDATE cp_payment_entries SET amount=?, status=?, notes=?, payment_date=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(amount ?? null, status || 'paid', notes || '', payment_date || null, id).run()
   return c.json({ ok: true })
 })
 
@@ -4433,49 +4502,31 @@ app.patch('/api/client-payments/entries/:id/active', requireAdmin, async (c) => 
 })
 
 // ── POST /api/client-payments/entries ────────────────────────────────
+// Creates a NEW payment entry (multiple allowed per client per month).
+// For status/is_active inheritance (cancelled/no_payment carry-forward),
+// the caller passes those explicitly from the ghost-entry data.
 app.post('/api/client-payments/entries', requireAdmin, async (c) => {
   await ensureClientPaymentsSchema(c.env.DB)
-  const { client_id, period_key, amount, status, notes } = await c.req.json() as any
+  const { client_id, period_key, amount, status, notes, payment_date, is_active } = await c.req.json() as any
   if (!client_id || !period_key) return c.json({ error: 'client_id and period_key required' }, 400)
 
-  // Inherit is_active AND status/notes from the most recent prior period for this client.
-  // Cancelled and no_payment entries carry forward automatically so the new month
-  // starts in the correct state without manual re-entry.
-  const prev = await c.env.DB.prepare(`
-    SELECT is_active, status, notes FROM cp_payment_entries
-    WHERE client_id=? AND period_key < ?
-    ORDER BY period_key DESC LIMIT 1
-  `).bind(client_id, period_key).first() as any
-
-  const inheritedActive = prev?.is_active ?? 1
-
-  // If caller explicitly provided a status, use it; otherwise inherit cancelled/no_payment
-  // from the previous period (so those clients show up correctly each new month).
-  // For all other prior statuses (paid, past_due, venmo, pending) a new month starts fresh.
-  let resolvedStatus = status  // caller-provided
-  if (!resolvedStatus) {
-    if (prev?.status === 'cancelled' || prev?.status === 'no_payment') {
-      resolvedStatus = prev.status
-    } else {
-      resolvedStatus = 'paid'
-    }
+  // Inherit is_active from most recent prior entry for this client (if not provided)
+  let inheritedActive = is_active ?? 1
+  if (is_active === undefined || is_active === null) {
+    const prev = await c.env.DB.prepare(`
+      SELECT is_active FROM cp_payment_entries
+      WHERE client_id=? AND period_key < ?
+      ORDER BY period_key DESC LIMIT 1
+    `).bind(client_id, period_key).first() as any
+    inheritedActive = prev?.is_active ?? 1
   }
 
-  // Only pre-fill notes for cancelled/no_payment inheritance; fresh entries start blank
-  const resolvedNotes = notes ?? (
-    (resolvedStatus === prev?.status && (resolvedStatus === 'cancelled' || resolvedStatus === 'no_payment'))
-      ? (prev?.notes || '')
-      : ''
-  )
-
-  await c.env.DB.prepare(
-    `INSERT INTO cp_payment_entries (client_id, period_key, amount, status, notes, is_active)
-     VALUES (?, ?, ?, ?, ?, ?)
-     ON CONFLICT(client_id, period_key) DO UPDATE SET
-       amount=excluded.amount, status=excluded.status,
-       notes=excluded.notes, updated_at=CURRENT_TIMESTAMP`
-  ).bind(client_id, period_key, amount ?? null, resolvedStatus, resolvedNotes, inheritedActive).run()
-  return c.json({ ok: true })
+  const resolvedStatus = status || 'paid'
+  const r = await c.env.DB.prepare(
+    `INSERT INTO cp_payment_entries (client_id, period_key, amount, status, notes, payment_date, is_active)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).bind(client_id, period_key, amount ?? null, resolvedStatus, notes || '', payment_date || null, inheritedActive).run()
+  return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
 // ── DELETE /api/client-payments/entries/:id ──────────────────────────

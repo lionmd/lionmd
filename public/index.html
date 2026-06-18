@@ -10785,7 +10785,10 @@ async function renderClientPayments() {
     <!-- Edit Entry Modal -->
     <div id="cpEntryModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
       <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
-        <h3 class="text-lg font-semibold text-gray-900 mb-4" id="cpEntryModalTitle">Edit Payment</h3>
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-gray-900" id="cpEntryModalTitle">Edit Payment</h3>
+          <button onclick="cpCloseEntryModal()" class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"><i class="fas fa-times"></i></button>
+        </div>
         <div class="space-y-4">
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Client</label>
@@ -10794,6 +10797,11 @@ async function renderClientPayments() {
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Period</label>
             <div id="cpEntryPeriodLabel" class="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200"></div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Payment Date <span class="text-gray-400 font-normal">(optional)</span></label>
+            <input id="cpEntryPaymentDate" type="date"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
           </div>
           <div>
             <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
@@ -10813,16 +10821,21 @@ async function renderClientPayments() {
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Notes <span class="text-gray-400 font-normal">(dates, breakdown…)</span></label>
-            <input id="cpEntryNotes" type="text" placeholder="e.g. 4/10 and 4/24"
+            <label class="block text-sm font-medium text-gray-700 mb-1">Notes <span class="text-gray-400 font-normal">(breakdown, reference…)</span></label>
+            <input id="cpEntryNotes" type="text" placeholder="e.g. Invoice #1234"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
           </div>
         </div>
-        <div class="flex justify-end gap-3 mt-6">
-          <button onclick="cpCloseEntryModal()"
-            class="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">Cancel</button>
-          <button onclick="cpSaveEntry()"
-            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">Save</button>
+        <div class="flex items-center justify-between mt-6">
+          <button id="cpEntryDeleteBtn" onclick="cpDeleteCurrentEntry()" class="hidden text-xs text-red-500 hover:text-red-700 px-3 py-2 rounded-lg hover:bg-red-50 transition">
+            <i class="fas fa-trash mr-1"></i>Delete
+          </button>
+          <div class="flex gap-3 ml-auto">
+            <button onclick="cpCloseEntryModal()"
+              class="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">Cancel</button>
+            <button onclick="cpSaveEntry()"
+              class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">Save</button>
+          </div>
         </div>
       </div>
     </div>
@@ -10866,8 +10879,13 @@ async function renderClientPayments() {
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
           </div>
           <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Notes <span class="text-gray-400 font-normal">(dates, breakdown…)</span></label>
-            <input id="cpQNotes" type="text" placeholder="e.g. 5/1 and 5/15"
+            <label class="block text-sm font-medium text-gray-700 mb-1">Payment Date <span class="text-gray-400 font-normal">(optional)</span></label>
+            <input id="cpQPaymentDate" type="date"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Notes <span class="text-gray-400 font-normal">(breakdown, reference…)</span></label>
+            <input id="cpQNotes" type="text" placeholder="e.g. Invoice #1234"
               class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
           </div>
         </div>
@@ -11086,65 +11104,76 @@ function cpRenderMonthly() {
   const entries = cpState.entries
   const clients = cpState.clients
 
-  // Build a map: client_id → entry
+  // Build a map: client_id → array of entries (multiple payments per month allowed)
   const entryMap = {}
-  for (const e of entries) entryMap[e.client_id] = e
+  for (const e of entries) {
+    if (!entryMap[e.client_id]) entryMap[e.client_id] = []
+    entryMap[e.client_id].push(e)
+  }
 
-  // Separate: inactive (is_active=0), paid, other, cancelled, no_payment/missing
-  const inactive = []
-  const paid = []
-  const attention = []
-  const cancelled = []
-  const missing = []
+  const inactive = [], paid = [], attention = [], cancelled = [], missing = []
 
   for (const cl of clients) {
-    const e = entryMap[cl.id]
-    if (e && (e.is_active === 0 || e.is_active === '0')) {
-      inactive.push({ client: cl, entry: e })
-    } else if (!e) {
-      missing.push({ client: cl, entry: null })
-    } else if (e.status === 'paid') {
-      paid.push({ client: cl, entry: e })
-    } else if (e.status === 'cancelled') {
-      cancelled.push({ client: cl, entry: e })
-    } else if (e.status === 'no_payment') {
-      cancelled.push({ client: cl, entry: e }) // visually grouped with cancelled
+    const clientEntries = entryMap[cl.id] || []
+    const realEntries = clientEntries.filter(e => e.id !== null)
+    const ghostEntry = clientEntries.find(e => e._ghost)
+    const isInact = realEntries.some(e => e.is_active === 0 || e.is_active === '0')
+
+    if (isInact && realEntries.length > 0) {
+      inactive.push({ client: cl, entries: realEntries })
+    } else if (realEntries.length === 0 && ghostEntry) {
+      cancelled.push({ client: cl, entries: [ghostEntry] })
+    } else if (realEntries.length === 0) {
+      missing.push({ client: cl, entries: [] })
     } else {
-      attention.push({ client: cl, entry: e })
+      const hasPaid = realEntries.some(e => e.status === 'paid' || e.status === 'venmo')
+      const allCancelledOrNo = realEntries.every(e => e.status === 'cancelled' || e.status === 'no_payment')
+      if (allCancelledOrNo) {
+        cancelled.push({ client: cl, entries: realEntries })
+      } else if (hasPaid) {
+        paid.push({ client: cl, entries: realEntries })
+      } else {
+        attention.push({ client: cl, entries: realEntries })
+      }
     }
   }
 
-  const totalPaid = paid.reduce((s, r) => s + (r.entry?.amount || 0), 0)
-  const totalAttention = attention.length
+  const totalPaid = paid.reduce((s, r) => s + r.entries.reduce((ss, e) => ss + (e.amount || 0), 0), 0)
 
   function row(item, isInactive) {
-    const { client, entry } = item
-    const eid = entry?.id || ''
-    const amt = entry?.status === 'paid' ? cpFmt(entry.amount) : '—'
-    const badge = entry ? cpStatusBadge(entry.status, entry.amount) : cpStatusBadge('pending', null)
-    const notes = entry?.notes || ''
-    const safeName = client.name.replace(/'/g,"\\'")
+    const { client, entries: clientEntries } = item
+    const safeName = client.name.replace(/'/g,"\'")
     const displayName = client.name
-    const inactiveBtn = isInactive && eid
-      ? `<button onclick="cpToggleClientActive('${eid}',0); event.stopPropagation()"
-           title="Reactivate this client for future periods"
-           class="text-xs text-emerald-600 hover:text-emerald-800 transition px-2 py-1 rounded hover:bg-emerald-50 mr-1 border border-emerald-200 bg-emerald-50">
-           <i class="fas fa-redo mr-1"></i>Reactivate
-         </button>`
+    const realEntries = clientEntries.filter(e => e.id !== null)
+    const ghostEntry = clientEntries.find(e => e._ghost)
+    const firstEntry = realEntries[0] || ghostEntry
+    const totalAmt = realEntries.filter(e => e.status==='paid'||e.status==='venmo').reduce((s,e)=>s+(e.amount||0),0)
+    const hasMultiple = realEntries.length > 1
+    const primaryBadge = hasMultiple
+      ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700"><i class="fas fa-layer-group text-[10px]"></i> ${realEntries.length} payments</span>`
+      : (firstEntry ? cpStatusBadge(firstEntry.status, firstEntry.amount) : cpStatusBadge('pending', null))
+    const amtDisplay = totalAmt > 0 ? cpFmt(totalAmt) : '—'
+    const allNotes = realEntries.map(e => {
+      const parts = []
+      if (e.payment_date) parts.push(new Date(e.payment_date+'T12:00:00').toLocaleDateString('en-US',{month:'numeric',day:'numeric'}))
+      if (e.notes) parts.push(e.notes)
+      return parts.join(': ')
+    }).filter(Boolean).join(' | ')
+    const inactiveBtn = isInactive && firstEntry?.id
+      ? `<button onclick="cpToggleClientActive('${firstEntry.id}',0); event.stopPropagation()" title="Reactivate this client for future periods" class="text-xs text-emerald-600 hover:text-emerald-800 transition px-2 py-1 rounded hover:bg-emerald-50 mr-1 border border-emerald-200 bg-emerald-50"><i class="fas fa-redo mr-1"></i>Reactivate</button>`
       : ''
     return `
       <tr class="hover:bg-gray-50 transition group">
         <td class="py-3 pl-4 pr-2">
-          <button onclick="cpOpenClientDetail(${client.id},'${safeName}')"
-            class="font-medium ${isInactive ? 'text-gray-400 hover:text-gray-600' : 'text-blue-600 hover:text-blue-800'} hover:underline text-sm text-left">${displayName}</button>
+          <button onclick="cpOpenClientDetail(${client.id},'${safeName}')" class="font-medium ${isInactive ? 'text-gray-400 hover:text-gray-600' : 'text-blue-600 hover:text-blue-800'} hover:underline text-sm text-left">${displayName}</button>
         </td>
-        <td class="py-3 px-2">${isInactive ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500"><i class="fas fa-moon"></i> Inactive</span>' : badge}</td>
-        <td class="py-3 px-2 text-sm font-semibold ${entry?.status==='paid' ? 'text-emerald-700' : 'text-gray-400'}">${isInactive ? '—' : amt}</td>
-        <td class="py-3 px-2 text-sm text-gray-500 max-w-xs truncate" title="${notes}">${notes}</td>
+        <td class="py-3 px-2">${isInactive ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500"><i class="fas fa-moon"></i> Inactive</span>' : primaryBadge}</td>
+        <td class="py-3 px-2 text-sm font-semibold ${totalAmt > 0 && !isInactive ? 'text-emerald-700' : 'text-gray-400'}">${isInactive ? '—' : amtDisplay}</td>
+        <td class="py-3 px-2 text-sm text-gray-500 max-w-xs truncate" title="${allNotes}">${allNotes}</td>
         <td class="py-3 pl-2 pr-4 text-right whitespace-nowrap">
-          ${inactiveBtn}<button onclick="cpOpenEntry(${client.id},'${safeName}','${eid}')" class="text-xs text-blue-500 hover:text-blue-700 transition px-2 py-1 rounded hover:bg-blue-50">
-            <i class="fas fa-edit mr-1"></i>Edit
-          </button>
+          ${inactiveBtn}
+          <button onclick="cpOpenClientDetail(${client.id},'${safeName}')" class="text-xs text-blue-500 hover:text-blue-700 transition px-2 py-1 rounded hover:bg-blue-50"><i class="fas fa-eye mr-1"></i>View</button>
+          <button onclick="cpOpenAddEntry(${client.id},'${safeName}')" class="text-xs text-emerald-500 hover:text-emerald-700 transition px-2 py-1 rounded hover:bg-emerald-50 ml-1"><i class="fas fa-plus mr-1"></i>Add</button>
         </td>
       </tr>`
   }
@@ -11163,8 +11192,7 @@ function cpRenderMonthly() {
         <div class="flex items-center gap-2 px-4 py-3 border-b border-gray-100 ${colorClass}">
           <i class="fas ${icon} text-sm"></i>
           <span class="font-semibold text-sm">${title}</span>
-          <span class="ml-auto text-xs font-medium bg-white/60 px-2 py-0.5 rounded-full">${items.length}</span>
-          ${showTotal && total > 0 ? `<span class="text-xs font-bold">${cpFmt(total)}</span>` : ''}
+          ${showTotal && total > 0 ? `<span class="ml-auto text-xs font-bold">${cpFmt(total)}</span>` : '<span class="ml-auto"></span>'}
         </div>
         <table class="w-full">
           <thead>
@@ -11192,7 +11220,6 @@ function cpRenderMonthly() {
       : ''}
   `
 }
-
 // ── CLIENTS VIEW ─────────────────────────────────────────────────────
 
 function cpRenderClientList() {
@@ -11389,50 +11416,72 @@ async function cpOpenClientDetail(clientId, clientName) {
       return
     }
 
-    // Group by year for visual separation
-    const byYear = {}
+    // Group by period (YYYY-MM) then by year for visual separation
+    // Multiple entries per period are now possible (multi-payment)
+    const byPeriod = {}
     for (const e of entries) {
-      const yr = e.period_key.slice(0, 4)
+      const pk = e.period_key
+      if (!byPeriod[pk]) byPeriod[pk] = []
+      byPeriod[pk].push(e)
+    }
+
+    // Get sorted unique periods descending
+    const sortedPeriods = Object.keys(byPeriod).sort().reverse()
+
+    // Group periods by year
+    const byYear = {}
+    for (const pk of sortedPeriods) {
+      const yr = pk.slice(0, 4)
       if (!byYear[yr]) byYear[yr] = []
-      byYear[yr].push(e)
+      byYear[yr].push(pk)
     }
 
     let html = ''
     for (const yr of Object.keys(byYear).sort().reverse()) {
-      const yearEntries = byYear[yr]
-      const yearTotal = yearEntries.filter(e => e.status === 'paid').reduce((s, e) => s + (e.amount || 0), 0)
+      const yearPeriods = byYear[yr]
+      // Sum all paid entries for the year
+      const yearTotal = yearPeriods.flatMap(pk => byPeriod[pk]).filter(e => e.status === 'paid').reduce((s, e) => s + (e.amount || 0), 0)
       html += `
         <div class="mb-5">
           <div class="flex items-center justify-between mb-2">
             <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">${yr}</span>
             ${yearTotal > 0 ? `<span class="text-xs font-semibold text-emerald-600">${cpFmt(yearTotal)}</span>` : ''}
           </div>
-          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">
-            <table class="w-full">
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">`
+
+      for (const pk of yearPeriods) {
+        const periodEntries = byPeriod[pk]
+        const hasMultiple = periodEntries.length > 1
+        const safeCN = clientName.replace(/'/g,"\\'")
+
+        html += `<table class="w-full ${hasMultiple ? 'border-b-2 border-blue-100' : ''}">
               <thead>
-                <tr class="bg-gray-50 border-b border-gray-100 text-xs text-gray-400 uppercase tracking-wide">
-                  <th class="py-2 pl-4 pr-2 text-left font-medium">Month</th>
-                  <th class="py-2 px-2 text-left font-medium">Status</th>
-                  <th class="py-2 px-2 text-right font-medium">Amount</th>
-                  <th class="py-2 pl-2 pr-4 text-left font-medium">Notes</th>
+                <tr class="bg-gray-50 border-b border-gray-100">
+                  <th class="py-2 pl-4 pr-2 text-left text-xs text-gray-400 font-bold uppercase tracking-wide" colspan="2">
+                    ${cpPeriodLabel(pk)}
+                    ${hasMultiple ? `<span class="ml-2 bg-blue-100 text-blue-600 text-xs px-1.5 py-0.5 rounded-full font-semibold">${periodEntries.length} payments</span>` : ''}
+                  </th>
+                  <th class="py-2 px-2 text-right text-xs text-gray-400 font-medium">Amount</th>
+                  <th class="py-2 pl-2 pr-4 text-left text-xs text-gray-400 font-medium">Date / Notes</th>
                 </tr>
               </thead>
               <tbody class="divide-y divide-gray-50">
-                ${yearEntries.map(e => {
+                ${periodEntries.map(e => {
                   const eInactive = e.is_active === 0 || e.is_active === '0'
-                  const safeCN = clientName.replace(/'/g,"\\'")
+                  const dateStr = e.payment_date ? new Date(e.payment_date + 'T12:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric'}) : ''
                   return `
                   <tr class="hover:bg-gray-50 transition group ${eInactive ? 'opacity-60' : ''}">
-                    <td class="py-3 pl-4 pr-2 text-sm font-medium text-gray-700">
-                      ${cpPeriodLabel(e.period_key)}
-                      ${eInactive ? '<span class="ml-1 text-xs text-purple-500 font-normal"><i class="fas fa-moon"></i></span>' : ''}
+                    <td class="py-2.5 pl-4 pr-2 w-4">
+                      ${eInactive ? '<i class="fas fa-moon text-purple-400 text-xs"></i>' : cpStatusBadge(e.status, e.amount)}
                     </td>
-                    <td class="py-3 px-2">${eInactive ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-400">Inactive</span>' : cpStatusBadge(e.status, e.amount)}</td>
-                    <td class="py-3 px-2 text-sm font-semibold text-right ${e.status === 'paid' && !eInactive ? 'text-emerald-700' : 'text-gray-400'}">${e.status === 'paid' && !eInactive ? cpFmt(e.amount) : '—'}</td>
-                    <td class="py-3 pl-2 pr-2 text-xs text-gray-400">
+                    <td class="py-2.5 px-1 text-xs text-gray-500 w-20">
+                      ${eInactive ? '<span class="text-gray-400">Inactive</span>' : (e.status === 'cancelled' ? '<span class="text-red-500 font-semibold">Cancelled</span>' : '')}
+                    </td>
+                    <td class="py-2.5 px-2 text-sm font-semibold text-right ${e.status === 'paid' && !eInactive ? 'text-emerald-700' : 'text-gray-400'}">${(e.status === 'paid' || e.status === 'venmo') && !eInactive ? cpFmt(e.amount) : '—'}</td>
+                    <td class="py-2.5 pl-2 pr-2 text-xs text-gray-400">
                       <div class="flex items-center justify-between gap-2">
-                        <span>${e.notes || ''}</span>
-                        <div class="opacity-0 group-hover:opacity-100 flex items-center gap-1">
+                        <span>${dateStr ? `<span class="text-gray-600 font-medium">${dateStr}</span>${e.notes ? ' · ' : ''}` : ''}${escHtml(e.notes || '')}</span>
+                        <div class="opacity-0 group-hover:opacity-100 flex items-center gap-1 flex-shrink-0">
                           <button onclick="cpToggleClientActive('${e.id}',${eInactive ? 0 : 1}); event.stopPropagation()"
                             title="${eInactive ? 'Reactivate' : 'Mark inactive'}"
                             class="flex-shrink-0 ${eInactive ? 'text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50' : 'text-purple-500 hover:text-purple-700 hover:bg-purple-50'} px-1.5 py-0.5 rounded transition text-xs">
@@ -11448,9 +11497,10 @@ async function cpOpenClientDetail(clientId, clientName) {
                   </tr>`
                 }).join('')}
               </tbody>
-            </table>
-          </div>
-        </div>`
+            </table>`
+      }
+
+      html += `</div></div>`
     }
 
     // Add entry button at bottom
@@ -11482,11 +11532,7 @@ function cpCloseClientDetail() {
 }
 
 function cpOpenEntryFromDetail(clientId, clientName, entryId) {
-  // Load entry from the full entries list we already have cached
-  // but we need to find it — fetch all entries fresh isn't needed,
-  // we can open the modal and let cpSaveEntry reload
   cpEntryContext = { clientId, clientName, entryId, period: cpState.currentPeriod }
-  // We need to fetch the entry details to pre-fill
   api('/api/client-payments/entries').then(all => {
     const entry = (all || []).find(e => e.id == entryId)
     $('cpEntryModalTitle').textContent = 'Edit Payment Entry'
@@ -11496,7 +11542,10 @@ function cpOpenEntryFromDetail(clientId, clientName, entryId) {
     $('cpEntryStatus').value = entry?.status || 'paid'
     $('cpEntryAmount').value = entry?.amount != null ? entry.amount : ''
     $('cpEntryNotes').value = entry?.notes || ''
+    $('cpEntryPaymentDate').value = entry?.payment_date || ''
     cpToggleAmountField()
+    const delBtn = $('cpEntryDeleteBtn')
+    if (delBtn) delBtn.classList.remove('hidden')
     $('cpEntryModal').classList.remove('hidden')
   })
 }
@@ -11505,14 +11554,18 @@ function cpOpenAddEntryFromDetail(clientId, clientName) {
   cpEntryContext = { clientId, clientName, entryId: null, period: cpState.currentPeriod }
   $('cpEntryModalTitle').textContent = 'Add Payment Entry'
   $('cpEntryClientName').textContent = clientName
-  // Show period selector in the modal for add-from-detail
-  $('cpEntryPeriodLabel').textContent = ''
-  // Replace static period label with a dropdown
-  $('cpEntryPeriodLabel').outerHTML = `<select id="cpEntryPeriodLabel" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">${cpAllPeriods().map(p => `<option value="${p}" ${p===cpState.currentPeriod?'selected':''}>${cpPeriodLabel(p)}</option>`).join('')}</select>`
+  // Replace static period label with a dropdown so user can pick the month
+  const periodEl = $('cpEntryPeriodLabel')
+  if (periodEl && periodEl.tagName !== 'SELECT') {
+    periodEl.outerHTML = `<select id="cpEntryPeriodLabel" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">${cpAllPeriods().map(p => `<option value="${p}" ${p===cpState.currentPeriod?'selected':''}>${cpPeriodLabel(p)}</option>`).join('')}</select>`
+  }
   $('cpEntryStatus').value = 'paid'
   $('cpEntryAmount').value = ''
   $('cpEntryNotes').value = ''
+  $('cpEntryPaymentDate').value = ''
   cpToggleAmountField()
+  const delBtn = $('cpEntryDeleteBtn')
+  if (delBtn) delBtn.classList.add('hidden')
   $('cpEntryModal').classList.remove('hidden')
 }
 
@@ -11521,23 +11574,21 @@ function cpOpenAddEntryFromDetail(clientId, clientName) {
 let cpEntryContext = null  // { clientId, clientName, entryId, period }
 
 function cpOpenEntry(clientId, clientName, entryId) {
-  // Find entry — real entries have a numeric id; ghost entries have id=null
-  // so entryId will be '' (falsy) but the ghost row still lives in cpState.entries
   const entry = entryId
     ? cpState.entries.find(e => e.id == entryId)
     : cpState.entries.find(e => e.client_id == clientId && e.period_key === cpState.currentPeriod) || null
-
-  // Ghost entries have no real DB id — treat as new entry (POST) but pre-fill their status
   const realEntryId = entry?.id || null
   cpEntryContext = { clientId, clientName, entryId: realEntryId, period: cpState.currentPeriod }
-
   $('cpEntryModalTitle').textContent = realEntryId ? 'Edit Payment Entry' : 'Add Payment Entry'
   $('cpEntryClientName').textContent = clientName
   $('cpEntryPeriodLabel').textContent = cpPeriodLabel(cpState.currentPeriod)
-  $('cpEntryStatus').value = entry?.status || 'pending'
+  $('cpEntryStatus').value = entry?.status || 'paid'
   $('cpEntryAmount').value = entry?.amount != null ? entry.amount : ''
   $('cpEntryNotes').value = entry?.notes || ''
+  $('cpEntryPaymentDate').value = entry?.payment_date || ''
   cpToggleAmountField()
+  const delBtn = $('cpEntryDeleteBtn')
+  if (delBtn) delBtn.classList.toggle('hidden', !realEntryId)
   $('cpEntryModal').classList.remove('hidden')
 }
 
@@ -11545,16 +11596,31 @@ function cpOpenAddEntry(clientId, clientName) {
   cpEntryContext = { clientId, clientName, entryId: null, period: cpState.currentPeriod }
   $('cpEntryModalTitle').textContent = 'Add Payment Entry'
   $('cpEntryClientName').textContent = clientName
-  $('cpEntryPeriodLabel').textContent = cpPeriodLabel(cpState.currentPeriod)
+  // Restore period label to static div if it was swapped to a select
+  const periodEl = $('cpEntryPeriodLabel')
+  if (periodEl && periodEl.tagName === 'SELECT') {
+    periodEl.outerHTML = `<div id="cpEntryPeriodLabel" class="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200">${cpPeriodLabel(cpState.currentPeriod)}</div>`
+  } else if (periodEl) {
+    periodEl.textContent = cpPeriodLabel(cpState.currentPeriod)
+  }
   $('cpEntryStatus').value = 'paid'
   $('cpEntryAmount').value = ''
   $('cpEntryNotes').value = ''
-  // Set period: if in clients view show period dropdown in modal
+  $('cpEntryPaymentDate').value = ''
   cpToggleAmountField()
+  const delBtn = $('cpEntryDeleteBtn')
+  if (delBtn) delBtn.classList.add('hidden')
   $('cpEntryModal').classList.remove('hidden')
 }
 
-function cpCloseEntryModal() { $('cpEntryModal').classList.add('hidden') }
+function cpCloseEntryModal() {
+  $('cpEntryModal').classList.add('hidden')
+  // Restore period label to static div if it was swapped to a select
+  const periodEl = $('cpEntryPeriodLabel')
+  if (periodEl && periodEl.tagName === 'SELECT') {
+    periodEl.outerHTML = `<div id="cpEntryPeriodLabel" class="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200"></div>`
+  }
+}
 
 function cpToggleAmountField() {
   const status = $('cpEntryStatus')?.value
@@ -11563,11 +11629,34 @@ function cpToggleAmountField() {
   wrap.classList.toggle('hidden', status !== 'paid' && status !== 'venmo')
 }
 
+async function cpDeleteCurrentEntry() {
+  if (!cpEntryContext?.entryId) return
+  if (!confirm('Delete this payment entry? This cannot be undone.')) return
+  try {
+    await api(`/api/client-payments/entries/${cpEntryContext.entryId}`, { method: 'DELETE' })
+    cpCloseEntryModal()
+    showToast('Payment entry deleted', 'success')
+    const [entries, summary] = await Promise.all([
+      api(`/api/client-payments/entries?period=${cpState.currentPeriod}`),
+      api('/api/client-payments/summary'),
+    ])
+    cpState.entries = entries || []
+    cpState.summary = summary || cpState.summary
+    cpRenderStats()
+    if (cpState.view === 'monthly') cpRenderMonthly()
+    else cpRenderClientList()
+    if ($('cpDetailPanel') && !$('cpDetailPanel').classList.contains('translate-x-full') && cpEntryContext) {
+      cpOpenClientDetail(cpEntryContext.clientId, cpEntryContext.clientName)
+    }
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
 async function cpSaveEntry() {
   if (!cpEntryContext) return
   const status = $('cpEntryStatus').value
   const amount = (status === 'paid' || status === 'venmo') ? parseFloat($('cpEntryAmount').value) || null : null
   const notes  = $('cpEntryNotes').value.trim()
+  const payment_date = $('cpEntryPaymentDate').value || null
   // If period label was replaced with a dropdown (add-from-detail), read its value
   const periodEl = $('cpEntryPeriodLabel')
   const period = (periodEl && periodEl.tagName === 'SELECT') ? periodEl.value : cpEntryContext.period
@@ -11577,12 +11666,12 @@ async function cpSaveEntry() {
     if (entryId) {
       await api(`/api/client-payments/entries/${entryId}`, {
         method: 'PUT',
-        body: JSON.stringify({ amount, status, notes })
+        body: JSON.stringify({ amount, status, notes, payment_date })
       })
     } else {
       await api('/api/client-payments/entries', {
         method: 'POST',
-        body: JSON.stringify({ client_id: clientId, period_key: period, amount, status, notes })
+        body: JSON.stringify({ client_id: clientId, period_key: period, amount, status, notes, payment_date })
       })
     }
     cpCloseEntryModal()
@@ -11635,18 +11724,19 @@ function cpQToggleAmount() {
 }
 
 async function cpSaveQuick() {
-  const clientId = $('cpQClient').value
-  const period   = $('cpQPeriod').value
-  const status   = $('cpQStatus').value
-  const amount   = (status === 'paid' || status === 'venmo') ? parseFloat($('cpQAmount').value) || null : null
-  const notes    = $('cpQNotes').value.trim()
+  const clientId    = $('cpQClient').value
+  const period      = $('cpQPeriod').value
+  const status      = $('cpQStatus').value
+  const amount      = (status === 'paid' || status === 'venmo') ? parseFloat($('cpQAmount').value) || null : null
+  const notes       = $('cpQNotes').value.trim()
+  const payment_date = $('cpQPaymentDate')?.value || null
 
   if (!clientId) { showToast('Please select a client', 'error'); return }
 
   try {
     await api('/api/client-payments/entries', {
       method: 'POST',
-      body: JSON.stringify({ client_id: clientId, period_key: period, amount, status, notes })
+      body: JSON.stringify({ client_id: clientId, period_key: period, amount, status, notes, payment_date })
     })
     cpCloseQuickModal()
     const clientName = cpState.clients.find(c => c.id == clientId)?.name || ''
@@ -13296,6 +13386,31 @@ function mgrDrawDetail() {
       ${ct.role_group ? `<div><span class="text-xs text-gray-400 block">Role Group</span><span class="text-gray-700">${escHtml(ct.role_group)}</span></div>` : ''}
     </div>
 
+    <!-- Edit Profile button -->
+    <div class="mb-3 flex justify-end">
+      <button onclick="mgrToggleEditProfile()" id="mgrEditProfileBtn"
+        class="text-xs text-indigo-600 hover:text-indigo-800 px-3 py-1.5 rounded-lg border border-indigo-200 hover:bg-indigo-50 transition font-semibold">
+        <i class="fas fa-pen mr-1.5"></i>Edit Profile
+      </button>
+    </div>
+    <!-- Inline Edit Profile form (hidden) -->
+    <div id="mgrEditProfileForm" class="hidden card p-4 border-2 border-indigo-200 bg-indigo-50 mb-4">
+      <h4 class="text-sm font-bold text-indigo-800 mb-3"><i class="fas fa-user-edit mr-1"></i>Edit Provider Profile</h4>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">First Name</label><input id="mgrProfFirst" class="w-full text-sm" value="${escHtml(ct.first_name||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Last Name</label><input id="mgrProfLast" class="w-full text-sm" value="${escHtml(ct.last_name||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Email</label><input id="mgrProfEmail" type="email" class="w-full text-sm" value="${escHtml(ct.email||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Phone</label><input id="mgrProfPhone" class="w-full text-sm" value="${escHtml(ct.phone||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Specialty</label><input id="mgrProfSpecialty" class="w-full text-sm" value="${escHtml(ct.specialty||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">NPI</label><input id="mgrProfNpi" class="w-full text-sm" value="${escHtml(ct.npi||'')}"></div>
+      </div>
+      <div class="mb-3"><label class="block text-xs font-semibold text-gray-600 mb-1">Bio / Notes</label><textarea id="mgrProfBio" class="w-full text-sm" rows="2">${escHtml(ct.bio||ct.notes||'')}</textarea></div>
+      <div class="flex gap-2">
+        <button onclick="mgrSaveProfile()" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Save Changes</button>
+        <button onclick="mgrToggleEditProfile()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+      </div>
+    </div>
+
     <!-- Tabs -->
     <div class="flex border-b border-gray-200 mb-4">
       <button onclick="mgrSetTab('licenses')" id="mgrTabLicenses" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='licenses' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
@@ -13309,6 +13424,33 @@ function mgrDrawDetail() {
     <!-- Tab content -->
     <div id="mgrTabContent">${mgrState.activeTab === 'licenses' ? mgrRenderLicensesTab() : mgrRenderDocumentsTab()}</div>
   </div>`
+}
+
+function mgrToggleEditProfile() {
+  const form = $('mgrEditProfileForm')
+  if (form) form.classList.toggle('hidden')
+}
+
+async function mgrSaveProfile() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    const body = {
+      first_name: $('mgrProfFirst')?.value?.trim() || '',
+      last_name:  $('mgrProfLast')?.value?.trim() || '',
+      email:      $('mgrProfEmail')?.value?.trim() || '',
+      phone:      $('mgrProfPhone')?.value?.trim() || '',
+      specialty:  $('mgrProfSpecialty')?.value?.trim() || '',
+      npi:        $('mgrProfNpi')?.value?.trim() || '',
+      bio:        $('mgrProfBio')?.value?.trim() || '',
+    }
+    await api(`/api/manager/contractors/${ct.id}/profile`, { method: 'PUT', body: JSON.stringify(body) })
+    showToast('Profile updated!', 'success')
+    // Refresh contractor data and redraw
+    const updated = await api(`/api/manager/contractors/${ct.id}`)
+    if (updated) mgrState.activeContractor = updated
+    mgrDrawDetail()
+  } catch(e) { showToast(e.message, 'error') }
 }
 
 function mgrBack() {
@@ -13466,16 +13608,54 @@ function mgrRenderLicensesTab() {
 
 function mgrRenderDocumentsTab() {
   const docs = mgrState.documents
+  const ctId = mgrState.activeContractor?.id
   return `
   <div>
+    <!-- Upload form -->
+    <div class="mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-sm font-semibold text-gray-700">Documents</p>
+        <button onclick="mgrToggleUploadForm()" class="btn-primary px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5">
+          <i class="fas fa-upload"></i> Upload Doc
+        </button>
+      </div>
+      <div id="mgrUploadForm" class="hidden card p-4 border-2 border-blue-200 bg-blue-50 mb-3">
+        <h4 class="text-sm font-bold text-blue-800 mb-3"><i class="fas fa-upload mr-1"></i>Upload Document</h4>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div class="col-span-2">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">File *</label>
+            <input id="mgrDocFile" type="file" class="w-full text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Document Type</label>
+            <select id="mgrDocType" class="w-full text-sm">
+              <option value="contract">Contract</option>
+              <option value="license">License</option>
+              <option value="certificate">Certificate</option>
+              <option value="id">ID / Credential</option>
+              <option value="insurance">Insurance</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Label (optional)</label>
+            <input id="mgrDocLabel" type="text" class="w-full text-sm" placeholder="e.g. NPI Certificate">
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="mgrSubmitDocument()" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Upload</button>
+          <button onclick="mgrToggleUploadForm()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+        </div>
+      </div>
+    </div>
     ${docs.length === 0 ? `
-      <div class="text-center py-10 text-gray-300">
+      <div class="text-center py-8 text-gray-300">
         <i class="fas fa-folder-open text-4xl mb-3 block"></i>
         <p class="text-sm">No documents on file.</p>
       </div>` : `
     <div class="space-y-2">
       ${docs.map(d => `
-      <div class="card p-3 flex items-center gap-3">
+      <div class="card p-3 flex items-center gap-3 group">
         <div class="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
           <i class="fas fa-file text-blue-500 text-xs"></i>
         </div>
@@ -13483,13 +13663,64 @@ function mgrRenderDocumentsTab() {
           <div class="text-sm font-medium text-gray-800 truncate">${escHtml(d.file_name)}</div>
           <div class="text-xs text-gray-400">${escHtml(d.doc_type||'Document')} · ${d.file_size ? Math.round(d.file_size/1024) + ' KB · ' : ''}${new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
         </div>
-        <a href="/api/manager/contractors/${mgrState.activeContractor.id}/documents/${d.id}/download" target="_blank"
-          class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors tooltip" data-tip="Download">
-          <i class="fas fa-download text-xs"></i>
-        </a>
+        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+          <a href="/api/manager/contractors/${ctId}/documents/${d.id}/download" target="_blank"
+            class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors" title="Download">
+            <i class="fas fa-download text-xs"></i>
+          </a>
+          <button onclick="mgrDeleteDocument(${d.id})"
+            class="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors" title="Delete">
+            <i class="fas fa-trash text-xs"></i>
+          </button>
+        </div>
       </div>`).join('')}
     </div>`}
   </div>`
+}
+
+function mgrToggleUploadForm() {
+  const f = $('mgrUploadForm')
+  if (f) f.classList.toggle('hidden')
+}
+
+async function mgrSubmitDocument() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  const fileInput = $('mgrDocFile')
+  if (!fileInput?.files?.length) { showToast('Please select a file', 'error'); return }
+  const file = fileInput.files[0]
+  const docType = $('mgrDocType')?.value || 'other'
+  const label = $('mgrDocLabel')?.value?.trim() || ''
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('doc_type', docType)
+    if (label) formData.append('label', label)
+    const token = localStorage.getItem('lionmd_token') || sessionStorage.getItem('lionmd_token') || ''
+    const res = await fetch(`/api/manager/contractors/${ct.id}/documents`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: formData
+    })
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || 'Upload failed') }
+    showToast('Document uploaded!', 'success')
+    mgrState.documents = await api(`/api/manager/contractors/${ct.id}/documents`)
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderDocumentsTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+async function mgrDeleteDocument(did) {
+  if (!confirm('Delete this document? This cannot be undone.')) return
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    await api(`/api/manager/contractors/${ct.id}/documents/${did}`, { method: 'DELETE' })
+    showToast('Document deleted.', 'success')
+    mgrState.documents = await api(`/api/manager/contractors/${ct.id}/documents`)
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderDocumentsTab()
+  } catch(e) { showToast(e.message, 'error') }
 }
 
 // License CRUD helpers
