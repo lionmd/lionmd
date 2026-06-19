@@ -11403,13 +11403,13 @@ async function cpOpenClientDetail(clientId, clientName) {
       }
     }
 
-    // Stats
+    // Stats — count unique periods, not individual entries
     const paidEntries = entries.filter(e => e.status === 'paid')
     const lifetime = paidEntries.reduce((s, e) => s + (e.amount || 0), 0)
-    const months = entries.length
-    const paidMonths = paidEntries.length
+    const uniquePeriods = new Set(entries.map(e => e.period_key)).size
+    const paidPeriods   = new Set(paidEntries.map(e => e.period_key)).size
 
-    $('cpDetailSub').textContent = `${months} months tracked · ${paidMonths} paid · ${cpFmt(lifetime)} lifetime`
+    $('cpDetailSub').textContent = `${uniquePeriods} months tracked · ${paidPeriods} paid · ${cpFmt(lifetime)} lifetime`
 
     if (entries.length === 0) {
       $('cpDetailBody').innerHTML = `<div class="text-center py-12 text-gray-400"><i class="fas fa-inbox text-3xl mb-3"></i><p>No payment records found.</p></div>`
@@ -13419,10 +13419,13 @@ function mgrDrawDetail() {
       <button onclick="mgrSetTab('documents')" id="mgrTabDocs" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
         <i class="fas fa-file-alt mr-1.5"></i>Documents <span class="ml-1 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full">${mgrState.documents.length}</span>
       </button>
+      <button onclick="mgrSetTab('profile')" id="mgrTabProfile" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='profile' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas fa-user-edit mr-1.5"></i>Edit Profile
+      </button>
     </div>
 
     <!-- Tab content -->
-    <div id="mgrTabContent">${mgrState.activeTab === 'licenses' ? mgrRenderLicensesTab() : mgrRenderDocumentsTab()}</div>
+    <div id="mgrTabContent">${mgrState.activeTab === 'licenses' ? mgrRenderLicensesTab() : mgrState.activeTab === 'documents' ? mgrRenderDocumentsTab() : mgrRenderProfileTab()}</div>
   </div>`
 }
 
@@ -13465,11 +13468,15 @@ function mgrSetTab(tab) {
   mgrState.activeTab = tab
   const content = $('mgrTabContent')
   if (!content) return
-  content.innerHTML = tab === 'licenses' ? mgrRenderLicensesTab() : mgrRenderDocumentsTab()
+  if (tab === 'licenses')       content.innerHTML = mgrRenderLicensesTab()
+  else if (tab === 'documents') content.innerHTML = mgrRenderDocumentsTab()
+  else                          content.innerHTML = mgrRenderProfileTab()
   // Update tab buttons
-  const tl = $('mgrTabLicenses'), td = $('mgrTabDocs')
-  if (tl) tl.className = `px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${tab==='licenses' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`
-  if (td) td.className = `px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${tab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`
+  const tl = $('mgrTabLicenses'), td = $('mgrTabDocs'), tp = $('mgrTabProfile')
+  const base = 'px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors '
+  if (tl) tl.className = base + (tab==='licenses'  ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700')
+  if (td) td.className = base + (tab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700')
+  if (tp) tp.className = base + (tab==='profile'   ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700')
 }
 
 function mgrLicenseStatusBadge(status, expiry) {
@@ -13721,6 +13728,99 @@ async function mgrDeleteDocument(did) {
     const content = $('mgrTabContent')
     if (content) content.innerHTML = mgrRenderDocumentsTab()
   } catch(e) { showToast(e.message, 'error') }
+}
+
+// ── PROFILE TAB ────────────────────────────────────────────────────────────
+
+function mgrRenderProfileTab() {
+  const ct = mgrState.activeContractor
+  if (!ct) return '<div class="text-gray-400 p-4">No provider selected.</div>'
+  const nameParts = (ct.name || '').split(' ')
+  const firstName = ct.first_name || nameParts[0] || ''
+  const lastName  = ct.last_name  || nameParts.slice(1).join(' ') || ''
+  return `
+  <div>
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-sm font-semibold text-gray-700"><i class="fas fa-user-edit mr-1.5 text-teal-600"></i>Edit Provider Profile</p>
+    </div>
+    <div class="card p-5">
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">First Name</label>
+          <input id="mgrProfFirstName" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(firstName)}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Last Name</label>
+          <input id="mgrProfLastName" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(lastName)}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Email</label>
+          <input id="mgrProfEmail" type="email" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.email||'')}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Phone</label>
+          <input id="mgrProfPhone" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.phone||'')}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Specialty</label>
+          <input id="mgrProfSpecialty" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.specialty||'')}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">NPI</label>
+          <input id="mgrProfNPI" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none font-mono" value="${escHtml(ct.npi||'')}">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">States Licensed <span class="font-normal text-gray-400">(comma-separated, e.g. FL, TX, NY)</span></label>
+          <input id="mgrProfStates" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.states_licensed||'')}">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Bio / Notes</label>
+          <textarea id="mgrProfBio" rows="3" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none resize-none">${escHtml(ct.bio||'')}</textarea>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <button onclick="mgrSaveProfile()" id="mgrProfSaveBtn" class="btn-primary px-5 py-2 rounded-lg text-sm font-semibold">
+          <i class="fas fa-save mr-1.5"></i>Save Changes
+        </button>
+        <span id="mgrProfSaveStatus" class="text-xs text-gray-400"></span>
+      </div>
+    </div>
+  </div>`
+}
+
+async function mgrSaveProfile() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  const btn = $('mgrProfSaveBtn')
+  const status = $('mgrProfSaveStatus')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Saving…' }
+  if (status) { status.textContent = ''; status.className = 'text-xs text-gray-400' }
+  try {
+    await api(`/api/manager/contractors/${ct.id}/profile`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        first_name:      $('mgrProfFirstName')?.value?.trim() || '',
+        last_name:       $('mgrProfLastName')?.value?.trim()  || '',
+        email:           $('mgrProfEmail')?.value?.trim()     || '',
+        phone:           $('mgrProfPhone')?.value?.trim()     || '',
+        specialty:       $('mgrProfSpecialty')?.value?.trim() || '',
+        npi:             $('mgrProfNPI')?.value?.trim()       || '',
+        states_licensed: $('mgrProfStates')?.value?.trim()    || '',
+        bio:             $('mgrProfBio')?.value?.trim()        || '',
+      })
+    })
+    // Refresh contractor data in mgrState
+    const contractors = await api('/api/manager/contractors')
+    const updated = (contractors || []).find(c => c.id === ct.id)
+    if (updated) mgrState.activeContractor = updated
+    showToast('Profile saved!', 'success')
+    if (status) { status.textContent = '✓ Saved'; status.className = 'text-xs text-emerald-600' }
+    setTimeout(() => { if (status) status.textContent = '' }, 3000)
+  } catch(e) {
+    showToast('Save failed: ' + e.message, 'error')
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save mr-1.5"></i>Save Changes' }
+  }
 }
 
 // License CRUD helpers

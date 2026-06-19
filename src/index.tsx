@@ -4322,21 +4322,38 @@ app.get('/api/client-payments/clients', requireAdmin, async (c) => {
 app.post('/api/client-payments/clients', requireAdmin, async (c) => {
   await ensureClientPaymentsSchema(c.env.DB)
   const { name, notes } = await c.req.json() as any
-  if (!name) return c.json({ error: 'name required' }, 400)
-  const r = await c.env.DB.prepare(
-    `INSERT INTO cp_clients (name, notes) VALUES (?, ?)`
-  ).bind(name.trim(), notes || '').run()
-  return c.json({ ok: true, id: r.meta.last_row_id })
+  if (!name?.trim()) return c.json({ error: 'name required' }, 400)
+  try {
+    const r = await c.env.DB.prepare(
+      `INSERT INTO cp_clients (name, notes) VALUES (?, ?)`
+    ).bind(name.trim(), notes || '').run()
+    return c.json({ ok: true, id: r.meta.last_row_id })
+  } catch (err: any) {
+    const msg = err?.message || ''
+    if (msg.includes('UNIQUE') || msg.includes('unique')) {
+      return c.json({ error: `A client named "${name.trim()}" already exists.` }, 409)
+    }
+    return c.json({ error: 'Failed to add client: ' + msg }, 500)
+  }
 })
 
 // ── PUT /api/client-payments/clients/:id ────────────────────────────
 app.put('/api/client-payments/clients/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const { name, notes, is_active } = await c.req.json() as any
-  await c.env.DB.prepare(
-    `UPDATE cp_clients SET name=?, notes=?, is_active=? WHERE id=?`
-  ).bind(name, notes || '', is_active ?? 1, id).run()
-  return c.json({ ok: true })
+  if (!name?.trim()) return c.json({ error: 'Client name is required' }, 400)
+  try {
+    await c.env.DB.prepare(
+      `UPDATE cp_clients SET name=?, notes=?, is_active=? WHERE id=?`
+    ).bind(name.trim(), notes || '', is_active ?? 1, id).run()
+    return c.json({ ok: true })
+  } catch (err: any) {
+    const msg = err?.message || ''
+    if (msg.includes('UNIQUE') || msg.includes('unique')) {
+      return c.json({ error: `A client named "${name.trim()}" already exists.` }, 409)
+    }
+    return c.json({ error: 'Failed to rename client: ' + msg }, 500)
+  }
 })
 
 // ── DELETE /api/client-payments/clients/:id ─────────────────────────
