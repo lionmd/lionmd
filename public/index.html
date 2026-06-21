@@ -14415,9 +14415,11 @@ const licState = {
   contractors: [],
   licenses: [],
   view: 'matrix',       // 'matrix' | 'collab' | 'provider'
-  filterStatus: 'all',  // 'all'|'active'|'pending'|'expired'
+  filterStatus: 'all',  // 'all'|'active'|'pending'|'expired'|'cpa'
   filterProvider: '',
   filterState: '',
+  filterCpaOnly: false, // matrix: show only states with CPA issues
+  pinnedStates: [],     // matrix: manually pinned state columns (empty = show all)
 }
 
 // ── Entry points ──────────────────────────────────────────────────
@@ -14543,6 +14545,7 @@ function licDrawDashboard() {
           <option value="active">Active only</option>
           <option value="pending">Pending only</option>
           <option value="expired">Expired only</option>
+          <option value="cpa">⚠ CPA issues</option>
         </select>
         <input id="licFilterProvider" type="text" placeholder="Filter provider…" oninput="licState.filterProvider=this.value;licRefreshView()"
           class="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-36 focus:ring-2 focus:ring-blue-500 outline-none">
@@ -14565,6 +14568,7 @@ function licDrawDashboard() {
 // ── View router ────────────────────────────────────────────────────
 function licSetView(v) {
   licState.view = v
+  licState.pinnedStates = [] // clear column filter when switching tabs
   ;['matrix','collab','provider'].forEach(tab => {
     const el = $('licTab_' + tab)
     if (!el) return
@@ -14601,7 +14605,10 @@ function licStatusColor(l) {
 }
 function licFilteredLicenses() {
   return licState.licenses.filter(l => {
-    if (licState.filterStatus !== 'all' && l.status !== licState.filterStatus) return false
+    if (licState.filterStatus === 'cpa') {
+      // Show only licenses with a CPA issue (pending or blocking active)
+      if (!cpaPending(l) && !cpaBlocksActive(l)) return false
+    } else if (licState.filterStatus !== 'all' && l.status !== licState.filterStatus) return false
     if (licState.filterProvider && !l.contractor_name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
     if (licState.filterState && !l.state.toLowerCase().includes(licState.filterState.toLowerCase())) return false
     return true
@@ -14638,26 +14645,38 @@ function licDrawMatrix() {
     if (!lic) return `<td class="p-0 border-r border-b border-gray-100"><div class="w-10 h-8 mx-auto"></div></td>`
     const c = licStatusColor(lic)
     const hasCollab = lic.collab_physician && lic.collab_physician.trim()
+    const isCpaBlocked = cpaBlocksActive(lic)
     const collabExp = hasCollab && licIsExpiringSoon(lic.collab_expiry)
+    // Suppress the collab purple ring when cell is amber (CPA blocked) — can't show both signals
+    // The collab info is still visible on hover tooltip and in the detail popover
+    const showCollabRing = hasCollab && !isCpaBlocked
     const tooltipParts = [
       lic.license_type || '',
       lic.license_number ? '#' + lic.license_number : '',
       lic.expiry_date ? 'Exp: ' + lic.expiry_date : '',
       hasCollab ? 'Collab: ' + lic.collab_physician : '',
-      cpaBlocksActive(lic) ? '⚠ CPA required — not yet signed' : (lic.notes ? lic.notes : ''),
+      isCpaBlocked ? '⚠ CPA required by state law — not yet signed' : (lic.notes ? lic.notes : ''),
     ].filter(Boolean).join(' | ')
     return `<td class="p-0 border-r border-b border-gray-100" title="${escHtml(tooltipParts)}">
       <div class="w-10 h-8 mx-auto flex items-center justify-center">
         <div class="w-7 h-6 rounded flex items-center justify-center text-white text-[9px] font-bold relative cursor-pointer
-          ${c.bg} ${hasCollab ? 'ring-2 ring-purple-400 ring-offset-1' : ''} ${collabExp ? 'ring-2 ring-orange-400' : ''}
+          ${c.bg} ${showCollabRing ? 'ring-2 ring-purple-400 ring-offset-1' : ''} ${!isCpaBlocked && collabExp ? 'ring-2 ring-orange-400' : ''}
           hover:scale-110 transition-transform shadow-sm"
           onclick="licShowDetail(${lic.id})">
           ${c.text}
-          ${hasCollab ? '<span class="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-purple-500 border border-white text-[6px] flex items-center justify-center">C</span>' : ''}
+          ${showCollabRing ? '<span class="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-purple-500 border border-white text-[6px] flex items-center justify-center">C</span>' : ''}
+          ${isCpaBlocked ? '<span class="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-red-500 border border-white text-[6px] flex items-center justify-center font-black">!</span>' : ''}
         </div>
       </div>
     </td>`
   }
+
+  // All states present in this view — for the column filter chips
+  const allStates = states  // already sorted
+  // Apply pinned-state column filter (if any chips selected)
+  const visibleStates = licState.pinnedStates.length > 0
+    ? allStates.filter(s => licState.pinnedStates.includes(s))
+    : allStates
 
   body.innerHTML = `
   <div class="p-2">
@@ -14668,37 +14687,66 @@ function licDrawMatrix() {
       <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-yellow-400 inline-block"></span>Pending</span>
       <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-red-500 inline-block"></span>Expired</span>
       <span class="flex items-center gap-1.5 text-amber-700 font-semibold"><span class="w-5 h-4 rounded bg-amber-400 inline-block"></span>CPA Req. (unsigned)</span>
-      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-green-500 ring-2 ring-purple-400 ring-offset-1 inline-block"></span><span class="relative inline-block w-2.5 h-2.5 rounded-full bg-purple-500 border border-white -ml-2.5 mr-0.5"></span>Has Collab Agreement</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-green-500 ring-2 ring-purple-400 ring-offset-1 inline-block"></span><span class="relative inline-block w-2.5 h-2.5 rounded-full bg-purple-500 border border-white -ml-2.5 mr-0.5"></span>Has Collab MD</span>
     </div>
+
+    <!-- Column filter: state chips -->
+    <div class="mb-3 px-2">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-[10px] font-bold text-gray-400 uppercase tracking-wider flex-shrink-0">Filter columns:</span>
+        <button onclick="licState.pinnedStates=[];licDrawMatrix()"
+          class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition
+            ${licState.pinnedStates.length === 0 ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'}">
+          All states
+        </button>
+        ${allStates.map(s => {
+          const selected = licState.pinnedStates.includes(s)
+          const hasCpaIssue = providers.some(ct => { const l = licMap[ct.id+'_'+s]; return l && (cpaBlocksActive(l)||cpaPending(l)) })
+          return `<button onclick="licTogglePinnedState('${s}')"
+            class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition
+              ${selected ? 'bg-blue-600 text-white border-blue-600' : hasCpaIssue ? 'bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'}">
+            ${s}${hasCpaIssue ? ' ⚠' : ''}
+          </button>`
+        }).join('')}
+      </div>
+      ${licState.pinnedStates.length > 0 ? `<p class="text-[10px] text-blue-600 mt-1.5 font-medium">Showing ${visibleStates.length} of ${allStates.length} states · <button onclick="licState.pinnedStates=[];licDrawMatrix()" class="underline">Clear filter</button></p>` : ''}
+    </div>
+
     <div class="overflow-x-auto">
       <table class="border-collapse text-xs">
         <thead>
           <tr>
             <th class="sticky left-0 bg-gray-50 z-10 border-r border-b border-gray-200 px-3 py-2 text-left font-semibold text-gray-600 min-w-[220px]">Provider</th>
-            ${states.map(s => `<th class="border-r border-b border-gray-200 px-1 py-2 font-semibold text-gray-500 text-center w-10">${s}</th>`).join('')}
+            ${visibleStates.map(s => `<th class="border-r border-b border-gray-200 px-1 py-2 font-semibold text-gray-500 text-center w-10">${s}</th>`).join('')}
           </tr>
         </thead>
         <tbody>
           ${providers.map(ct => {
-            // Check if this provider has any license in the filtered set
-            const hasAny = states.some(s => licMap[ct.id + '_' + s])
+            const hasAny = visibleStates.some(s => licMap[ct.id + '_' + s])
             if (!hasAny && licState.filterProvider === '' && licState.filterStatus === 'all') {
-              return '' // skip providers with no licenses in view only if no filter
+              return ''
             }
             const typeLabel = ct.role_group || ct.specialty || ''
             return `<tr class="hover:bg-blue-50 transition-colors">
               <td class="sticky left-0 bg-white border-r border-b border-gray-200 px-3 py-1.5 font-semibold text-gray-800 text-xs whitespace-nowrap z-10">
                 ${escHtml(ct.name)}
                 ${typeLabel ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500">${escHtml(typeLabel)}</span>` : ''}
-                <span class="block text-[10px] text-gray-400 font-normal">${states.filter(s => licMap[ct.id + '_' + s]).length} licensed state${states.filter(s => licMap[ct.id + '_' + s]).length !== 1 ? 's' : ''}</span>
+                <span class="block text-[10px] text-gray-400 font-normal">${visibleStates.filter(s => licMap[ct.id + '_' + s]).length} of ${visibleStates.length} state${visibleStates.length !== 1 ? 's' : ''}</span>
               </td>
-              ${states.map(s => cellHtml(licMap[ct.id + '_' + s])).join('')}
+              ${visibleStates.map(s => cellHtml(licMap[ct.id + '_' + s])).join('')}
             </tr>`
           }).join('')}
         </tbody>
       </table>
     </div>
   </div>`
+}
+
+function licTogglePinnedState(s) {
+  const idx = licState.pinnedStates.indexOf(s)
+  if (idx === -1) licState.pinnedStates.push(s)
+  else licState.pinnedStates.splice(idx, 1)
+  licDrawMatrix()
 }
 
 // ── Collab Agreements View ─────────────────────────────────────────
@@ -15689,8 +15737,11 @@ function buildPublicLicensingHTML(data) {
       const l = licByState[st]
       if (!l) return `<td class="px-2 py-2 text-center"><span class="text-gray-200 text-xs">—</span></td>`
       const c = pubStatusColor(l)
-      const collabDot = l.collab_physician ? `<span class="ml-1 inline-block w-2 h-2 rounded-full bg-purple-500 align-middle" title="Collab: ${l.collab_physician}"></span>` : ''
-      const cpaDot = cpaPending(l) ? `<span class="ml-0.5 inline-block w-2 h-2 rounded-full bg-amber-400 align-middle" title="CPA pending: ${escHtml(l.notes)}"></span>` : ''
+      const isCpaBlocked = cpaBlocksActive(l)
+      // Suppress the purple collab dot when the cell is already amber — contradictory signals
+      const collabDot = (l.collab_physician && !isCpaBlocked) ? `<span class="ml-1 inline-block w-2 h-2 rounded-full bg-purple-500 align-middle" title="Collab: ${l.collab_physician}"></span>` : ''
+      // Amber CPA dot only shown when collab is on file but CPA isn't signed AND we're not already showing amber cell
+      const cpaDot = (cpaPending(l) && !isCpaBlocked) ? `<span class="ml-0.5 inline-block w-2 h-2 rounded-full bg-amber-400 align-middle" title="CPA pending: ${escHtml(l.notes||'Not yet filed')}"></span>` : ''
       const expTip = l.expiry_date ? ` title="Expires ${fmtDate(l.expiry_date)}"` : ''
       return `<td class="px-2 py-2 text-center">
         <span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring} whitespace-nowrap"${expTip}>
