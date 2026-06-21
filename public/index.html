@@ -7184,7 +7184,7 @@ function obRenderContractorDetail(data) {
                   ${l.collab_expiry ? `<span class="text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500':'text-gray-400'}">· exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
                   ${l.permitted_actions ? `<span class="ml-auto text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
                 </div>
-                ${l.notes ? `<div class="pl-11"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : ''}
+                ${cpaPending(l) ? `<div class="pl-11">${cpaBadgeHtml(l.notes)}</div>` : (l.notes ? `<div class="pl-11"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : '')}
               </div>`
             }).join('')}
           </div>
@@ -7282,13 +7282,15 @@ function obRenderContractorDetail(data) {
                   <span class="font-bold text-gray-800 text-sm">${escHtml(lic.state)}</span>
                   ${licStatusBadge(lic.status)}
                   ${isExpiringSoon(lic.expiry_date) ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">Expiring Soon</span>' : ''}
+                  ${cpaPending(lic) ? cpaBadgeHtml(lic.notes) : ''}
                 </div>
                 ${lic.license_type ? `<p class="text-xs text-gray-500 mt-0.5">${escHtml(lic.license_type)}</p>` : ''}
                 <div class="flex items-center gap-3 mt-1 text-xs text-gray-400 flex-wrap">
                   ${lic.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(lic.license_number)}</span>` : '<span class="text-red-400 font-semibold italic">No # — edit required</span>'}
                   ${lic.expiry_date ? `<span><i class="fas fa-calendar mr-0.5"></i>Exp: ${lic.expiry_date}</span>` : ''}
+                  ${lic.permitted_actions ? `<span class="px-1.5 py-0.5 rounded-full font-semibold ${lic.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':lic.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}"><i class="fas fa-stethoscope mr-0.5 text-[10px]"></i>${escHtml(lic.permitted_actions)}</span>` : ''}
                 </div>
-                ${lic.notes ? `<p class="text-xs text-gray-400 mt-1 italic">${escHtml(lic.notes)}</p>` : ''}
+                ${(!cpaPending(lic) && lic.notes) ? `<p class="text-xs text-gray-400 mt-1 italic">${escHtml(lic.notes)}</p>` : ''}
                 ${lic.license_file_name ? `<button onclick="licDownloadFile(${JSON.stringify(lic.license_file_data||'').replace(/"/g,'&quot;')}, '${escHtml(lic.license_file_name)}', '${escHtml(lic.license_file_mime||'')}');" class="mt-1 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"><i class="fas fa-paperclip text-[10px]"></i>${escHtml(lic.license_file_name)}</button>` : ''}
               </div>
               <div class="flex items-center gap-1 flex-shrink-0">
@@ -7324,6 +7326,28 @@ function obRenderContractorDetail(data) {
 // SHARED LICENSE FILE HELPERS
 // Used by all four license modals: admin (ct), provider (pp), lic-editor (lic), onboarding
 // ════════════════════════════════════════════════════════════════════
+
+// ── CPA status helper ─────────────────────────────────────────────
+// Returns true when a license row's CPA agreement is not yet fully executed.
+// "Fully cleared" statuses: Signed & Active, Not Required, Completed/Approved,
+// Autonomy Granted, Expired (agreement lapsed — different from pending),
+// Pending Renewal (existing agreement renewing — still valid).
+const CPA_CLEARED = new Set([
+  'CPA: Signed & Active', 'CPA: Not Required',
+  'CPA: Completed/Approved', 'CPA: Autonomy Granted',
+  'CPA: Expired', 'CPA: Pending Renewal'
+])
+function cpaPending(lic) {
+  if (!lic.collab_physician || !lic.collab_physician.trim()) return false
+  const n = (lic.notes || '').trim()
+  if (!n) return false                      // no CPA status set at all — not flagged
+  return !CPA_CLEARED.has(n)
+}
+// Amber badge HTML for a pending CPA
+function cpaBadgeHtml(notes) {
+  const label = notes.replace(/^CPA:\s*/i, '').trim() || 'CPA Pending'
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300 whitespace-nowrap"><i class="fas fa-exclamation-triangle text-[10px]"></i>${escHtml(label)}</span>`
+}
 
 // Renders the file upload widget HTML (injected into each modal)
 // widgetId: unique prefix so multiple modals don't clash
@@ -12779,6 +12803,17 @@ function ppDrawLicenses(licenses) {
       </button>
     </div>
 
+    <!-- CPA pending alert -->
+    ${licenses.filter(l => cpaPending(l)).length > 0 ? `
+    <div class="mb-4 p-4 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-3">
+      <i class="fas fa-exclamation-triangle text-amber-500 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold text-amber-800 text-sm">Collaborating Physician Agreement not yet fully signed</p>
+        <p class="text-xs text-amber-700 mt-0.5">The following states are pending before you can be fully active: <strong>${licenses.filter(l => cpaPending(l)).map(l => l.state).join(', ')}</strong></p>
+        <p class="text-xs text-amber-600 mt-1">Please update your <strong>Permitted Actions</strong> for each state so we know what you are authorized to do.</p>
+      </div>
+    </div>` : ''}
+
     <!-- Expiring soon alert -->
     ${licenses.filter(l => isExpiringSoon(l.expiry_date)).length > 0 ? `
     <div class="mb-4 p-4 rounded-xl bg-orange-50 border border-orange-200 flex items-start gap-3">
@@ -12811,13 +12846,15 @@ function ppDrawLicenses(licenses) {
                 <span class="font-bold text-gray-900 text-base">${escHtml(lic.state)}</span>
                 ${licStatusBadge(lic.status)}
                 ${isExpiringSoon(lic.expiry_date) ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700"><i class="fas fa-clock mr-0.5"></i>Expiring Soon</span>' : ''}
+                ${cpaPending(lic) ? cpaBadgeHtml(lic.notes) : ''}
               </div>
               ${lic.license_type ? `<p class="text-sm text-gray-500 mt-0.5">${escHtml(lic.license_type)}</p>` : ''}
               <div class="flex items-center gap-4 mt-1.5 text-xs text-gray-400 flex-wrap">
                 ${lic.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(lic.license_number)}</span>` : '<span class="text-red-400 font-semibold italic">No license number — please edit</span>'}
                 ${lic.expiry_date ? `<span class="${isExpiringSoon(lic.expiry_date) ? 'text-orange-600 font-semibold' : ''}"><i class="fas fa-calendar mr-0.5"></i>Expires ${lic.expiry_date}</span>` : '<span class="italic">No expiration date</span>'}
               </div>
-              ${lic.notes ? `<p class="text-xs text-gray-400 mt-1.5 italic">"${escHtml(lic.notes)}"</p>` : ''}
+              ${lic.permitted_actions ? `<div class="mt-1.5"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${lic.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':lic.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}"><i class="fas fa-stethoscope text-[10px]"></i>${escHtml(lic.permitted_actions)}</span></div>` : (cpaPending(lic) ? `<p class="text-xs text-amber-600 mt-1.5 font-medium"><i class="fas fa-pencil mr-1"></i>Please edit to fill in your permitted actions for this state.</p>` : '')}
+              ${(!cpaPending(lic) && lic.notes) ? `<p class="text-xs text-gray-400 mt-1.5 italic">"${escHtml(lic.notes)}"</p>` : ''}
               ${lic.license_file_name ? `<button onclick="licDownloadFile(${JSON.stringify(lic.license_file_data||'').replace(/"/g,'&quot;')}, '${escHtml(lic.license_file_name)}', '${escHtml(lic.license_file_mime||'')}');" class="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"><i class="fas fa-paperclip"></i>${escHtml(lic.license_file_name)}</button>` : ''}
             </div>
           </div>
@@ -12923,6 +12960,35 @@ async function ppShowLicenseModal(lic) {
             </select>
           </div>
         </div>
+        <!-- Practice Authority — provider self-reports what they can do in this state -->
+        <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
+          <div class="text-xs font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5">
+            <i class="fas fa-stethoscope"></i> Practice Authority
+            <span class="font-normal text-blue-500 normal-case tracking-normal">— What are you authorized to do in this state?</span>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions *</label>
+            <select id="ppLicPermitted" class="w-full text-sm">
+              <option value="" ${!lic?.permitted_actions?'selected':''}>— Select —</option>
+              <option value="Can See Patients + Prescribe" ${lic?.permitted_actions==='Can See Patients + Prescribe'?'selected':''}>✅ Can See Patients + Prescribe (Full CRx)</option>
+              <option value="Can See Patients (No CRx)" ${lic?.permitted_actions==='Can See Patients (No CRx)'?'selected':''}>🟡 Can See Patients (No CRx)</option>
+              <option value="Can See Patients + Prescribe (Collab)" ${lic?.permitted_actions==='Can See Patients + Prescribe (Collab)'?'selected':''}>🤝 Can See Patients + Prescribe (Collab MD)</option>
+              <option value="Can See Patients (No CRx, Collab)" ${lic?.permitted_actions==='Can See Patients (No CRx, Collab)'?'selected':''}>🤝 Can See Patients (No CRx, Collab MD)</option>
+              <option value="Pending License" ${lic?.permitted_actions==='Pending License'?'selected':''}>⏳ Pending License</option>
+              <option value="Not Licensed" ${lic?.permitted_actions==='Not Licensed'?'selected':''}>❌ Not Licensed in This State</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+            <select id="ppLicPracticeType" class="w-full text-sm">
+              <option value="" ${!lic?.practice_type?'selected':''}>— Select —</option>
+              <option value="independent" ${lic?.practice_type==='independent'?'selected':''}>Independent (Full Practice Authority)</option>
+              <option value="collab_md" ${lic?.practice_type==='collab_md'?'selected':''}>Requires Collaborating MD</option>
+              <option value="md_self" ${lic?.practice_type==='md_self'?'selected':''}>Physician (Self-supervised)</option>
+              <option value="unclear" ${lic?.practice_type==='unclear'?'selected':''}>Unclear / Needs Review</option>
+            </select>
+          </div>
+        </div>
         ${licFileWidgetHtml('ppLicF', lic?.license_file_name||'')}
         <div id="ppLicError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
         <div class="flex gap-3 pt-1">
@@ -12950,14 +13016,16 @@ async function ppSaveLicense(licId) {
   const type       = ($('ppLicType').value||'').trim()
   const num        = ($('ppLicNum').value||'').trim()
   const expiry     = $('ppLicExpiry').value
-  const notes      = ($('ppLicNotes').value||'').trim()
-  const collab     = ($('ppLicCollab')?.value||'').trim()
-  const collabExp  = $('ppLicCollabExp')?.value || ''
+  const notes          = ($('ppLicNotes').value||'').trim()
+  const collab         = ($('ppLicCollab')?.value||'').trim()
+  const collabExp      = $('ppLicCollabExp')?.value || ''
+  const permitted_actions = ($('ppLicPermitted')?.value||'').trim()
+  const practice_type     = ($('ppLicPracticeType')?.value||'').trim()
   const errEl      = $('ppLicError')
   errEl.classList.add('hidden')
   if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
   if (!num)   { errEl.textContent = 'License number is required.'; errEl.classList.remove('hidden'); return }
-  const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp }
+  const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp, permitted_actions, practice_type }
   if (_ppLicFile.file_data) {
     payload.license_file_name = _ppLicFile.file_name
     payload.license_file_data = _ppLicFile.file_data
@@ -15083,8 +15151,10 @@ function licEditLicRow(l, ct) {
         ${l.expiry_date ? `<span class="text-xs ${licIsExpiringSoon(l.expiry_date) ? 'text-orange-600 font-semibold' : licIsExpired(l) ? 'text-red-500 font-semibold' : 'text-gray-400'}"><i class="fas fa-calendar text-[10px] mr-0.5"></i>Expires ${l.expiry_date}</span>` : '<span class="text-xs text-gray-300 italic">No expiry date</span>'}
         ${hasCollab ? `<span class="text-xs text-purple-600 flex items-center gap-1"><i class="fas fa-user-md text-[10px]"></i>${escHtml(l.collab_physician)}${l.collab_expiry ? ' · ' + l.collab_expiry : ''}${collabExpSoon ? ' ⏰' : ''}</span>` : ''}
       </div>
-      ${l.permitted_actions ? `<span class="inline-flex items-center gap-1 mt-1 px-2 py-0.5 rounded-full text-xs font-semibold ${l.permitted_actions.includes('Prescribe') ? 'bg-green-100 text-green-700' : l.permitted_actions.includes('No CRx') ? 'bg-purple-100 text-purple-700' : l.permitted_actions.includes('Pending') ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}">${l.permitted_actions}</span>` : ''}
-      ${l.notes ? `<p class="text-xs text-gray-400 mt-1 italic">"${escHtml(l.notes)}"</p>` : ''}
+      <div class="flex items-center gap-1.5 flex-wrap mt-1">
+        ${l.permitted_actions ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${l.permitted_actions.includes('Prescribe') ? 'bg-green-100 text-green-700' : l.permitted_actions.includes('No CRx') ? 'bg-purple-100 text-purple-700' : l.permitted_actions.includes('Pending') ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+        ${cpaPending(l) ? cpaBadgeHtml(l.notes) : (l.notes ? `<span class="text-xs text-gray-400 italic">"${escHtml(l.notes)}"</span>` : '')}
+      </div>
       ${l.license_file_name ? `<button onclick="licDownloadFile(${JSON.stringify(l.license_file_data||'').replace(/"/g,'&quot;')}, '${escHtml(l.license_file_name)}', '${escHtml(l.license_file_mime||'')}');" class="mt-1 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"><i class="fas fa-paperclip text-[10px]"></i>${escHtml(l.license_file_name)}</button>` : ''}
     </div>
     <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
@@ -15133,7 +15203,7 @@ function licEditDrawCollabPanel() {
           </div>
           ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
         </div>
-        ${l.notes ? `<div class="pl-13"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : ''}
+        ${cpaPending(l) ? `<div class="pl-13 mt-0.5">${cpaBadgeHtml(l.notes)}</div>` : (l.notes ? `<div class="pl-13"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : '')}
       </div>`
     }
     html += `</div></div>`
@@ -15370,10 +15440,12 @@ async function renderPublicLicensing() {
         const c = pubStatusColor(l)
         const collabDot = l.collab_physician
           ? `<span class="ml-1 inline-block w-2 h-2 rounded-full bg-purple-500 align-middle" title="Collab: ${l.collab_physician}"></span>` : ''
+        const cpaDot = cpaPending(l)
+          ? `<span class="ml-0.5 inline-block w-2 h-2 rounded-full bg-amber-400 align-middle" title="CPA pending: ${escHtml(l.notes)}"></span>` : ''
         const expTip = l.expiry_date ? ` title="Expires ${fmtDate(l.expiry_date)}"` : ''
         return `<td class="px-2 py-2 text-center">
           <span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring} whitespace-nowrap"${expTip}>
-            ${statusLabel(l.status)}${collabDot}
+            ${statusLabel(l.status)}${collabDot}${cpaDot}
           </span>
         </td>`
       }).join('')
@@ -15403,7 +15475,11 @@ async function renderPublicLicensing() {
       <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 ring-1 ring-red-200 font-semibold">Expired</span>
       <span class="inline-flex items-center gap-1 ml-2">
         <span class="inline-block w-2 h-2 rounded-full bg-purple-500"></span>
-        <span>Collab agreement on file</span>
+        <span>Collab MD on file</span>
+      </span>
+      <span class="inline-flex items-center gap-1">
+        <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+        <span class="text-amber-700 font-medium">CPA not yet signed</span>
       </span>
     </div>`
 
@@ -15441,24 +15517,32 @@ async function renderPublicLicensing() {
         </div>
         <div class="divide-y divide-gray-100">
           ${providers.map(prov => {
+            const pendingCpaLics = prov.licenses.filter(l => cpaPending(l))
+            const hasCpaPending = pendingCpaLics.length > 0
             const licRows = prov.licenses.sort((a,b)=>a.state.localeCompare(b.state)).map(l => {
               const c = pubStatusColor(l)
               const expStr = l.expiry_date ? fmtDate(l.expiry_date) : '—'
               const collabStr = l.collab_physician
                 ? `<span class="ml-2 text-xs text-purple-600"><i class="fas fa-handshake mr-1"></i>${l.collab_physician}${l.collab_expiry ? ' · exp ' + fmtDate(l.collab_expiry) : ''}</span>` : ''
+              const cpaBadge = cpaPending(l) ? `<td class="px-4 py-2">${cpaBadgeHtml(l.notes)}</td>` : '<td class="px-4 py-2"></td>'
+              const permBadge = l.permitted_actions ? `<span class="ml-1 text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''
               return `<tr class="border-b border-gray-50 last:border-0">
                 <td class="px-4 py-2 font-medium text-gray-700 text-sm w-14">${l.state}</td>
                 <td class="px-4 py-2 text-xs text-gray-500">${l.license_type || '—'}</td>
                 <td class="px-4 py-2">
                   <span class="px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring}">${statusLabel(l.status)}</span>
                 </td>
-                <td class="px-4 py-2 text-xs text-gray-500">${expStr}${collabStr}</td>
+                <td class="px-4 py-2 text-xs text-gray-500">${expStr}${collabStr}${permBadge}</td>
+                ${cpaBadge}
               </tr>`
             }).join('')
             return `<details class="group">
               <summary class="px-5 py-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between select-none list-none">
-                <span class="font-semibold text-gray-700 text-sm">${prov.name} <span class="text-xs font-normal text-gray-400 ml-1">${prov.role_group}</span></span>
-                <span class="text-xs text-gray-400">${prov.licenses.length} license${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
+                <span class="font-semibold text-gray-700 text-sm flex items-center gap-2 flex-wrap">
+                  ${prov.name} <span class="text-xs font-normal text-gray-400">${prov.role_group}</span>
+                  ${hasCpaPending ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300"><i class="fas fa-exclamation-triangle text-[10px]"></i>CPA Pending (${pendingCpaLics.length} state${pendingCpaLics.length!==1?'s':''})</span>` : ''}
+                </span>
+                <span class="text-xs text-gray-400 flex-shrink-0">${prov.licenses.length} license${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
               </summary>
               <div class="px-4 pb-3">
                 <table class="w-full text-sm"><tbody>${licRows}</tbody></table>

@@ -3459,11 +3459,13 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
   const u = c.get('user')
   const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
   if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
-  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
+  const body = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
   if (!state) return c.json({ error: 'state required' }, 400)
+  if (!license_number) return c.json({ error: 'License number is required' }, 400)
   const r = await c.env.DB.prepare(
-    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry) VALUES (?,?,?,?,?,?,?,?,?)`
-  ).bind(pu.contractor_id, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'').run()
+    `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(pu.contractor_id, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'').run()
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
@@ -3471,10 +3473,19 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
 app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
   await ensureProviderSchema(c.env.DB)
   const id = c.req.param('id')
-  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry } = await c.req.json() as any
-  await c.env.DB.prepare(
-    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', id).run()
+  const body = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
+  if (!license_number) return c.json({ error: 'License number is required' }, 400)
+  const hasFile = body.license_file_data && body.license_file_data.length > 0
+  if (hasFile) {
+    await c.env.DB.prepare(
+      `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?, license_file_name=?, license_file_data=?, license_file_mime=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+    ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'', body.license_file_name||'', body.license_file_data, body.license_file_mime||'', id).run()
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+    ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'', id).run()
+  }
   return c.json({ ok: true })
 })
 
