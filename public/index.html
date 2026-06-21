@@ -7342,12 +7342,14 @@ const CPA_CLEARED = new Set([
 function cpaPending(lic) {
   if (!lic.collab_physician || !lic.collab_physician.trim()) return false
   const n = (lic.notes || '').trim()
-  if (!n) return false                      // no CPA status set at all — not flagged
+  // Empty notes + collab physician = CPA not yet filed → pending
+  if (!n) return true
   return !CPA_CLEARED.has(n)
 }
 // Amber badge HTML for a pending CPA
 function cpaBadgeHtml(notes) {
-  const label = notes.replace(/^CPA:\s*/i, '').trim() || 'CPA Pending'
+  const raw = (notes || '').trim()
+  const label = raw ? raw.replace(/^CPA:\s*/i, '').trim() : 'Not Yet Filed'
   return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300 whitespace-nowrap"><i class="fas fa-exclamation-triangle text-[10px]"></i>${escHtml(label)}</span>`
 }
 
@@ -14682,22 +14684,20 @@ function licDrawCollab() {
             const collabExpSoon = licIsExpiringSoon(l.collab_expiry)
             const collabExpired = l.collab_expiry && new Date(l.collab_expiry) < new Date()
             const licC = licStatusColor(l)
-            return `<div class="flex items-center gap-3 px-4 py-2.5 hover:bg-gray-50 transition-colors">
+            return `<div onclick="licShowDetail(${l.id})" class="flex items-center gap-3 px-4 py-2.5 hover:bg-blue-50 cursor-pointer transition-colors">
               <div class="w-8 h-6 rounded flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0 ${licC.bg}">${l.state}</div>
               <div class="flex-1 min-w-0">
                 <span class="font-medium text-sm text-gray-800">${escHtml(l.contractor_name)}</span>
                 ${l.license_type ? `<span class="ml-1.5 text-xs text-gray-400">${escHtml(l.license_type)}</span>` : ''}
                 ${l.expiry_date ? `<span class="ml-2 text-xs ${licC.bg === 'bg-red-500' ? 'text-red-500 font-semibold' : 'text-gray-400'}">Lic exp: ${l.expiry_date}</span>` : ''}
+                ${cpaPending(l) ? `<span class="ml-2">${cpaBadgeHtml(l.notes)}</span>` : ''}
               </div>
               <div class="text-right flex-shrink-0">
                 <div class="text-xs font-semibold ${collabExpired ? 'text-red-600' : collabExpSoon ? 'text-orange-600' : 'text-gray-600'}">
                   ${l.collab_expiry ? (collabExpired ? '⚠ Expired ' : collabExpSoon ? '⏰ ' : '') + l.collab_expiry : '<span class="text-gray-300 italic">No expiry set</span>'}
                 </div>
               </div>
-              ${(state.role === 'admin' || state.role === 'license_editor') ? `
-              <button onclick="licEditEntry(${l.id})" class="text-gray-300 hover:text-blue-500 w-7 h-7 flex items-center justify-center rounded-lg hover:bg-blue-50 transition flex-shrink-0">
-                <i class="fas fa-pencil text-xs"></i>
-              </button>` : ''}
+              <i class="fas fa-chevron-right text-gray-300 text-xs flex-shrink-0"></i>
             </div>`
           }).join('')}
         </div>
@@ -14754,7 +14754,7 @@ function licDrawByProvider() {
               const hasCollab = l.collab_physician && l.collab_physician.trim()
               const collabExp = hasCollab && licIsExpiringSoon(l.collab_expiry)
               return `
-              <div class="flex items-start gap-2.5 p-3 rounded-lg border ${licIsExpired(l) ? 'border-red-200 bg-red-50' : licIsExpiringSoon(l.expiry_date) ? 'border-orange-200 bg-orange-50' : 'border-gray-200 bg-white'} hover:shadow-sm transition-shadow">
+              <div onclick="licShowDetail(${l.id})" class="flex items-start gap-2.5 p-3 rounded-lg border ${licIsExpired(l) ? 'border-red-200 bg-red-50' : licIsExpiringSoon(l.expiry_date) ? 'border-orange-200 bg-orange-50' : 'border-gray-200 bg-white'} hover:shadow-sm hover:border-blue-300 cursor-pointer transition-all">
                 <div class="w-10 h-8 rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 ${c.bg} shadow-sm">${l.state}</div>
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-1.5 flex-wrap">
@@ -14769,11 +14769,12 @@ function licDrawByProvider() {
                     <span class="truncate">${escHtml(l.collab_physician)}</span>
                     ${collabExp ? '<span class="text-orange-500 font-bold">⏰</span>' : ''}
                   </div>` : ''}
+                  ${cpaPending(l) ? `<div class="mt-1">${cpaBadgeHtml(l.notes)}</div>` : ''}
                 </div>
                 ${(state.role === 'admin' || state.role === 'license_editor') ? `
-                <button onclick="licEditEntry(${l.id})" class="text-gray-300 hover:text-blue-500 w-7 h-7 flex items-center justify-center rounded hover:bg-blue-50 transition flex-shrink-0 mt-0.5">
-                  <i class="fas fa-pencil text-xs"></i>
-                </button>` : ''}
+                <div class="text-gray-300 group-hover:text-blue-400 w-7 h-7 flex items-center justify-center flex-shrink-0 mt-0.5 pointer-events-none">
+                  <i class="fas fa-chevron-right text-xs"></i>
+                </div>` : ''}
               </div>`
             }).join('')}
           </div>
@@ -14783,16 +14784,128 @@ function licDrawByProvider() {
   </div>`
 }
 
-// ── License detail tooltip / inline view ──────────────────────────
+// ── License detail popover — read-first, edit button for admins ────
 function licShowDetail(licId) {
   const lic = licState.licenses.find(l => l.id === licId)
   if (!lic) return
-  // Open edit if can edit, otherwise show a simple toast-style info
-  if (state.role === 'admin' || state.role === 'license_editor') {
-    licEditEntry(licId)
-  } else {
+
+  // Non-editors: simple toast
+  if (state.role !== 'admin' && state.role !== 'license_editor') {
     showToast(`${lic.contractor_name} / ${lic.state}: ${lic.status}${lic.expiry_date ? ', exp ' + lic.expiry_date : ''}`, 'info')
+    return
   }
+
+  // Remove any existing detail popover
+  const existing = $('licDetailPopover')
+  if (existing) existing.remove()
+
+  const fmtD = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '—'
+  const statusColors = {
+    active: 'bg-green-100 text-green-700',
+    pending: 'bg-yellow-100 text-yellow-700',
+    expired: 'bg-red-100 text-red-700',
+    in_progress: 'bg-blue-100 text-blue-700'
+  }
+  const sc = statusColors[lic.status] || 'bg-gray-100 text-gray-600'
+  const hasCollab = lic.collab_physician && lic.collab_physician.trim()
+  const cpaIsPending = cpaPending(lic)
+  const collabExpSoon = hasCollab && licIsExpiringSoon(lic.collab_expiry)
+  const collabExpired = hasCollab && lic.collab_expiry && new Date(lic.collab_expiry) < new Date()
+
+  const popover = document.createElement('div')
+  popover.id = 'licDetailPopover'
+  popover.className = 'fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4'
+  popover.onclick = (e) => { if (e.target === popover) popover.remove() }
+
+  popover.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+    <!-- Header -->
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-8 rounded-lg flex items-center justify-center text-white text-sm font-bold shadow-sm
+          ${lic.status==='expired'||licIsExpired(lic) ? 'bg-red-500' : lic.status==='pending' ? 'bg-yellow-400' : licIsExpiringSoon(lic.expiry_date) ? 'bg-orange-400' : 'bg-green-500'}">
+          ${lic.state}
+        </div>
+        <div>
+          <p class="font-bold text-gray-800 text-sm leading-none">${escHtml(lic.contractor_name)}</p>
+          <p class="text-xs text-gray-400 mt-0.5">${escHtml(lic.license_type || 'License')} · ${lic.state}</p>
+        </div>
+      </div>
+      <button onclick="$('licDetailPopover').remove()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+        <i class="fas fa-times text-sm"></i>
+      </button>
+    </div>
+
+    <div class="p-5 space-y-4">
+
+      <!-- License info -->
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Status</p>
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${sc}">${lic.status}</span>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">License #</p>
+          <p class="text-sm font-mono font-semibold text-gray-800">${escHtml(lic.license_number || '—')}</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Lic. Expires</p>
+          <p class="text-sm font-semibold ${licIsExpiringSoon(lic.expiry_date) ? 'text-orange-600' : licIsExpired(lic) ? 'text-red-600' : 'text-gray-800'}">${fmtD(lic.expiry_date)}</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Type</p>
+          <p class="text-sm font-semibold text-gray-800">${escHtml(lic.license_type || '—')}</p>
+        </div>
+      </div>
+
+      <!-- Collab agreement section — always shown if collab_physician -->
+      ${hasCollab ? `
+      <div class="rounded-xl border ${collabExpired ? 'border-red-200 bg-red-50' : cpaIsPending ? 'border-amber-200 bg-amber-50' : 'border-purple-200 bg-purple-50'} p-4 space-y-2">
+        <p class="text-xs font-bold ${collabExpired ? 'text-red-700' : cpaIsPending ? 'text-amber-800' : 'text-purple-700'} flex items-center gap-1.5">
+          <i class="fas fa-user-md"></i> Collaborating Physician Agreement
+        </p>
+        <div class="flex items-center justify-between">
+          <span class="text-sm font-semibold text-gray-800">${escHtml(lic.collab_physician)}</span>
+          ${collabExpired ? '<span class="text-xs font-bold text-red-600">⚠ Agreement Expired</span>' : collabExpSoon ? '<span class="text-xs font-bold text-orange-600">⏰ Expiring Soon</span>' : ''}
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-gray-500">Agreement expires:</span>
+          <span class="font-semibold ${collabExpired ? 'text-red-600' : collabExpSoon ? 'text-orange-600' : 'text-gray-700'}">${fmtD(lic.collab_expiry)}</span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-gray-500">CPA status:</span>
+          <span class="font-semibold">${cpaIsPending ? cpaBadgeHtml(lic.notes) : `<span class="text-green-700 font-semibold">${escHtml(lic.notes || 'Cleared')}</span>`}</span>
+        </div>
+      </div>` : `
+      <div class="rounded-xl border border-gray-100 bg-gray-50 p-3 text-xs text-gray-400 flex items-center gap-2">
+        <i class="fas fa-user-md text-gray-300"></i> No collaborating physician on file for this state.
+      </div>`}
+
+      <!-- Permitted actions -->
+      ${lic.permitted_actions ? `
+      <div class="bg-blue-50 border border-blue-100 rounded-xl p-3">
+        <p class="text-[10px] font-bold text-blue-500 uppercase tracking-wide mb-1.5">Permitted Actions</p>
+        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${lic.permitted_actions.includes('Prescribe') ? 'bg-green-100 text-green-700' : lic.permitted_actions.includes('No CRx') ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-500'}">
+          <i class="fas fa-stethoscope text-[10px]"></i>${escHtml(lic.permitted_actions)}
+        </span>
+      </div>` : ''}
+
+    </div>
+
+    <!-- Footer actions -->
+    <div class="px-5 pb-5 flex gap-2">
+      <button onclick="$('licDetailPopover').remove()"
+        class="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50 transition">
+        Close
+      </button>
+      <button onclick="$('licDetailPopover').remove(); licEditEntry(${lic.id})"
+        class="flex-1 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition">
+        <i class="fas fa-pencil text-xs"></i> Edit License
+      </button>
+    </div>
+  </div>`
+
+  document.body.appendChild(popover)
 }
 
 // ── Inline edit/add modal ──────────────────────────────────────────

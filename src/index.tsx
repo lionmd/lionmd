@@ -3765,7 +3765,7 @@ app.get('/api/licensing/public', async (c) => {
     c.env.DB.prepare(
       `SELECT pl.id, pl.contractor_id, pl.state, pl.license_number, pl.license_type,
               pl.expiry_date, pl.status, pl.collab_physician, pl.collab_expiry,
-              pl.permitted_actions, pl.practice_type,
+              pl.notes, pl.permitted_actions, pl.practice_type,
               ct.name as provider_name, ct.role_group
        FROM provider_licenses pl
        JOIN contractors ct ON ct.id = pl.contractor_id
