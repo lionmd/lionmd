@@ -4768,7 +4768,7 @@ function renderContractorGroupedTable(contractors, duplicateIds = new Set(), cli
         return Object.entries(byPhys).map(([phys, states]) =>
           '<span class="inline-flex items-center gap-1 text-xs text-purple-700">' +
           '<i class="fas fa-user-md text-[10px] text-purple-400"></i>' +
-          escHtml(phys) + ' <span class="text-gray-400">·</span> <span class="font-mono">' + (states as string[]).join(', ') + '</span></span>'
+          escHtml(phys) + ' <span class="text-gray-400">·</span> <span class="font-mono">' + states.join(', ') + '</span></span>'
         ).join('<br>')
       }
       if (ct.role_group === 'Physician') {
