@@ -11916,8 +11916,9 @@ function permDeleteCheckInput() {
 
 async function permDeleteConfirm() {
   if (!_permDeleteCallback) return
+  const cb = _permDeleteCallback   // save before close nulls it
   permDeleteClose()
-  await _permDeleteCallback()
+  await cb()
 }
 
 async function cpSaveMerge() {
