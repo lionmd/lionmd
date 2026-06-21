@@ -3624,6 +3624,17 @@ app.put('/api/admin/licenses/:id', requireAdmin, async (c) => {
   return c.json({ ok: true })
 })
 
+// ── Admin: PATCH /api/admin/licenses/:id/collab-clear ────────────
+// Clears collab_physician, collab_expiry, and collab-related notes without
+// requiring the full license payload (avoids license_number required check).
+app.patch('/api/admin/licenses/:id/collab-clear', requireAdmin, async (c) => {
+  const id = c.req.param('id')
+  await c.env.DB.prepare(
+    `UPDATE provider_licenses SET collab_physician='', collab_expiry='', updated_at=CURRENT_TIMESTAMP WHERE id=?`
+  ).bind(id).run()
+  return c.json({ ok: true })
+})
+
 // ── Admin: DELETE /api/admin/licenses/:id ────────────────────────
 app.delete('/api/admin/licenses/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
