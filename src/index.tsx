@@ -498,6 +498,7 @@ app.get('/api/contractors', async (c) => {
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN earns_commission INTEGER DEFAULT 0`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN role_group TEXT DEFAULT ''`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN external_cpa_notes TEXT NOT NULL DEFAULT ''`).run().catch(() => {})
+  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN work_email TEXT DEFAULT ''`).run().catch(() => {})
   // Profile / provider fields (mirrors ensureProviderSchema)
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN photo_data TEXT DEFAULT ''`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN photo_mime TEXT DEFAULT ''`).run().catch(() => {})
@@ -516,19 +517,19 @@ app.get('/api/contractors', async (c) => {
 })
 
 app.post('/api/contractors', async (c) => {
-  const { name, first_name, last_name, company, ein_ssn, email, contractor_type, gusto_type, role_group } = await c.req.json()
+  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group } = await c.req.json()
   const result = await c.env.DB.prepare(
-    `INSERT INTO contractors (name, first_name, last_name, company, ein_ssn, email, contractor_type, gusto_type, role_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', contractor_type || 'regular', gusto_type || 'Individual', role_group || '').run()
-  return c.json({ id: result.meta.last_row_id, name, first_name, last_name, company, ein_ssn, email, contractor_type, gusto_type, role_group })
+    `INSERT INTO contractors (name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', contractor_type || 'regular', gusto_type || 'Individual', role_group || '').run()
+  return c.json({ id: result.meta.last_row_id, name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group })
 })
 
 app.put('/api/contractors/:id', async (c) => {
   const id = c.req.param('id')
-  const { name, first_name, last_name, company, ein_ssn, email, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes } = await c.req.json()
+  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes } = await c.req.json()
   await c.env.DB.prepare(
-    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=? WHERE id=?`
-  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', id).run()
+    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=? WHERE id=?`
+  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', id).run()
   return c.json({ ok: true })
 })
 

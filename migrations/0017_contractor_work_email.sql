@@ -1,0 +1,1 @@
+ALTER TABLE contractors ADD COLUMN work_email TEXT NOT NULL DEFAULT '';
