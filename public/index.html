@@ -2111,6 +2111,10 @@ function buildNav() {
     { id: 'mgr_consults',          icon: 'fa-table',            label: 'Consult Records' },
     { id: 'mgr_availability',      icon: 'fa-calendar-check',   label: 'Availability' },
   ]
+  const licEditorNav = [
+    { id: 'lic_dashboard', icon: 'fa-map-marker-alt',  label: 'Licensing Dashboard' },
+    { id: 'lic_edit',      icon: 'fa-edit',            label: 'Edit Licenses' },
+  ]
 
   // Admin in onboarding view gets the same 3-item nav as the onboarding role
   const inObView = state.role === 'onboarding' || (state.role === 'admin' && state.adminView === 'onboarding')
@@ -2118,6 +2122,7 @@ function buildNav() {
   if (state.role === 'candidate') items = candidateNav
   else if (state.role === 'provider') items = providerNav
   else if (state.role === 'manager') items = managerNav
+  else if (state.role === 'license_editor') items = licEditorNav
   else if (inObView) items = obNav
   else if (state.role === 'admin') items = adminNav
   else items = cvNav
@@ -2239,7 +2244,7 @@ async function loadInitialData() {
 
     // Resolve target page BEFORE selectPeriod so its navigate(state.currentPage) uses the right page
     const savedPage = localStorage.getItem('lmd_last_page')
-    const defaultPage = state.role === 'carevalidate' ? 'cv_dashboard' : 'dashboard'
+    const defaultPage = state.role === 'carevalidate' ? 'cv_dashboard' : state.role === 'license_editor' ? 'lic_dashboard' : 'dashboard'
     const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','carevalidate','partner_view','cv_dashboard','cv_detail','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
     state.currentPage = (savedPage && validPages.includes(savedPage)) ? savedPage : defaultPage
 
@@ -14570,10 +14575,8 @@ async function renderLicDashboard() {
 }
 
 async function renderLicenseEditorPortal() {
-  state.currentPage = 'lic_edit'
-  const navEl = $('nav_lic_edit'); if (navEl) navEl.classList.add('active')
   buildNav()
-  navigate('lic_edit')
+  navigate('lic_dashboard')
 }
 
 // ── Main dashboard shell ──────────────────────────────────────────
@@ -14643,40 +14646,174 @@ function licDrawDashboard() {
     </div>` : ''}
   </div>
 
-  <!-- Alerts -->
-  ${expiring.length > 0 || expired.length > 0 || collabExpiring.length > 0 || cpaBlocked.length > 0 ? `
-  <div class="mb-4 space-y-2">
-    ${cpaBlocked.length > 0 ? `
-    <div class="p-3 rounded-xl bg-amber-50 border border-amber-300 flex items-start gap-2 text-sm">
-      <i class="fas fa-file-signature text-amber-500 mt-0.5 flex-shrink-0"></i>
-      <div class="flex-1 min-w-0">
-        <span class="font-semibold text-amber-800">${cpaBlocked.length} NP license${cpaBlocked.length > 1 ? 's' : ''} marked Active but CPA not yet signed — state law requires a signed CPA to practice:</span>
-        <div class="mt-1 flex flex-wrap gap-1">
-          ${cpaBlocked.slice(0,8).map(l => `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-xs font-medium">${escHtml(l.contractor_name.split(' ').pop())} / ${l.state} <span class="text-amber-500 text-[10px]">(${cpaStateType(l.state)})</span></span>`).join('')}
-          ${cpaBlocked.length > 8 ? `<span class="text-xs text-amber-600 font-medium">+${cpaBlocked.length - 8} more</span>` : ''}
-        </div>
-        <p class="text-xs text-amber-700 mt-1.5">These should be <strong>Pending</strong> until the CPA is fully signed. Use the Collab Agreements tab or click any amber cell to update.</p>
-      </div>
-    </div>` : ''}
-    ${expired.length > 0 ? `
-    <div class="p-3 rounded-xl bg-red-50 border border-red-200 flex items-start gap-2 text-sm">
-      <i class="fas fa-times-circle text-red-500 mt-0.5 flex-shrink-0"></i>
-      <div><span class="font-semibold text-red-800">${expired.length} expired license${expired.length > 1 ? 's' : ''}:</span>
-      <span class="text-red-600 ml-1">${expired.slice(0,5).map(l => l.contractor_name + ' / ' + l.state).join(' · ')}${expired.length > 5 ? ' …' : ''}</span></div>
-    </div>` : ''}
-    ${expiring.length > 0 ? `
-    <div class="p-3 rounded-xl bg-orange-50 border border-orange-200 flex items-start gap-2 text-sm">
-      <i class="fas fa-exclamation-triangle text-orange-500 mt-0.5 flex-shrink-0"></i>
-      <div><span class="font-semibold text-orange-800">${expiring.length} license${expiring.length > 1 ? 's' : ''} expiring within 60 days:</span>
-      <span class="text-orange-700 ml-1">${expiring.slice(0,5).map(l => l.contractor_name + ' / ' + l.state + ' (' + l.expiry_date + ')').join(' · ')}${expiring.length > 5 ? ' …' : ''}</span></div>
-    </div>` : ''}
-    ${collabExpiring.length > 0 ? `
-    <div class="p-3 rounded-xl bg-purple-50 border border-purple-200 flex items-start gap-2 text-sm">
-      <i class="fas fa-user-md text-purple-500 mt-0.5 flex-shrink-0"></i>
-      <div><span class="font-semibold text-purple-800">${collabExpiring.length} collab agreement${collabExpiring.length > 1 ? 's' : ''} expiring within 60 days:</span>
-      <span class="text-purple-700 ml-1">${collabExpiring.slice(0,4).map(l => l.contractor_name + ' / ' + l.state).join(' · ')}</span></div>
-    </div>` : ''}
-  </div>` : ''}
+  <!-- Compliance Flags Panel -->
+  ${(() => {
+    // ── Compute all flag categories ──────────────────────────────────────
+    const now = new Date()
+    const inDays = (d, days) => { const x = new Date(d); return x > now && x < new Date(now.getTime() + days*86400000) }
+    const isPast  = d => d && new Date(d) < now
+
+    // 1. Expired licenses
+    const flagExpired = expired  // already computed above
+
+    // 2. Expiring ≤60 days
+    const flagExpiring = expiring  // already computed above
+
+    // 3. CPA unsigned but marked Active (should be Pending)
+    const flagCpaUnsigned = cpaBlocked  // already computed above
+
+    // 4. NP/PA active license in CPA-required state with NO collab physician set at all
+    const flagNoCollab = all.filter(l => {
+      if (l.status !== 'active') return false
+      if (!cpaRequiredForLic(l)) return false
+      return !l.collab_physician || !l.collab_physician.trim()
+    })
+
+    // 5. Collab agreement expiring ≤60 days
+    const flagCollabExpiring = collabExpiring  // already computed above
+
+    // 6. Collab agreement already expired
+    const flagCollabExpired = all.filter(l => l.collab_physician && l.collab_physician.trim() && isPast(l.collab_expiry))
+
+    // 7. Collab agreement has no expiry date set (can't track renewal)
+    const flagCollabNoExpiry = all.filter(l =>
+      l.collab_physician && l.collab_physician.trim() &&
+      !l.collab_expiry &&
+      l.status === 'active'
+    )
+
+    // 8. Pending licenses that have been pending > 30 days (stale — need a status update)
+    const flagStalePending = all.filter(l => {
+      if (l.status !== 'pending') return false
+      // Use updated_at or created_at if available; otherwise flag all pending
+      const updated = l.updated_at || l.created_at
+      if (!updated) return false
+      return (now - new Date(updated)) > 30 * 86400000
+    })
+
+    // 9. Physician has NO active license in a state where they ARE listed as a collab physician
+    // i.e. they're supervising an NP in a state where they themselves don't hold an active license
+    const physicianLicMap = {}  // contractorId → Set of states with active license
+    for (const l of all) {
+      const rg = (l.role_group || '').toUpperCase()
+      if (rg.includes('PHYSICIAN') && l.status === 'active') {
+        if (!physicianLicMap[l.contractor_id]) physicianLicMap[l.contractor_id] = new Set()
+        physicianLicMap[l.contractor_id].add(l.state)
+      }
+    }
+    // Find all collab entries and look up if the physician has an active license in that state
+    const flagPhysNoLicense = []
+    const seen9 = new Set()
+    for (const l of all) {
+      if (!l.collab_physician || !l.collab_physician.trim()) continue
+      // Match physician by last name against contractors list
+      const physName = l.collab_physician.trim().toLowerCase()
+      const physContractor = licState.contractors.find(c =>
+        (c.role_group || '').toUpperCase().includes('PHYSICIAN') &&
+        (c.name || '').toLowerCase().includes(physName)
+      )
+      if (!physContractor) continue
+      const pid = physContractor.id
+      const hasActiveLicInState = physicianLicMap[pid] && physicianLicMap[pid].has(l.state)
+      const key = pid + '_' + l.state
+      if (!hasActiveLicInState && !seen9.has(key)) {
+        seen9.add(key)
+        flagPhysNoLicense.push({ ...l, phys_name: physContractor.name, phys_id: pid })
+      }
+    }
+
+    const totalFlags = flagExpired.length + flagExpiring.length + flagCpaUnsigned.length +
+      flagNoCollab.length + flagCollabExpiring.length + flagCollabExpired.length +
+      flagCollabNoExpiry.length + flagStalePending.length + flagPhysNoLicense.length
+
+    if (totalFlags === 0) return '<div class="mb-4 p-3 rounded-xl bg-green-50 border border-green-200 flex items-center gap-2 text-sm text-green-700"><i class="fas fa-check-circle text-green-500"></i><span class="font-semibold">No compliance issues detected.</span></div>'
+
+    // ── Render helper: collapsible flag card ──────────────────────────────
+    const flagCard = (id, sev, icon, title, count, items, note) => {
+      const colors = {
+        critical: { bg:'bg-red-50', border:'border-red-300', icon:'text-red-500', title:'text-red-800', badge:'bg-red-100 text-red-700 border-red-200', pill:'bg-red-100 text-red-800' },
+        high:     { bg:'bg-orange-50', border:'border-orange-300', icon:'text-orange-500', title:'text-orange-800', badge:'bg-orange-100 text-orange-700 border-orange-200', pill:'bg-orange-100 text-orange-800' },
+        warning:  { bg:'bg-amber-50', border:'border-amber-300', icon:'text-amber-500', title:'text-amber-800', badge:'bg-amber-100 text-amber-700 border-amber-200', pill:'bg-amber-100 text-amber-800' },
+        info:     { bg:'bg-purple-50', border:'border-purple-200', icon:'text-purple-500', title:'text-purple-800', badge:'bg-purple-100 text-purple-700 border-purple-200', pill:'bg-purple-100 text-purple-800' },
+        notice:   { bg:'bg-blue-50', border:'border-blue-200', icon:'text-blue-500', title:'text-blue-800', badge:'bg-blue-100 text-blue-700 border-blue-200', pill:'bg-blue-100 text-blue-800' },
+      }
+      const c = colors[sev] || colors.warning
+      const pills = items.slice(0, 12).map(i =>
+        '<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-medium border ' + c.pill + ' border-' + c.border.replace('border-','') + ' cursor-pointer hover:opacity-80"' +
+        (i.id ? ' onclick="licShowDetail(' + i.id + ')"' : '') + '>' +
+        escHtml((i.contractor_name || i.phys_name || '').split(' ').slice(-1)[0]) + ' / ' + escHtml(i.state) +
+        (i.expiry_date && sev !== 'notice' ? ' <span class="opacity-60 text-[10px]">exp ' + i.expiry_date + '</span>' : '') +
+        (i.collab_expiry && (sev === 'info') ? ' <span class="opacity-60 text-[10px]">collab exp ' + i.collab_expiry + '</span>' : '') +
+        '</span>'
+      ).join('')
+      const extra = items.length > 12 ? '<span class="text-xs opacity-60 font-medium">+' + (items.length - 12) + ' more</span>' : ''
+      return '<div class="' + c.bg + ' rounded-xl border ' + c.border + ' overflow-hidden">' +
+        '<button class="w-full flex items-center gap-2 px-4 py-3 text-left" onclick="this.nextElementSibling.classList.toggle(\'hidden\')">' +
+        '<i class="fas ' + icon + ' ' + c.icon + ' flex-shrink-0 w-4"></i>' +
+        '<span class="font-semibold text-sm ' + c.title + ' flex-1">' + title + '</span>' +
+        '<span class="text-xs font-bold px-2 py-0.5 rounded-full border ' + c.badge + '">' + count + '</span>' +
+        '<i class="fas fa-chevron-down text-xs opacity-40 ml-1"></i>' +
+        '</button>' +
+        '<div class="px-4 pb-3 border-t ' + c.border + '">' +
+        (note ? '<p class="text-xs opacity-75 ' + c.title + ' mt-2 mb-2">' + note + '</p>' : '') +
+        '<div class="flex flex-wrap gap-1 mt-2">' + pills + extra + '</div>' +
+        '</div>' +
+        '</div>'
+    }
+
+    let cards = '<div class="mb-4 space-y-2">'
+    cards += '<div class="flex items-center justify-between mb-1">'
+    cards += '<p class="text-xs font-bold text-gray-500 uppercase tracking-wider"><i class="fas fa-shield-alt mr-1 text-gray-400"></i>Compliance Flags <span class="ml-1 text-red-500">' + totalFlags + ' issue' + (totalFlags !== 1 ? 's' : '') + '</span></p>'
+    cards += '</div>'
+
+    if (flagExpired.length)
+      cards += flagCard('expired', 'critical', 'fa-times-circle',
+        'Expired Licenses — Providers cannot practice', flagExpired.length, flagExpired,
+        'These licenses have expired. Providers must not see patients in these states until renewed.')
+
+    if (flagPhysNoLicense.length)
+      cards += flagCard('physNoLic', 'critical', 'fa-user-slash',
+        'Physician Supervising Without an Active License in That State', flagPhysNoLicense.length, flagPhysNoLicense,
+        'A physician listed as collaborating physician in a state where they do not hold an active license — this may be legally invalid.')
+
+    if (flagCpaUnsigned.length)
+      cards += flagCard('cpaUnsigned', 'high', 'fa-file-signature',
+        'CPA Required But Not Yet Signed — License Should Be Pending', flagCpaUnsigned.length, flagCpaUnsigned,
+        'These licenses are marked Active in a CPA-required state with no signed agreement on file. State law requires a signed CPA before the NP/PA can practice. Change status to Pending until signed.')
+
+    if (flagNoCollab.length)
+      cards += flagCard('noCollab', 'high', 'fa-user-times',
+        'Active NP/PA License With No Collaborating Physician Assigned', flagNoCollab.length, flagNoCollab,
+        'These providers have an active license in a CPA-required state but no collaborating physician is recorded. A CPA must be in place to practice legally.')
+
+    if (flagCollabExpired.length)
+      cards += flagCard('collabExpired', 'high', 'fa-handshake-slash',
+        'Collab Agreement Expired', flagCollabExpired.length, flagCollabExpired,
+        'The collaborating agreement expiry date has passed. Provider may no longer practice in these states without a renewed agreement.')
+
+    if (flagExpiring.length)
+      cards += flagCard('expiring', 'warning', 'fa-hourglass-half',
+        'Licenses Expiring Within 60 Days', flagExpiring.length, flagExpiring,
+        'Renewal should be initiated now to avoid a lapse.')
+
+    if (flagCollabExpiring.length)
+      cards += flagCard('collabExpiring', 'info', 'fa-user-clock',
+        'Collab Agreements Expiring Within 60 Days', flagCollabExpiring.length, flagCollabExpiring,
+        'Contact the collaborating physician to renew the agreement before it lapses.')
+
+    if (flagStalePending.length)
+      cards += flagCard('stalePending', 'notice', 'fa-clock',
+        'Licenses Pending for 30+ Days — Status Update Needed', flagStalePending.length, flagStalePending,
+        'These licenses have been in Pending status for over 30 days. Confirm whether they are still in progress or need follow-up.')
+
+    if (flagCollabNoExpiry.length)
+      cards += flagCard('collabNoExpiry', 'notice', 'fa-calendar-times',
+        'Collab Agreements With No Expiry Date Recorded', flagCollabNoExpiry.length, flagCollabNoExpiry,
+        'No renewal date on file — these cannot be tracked for timely renewal. Add an expiry date to each agreement.')
+
+    cards += '</div>'
+    return cards
+  })()}
 
   <!-- View tabs + filters -->
   <div class="bg-white rounded-xl border border-gray-200 shadow-sm mb-4">
