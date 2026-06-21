@@ -3595,16 +3595,31 @@ app.post('/api/admin/contractors/:id/licenses', requireAdmin, async (c) => {
 // ── Admin: PUT /api/admin/licenses/:id ───────────────────────────
 app.put('/api/admin/licenses/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
-  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = await c.req.json() as any
-  await c.env.DB.prepare(
-    `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
-  ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'', id).run()
+  const body = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
+  if (!license_number) return c.json({ error: 'License number is required' }, 400)
+  const hasFile = body.license_file_data && body.license_file_data.length > 0
+  if (hasFile) {
+    await c.env.DB.prepare(
+      `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?, license_file_name=?, license_file_data=?, license_file_mime=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+    ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'', body.license_file_name||'', body.license_file_data, body.license_file_mime||'', id).run()
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+    ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'', id).run()
+  }
   return c.json({ ok: true })
 })
 
 // ── Admin: DELETE /api/admin/licenses/:id ────────────────────────
 app.delete('/api/admin/licenses/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
+  return c.json({ ok: true })
+})
+
+// ── Admin: DELETE /api/admin/licenses/:id/file — clear file only ─
+app.delete('/api/admin/licenses/:id/file', requireAdmin, async (c) => {
+  await c.env.DB.prepare(`UPDATE provider_licenses SET license_file_name='', license_file_data='', license_file_mime='', updated_at=CURRENT_TIMESTAMP WHERE id=?`).bind(c.req.param('id')).run()
   return c.json({ ok: true })
 })
 
