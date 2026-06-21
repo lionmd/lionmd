@@ -7621,8 +7621,8 @@ async function ctDownloadContractorDoc(docId, fileName) {
     const doc = await api(`/api/admin/contractor-documents/${docId}`)
     hideLoading()
     if (!doc.file_data) { showToast('No file data found', 'error'); return }
-    // file_data is raw base64 (no data: prefix) — convert to blob
-    const binary = atob(doc.file_data)
+    // file_data may be a raw base64 string or a full data URL — strip prefix if present
+    const binary = atob(doc.file_data.replace(/^data:[^;]+;base64,/, ''))
     const bytes = new Uint8Array(binary.length)
     for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
     const blob = new Blob([bytes], { type: doc.mime_type || 'application/octet-stream' })
