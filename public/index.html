@@ -14681,13 +14681,6 @@ function licDrawDashboard() {
     // 6. Collab agreement already expired
     const flagCollabExpired = all.filter(l => l.collab_physician && l.collab_physician.trim() && isPast(l.collab_expiry))
 
-    // 7. Collab agreement has no expiry date set (can't track renewal)
-    const flagCollabNoExpiry = all.filter(l =>
-      l.collab_physician && l.collab_physician.trim() &&
-      !l.collab_expiry &&
-      l.status === 'active'
-    )
-
     // 8. Pending licenses that have been pending > 30 days (stale — need a status update)
     const flagStalePending = all.filter(l => {
       if (l.status !== 'pending') return false
@@ -14730,7 +14723,7 @@ function licDrawDashboard() {
 
     const totalFlags = flagExpired.length + flagExpiring.length + flagCpaUnsigned.length +
       flagNoCollab.length + flagCollabExpiring.length + flagCollabExpired.length +
-      flagCollabNoExpiry.length + flagStalePending.length + flagPhysNoLicense.length
+      flagStalePending.length + flagPhysNoLicense.length
 
     if (totalFlags === 0) return '<div class="mb-4 p-3 rounded-xl bg-green-50 border border-green-200 flex items-center gap-2 text-sm text-green-700"><i class="fas fa-check-circle text-green-500"></i><span class="font-semibold">No compliance issues detected.</span></div>'
 
@@ -14815,11 +14808,6 @@ function licDrawDashboard() {
       cards += flagCard('stalePending', 'notice', 'fa-clock',
         'Licenses Pending for 30+ Days — Status Update Needed', flagStalePending.length, flagStalePending,
         'These licenses have been in Pending status for over 30 days. Confirm whether they are still in progress or need follow-up.')
-
-    if (flagCollabNoExpiry.length)
-      cards += flagCard('collabNoExpiry', 'notice', 'fa-calendar-times',
-        'Collab Agreements With No Expiry Date Recorded', flagCollabNoExpiry.length, flagCollabNoExpiry,
-        'No renewal date on file — these cannot be tracked for timely renewal. Add an expiry date to each agreement.')
 
     cards += '</div>'
     return cards
