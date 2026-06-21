@@ -2079,6 +2079,7 @@ function buildNav() {
     { id: 'onboarding',  icon: 'fa-user-plus',        label: 'Onboarding' },
     { id: 'rates',       icon: 'fa-sliders-h',        label: 'Payment Rates' },
     { id: 'carevalidate',icon: 'fa-eye',              label: 'CareValidate View' },
+    { id: 'partner_view',icon: 'fa-share-alt',         label: 'Partner View' },
     { id: 'users',       icon: 'fa-users-cog',        label: 'User Management' },
     { id: 'payments',      icon: 'fa-credit-card',       label: 'Client Payments' },
     { id: 'availability',  icon: 'fa-calendar-check',    label: 'Availability' },
@@ -2139,6 +2140,7 @@ const PAGE_PATHS = {
   onboarding:         '/onboarding',
   rates:              '/rates',
   carevalidate:       '/carevalidate',
+  partner_view:       '/partner-view',
   cv_dashboard:       '/cv/dashboard',
   cv_detail:          '/cv/detail',
   users:              '/users',
@@ -2190,10 +2192,10 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', partner_view:'Partner View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
   $('pageTitle').textContent = titles[page] || page
 
-  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, partner_view: renderPartnerView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
   availability: renderAvailabilityDashboard, provider_availability: renderProviderAvailability,
   lic_dashboard: renderLicDashboard, lic_edit: renderLicEdit }
   if (pages[page]) pages[page]()
@@ -2238,7 +2240,7 @@ async function loadInitialData() {
     // Resolve target page BEFORE selectPeriod so its navigate(state.currentPage) uses the right page
     const savedPage = localStorage.getItem('lmd_last_page')
     const defaultPage = state.role === 'carevalidate' ? 'cv_dashboard' : 'dashboard'
-    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','carevalidate','cv_dashboard','cv_detail','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
+    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','carevalidate','partner_view','cv_dashboard','cv_detail','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
     state.currentPage = (savedPage && validPages.includes(savedPage)) ? savedPage : defaultPage
 
     if (state.periods.length > 0) {
@@ -15268,10 +15270,256 @@ function licEditFilterList(query) {
 // ════════════════════════════════════════════════════
 // PUBLIC LICENSING PAGE  — no auth, shareable URL
 // ════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════
+// PARTNER VIEW — Admin management page for the shared
+// licensing view sent to CareValidate / partners
+// ════════════════════════════════════════════════════
+async function renderPartnerView() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex justify-center py-16"><div class="spinner"></div></div>`
+
+  // Load current password + live licensing data in parallel
+  let currentPw = 'LionProviders2026!'
+  let licData = null
+  try {
+    const [pwRes, dataRes] = await Promise.all([
+      api('/api/admin/config/shared_view_password'),
+      fetch('/api/licensing/public').then(r => r.ok ? r.json() : null)
+    ])
+    currentPw = pwRes?.value || currentPw
+    licData = dataRes
+  } catch(_) {}
+
+  const sharedUrl = window.location.origin + '/licensing/public'
+
+  // Deduplicate & build provider/license summary same as public view
+  const seen = new Map()
+  for (const r of (licData?.licenses || [])) {
+    const key = r.contractor_id + '-' + r.state
+    const ex = seen.get(key)
+    if (!ex || (r.license_number && !ex.license_number)) seen.set(key, r)
+  }
+  const rows = Array.from(seen.values())
+  const providerMap = {}
+  for (const r of rows) {
+    if (!providerMap[r.provider_name]) providerMap[r.provider_name] = { name: r.provider_name, role_group: r.role_group || '', licenses: [] }
+    providerMap[r.provider_name].licenses.push(r)
+  }
+  const providers = Object.values(providerMap).sort((a,b) => a.name.localeCompare(b.name))
+  const states = [...new Set(rows.map(r => r.state))].sort()
+
+  // CPA pending count for summary
+  const cpaPendingCount = rows.filter(r => cpaPending(r)).length
+  const missingActions  = rows.filter(r => !r.permitted_actions).length
+
+  mc.innerHTML = `
+  <div class="max-w-5xl space-y-6">
+
+    <!-- Page header -->
+    <div>
+      <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-share-alt text-blue-500"></i> Partner View Management
+      </h1>
+      <p class="text-sm text-gray-400 mt-1">Everything in one place — the shared licensing link sent to CareValidate, access controls, and a live preview of what they see.</p>
+    </div>
+
+    <!-- ── Access card ────────────────────────────────────── -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100 flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-link text-white text-sm"></i>
+        </div>
+        <div>
+          <h2 class="font-bold text-gray-800 text-sm">Shared Licensing Link</h2>
+          <p class="text-xs text-gray-400">Password-protected view — share this URL with CareValidate</p>
+        </div>
+        <a href="${sharedUrl}" target="_blank"
+          class="ml-auto flex-shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition">
+          <i class="fas fa-external-link-alt text-xs"></i> Open View
+        </a>
+      </div>
+      <div class="p-5 space-y-5">
+
+        <!-- URL row -->
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Shared URL</label>
+          <div class="flex items-center gap-2">
+            <div class="flex-1 font-mono text-sm bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-blue-700 select-all break-all">${sharedUrl}</div>
+            <button onclick="navigator.clipboard.writeText('${sharedUrl}').then(()=>showToast('Link copied!','success'))"
+              class="flex-shrink-0 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium flex items-center gap-2 transition">
+              <i class="fas fa-copy text-xs"></i> Copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Password row -->
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Access Password</label>
+          <div class="flex items-center gap-2">
+            <div class="flex items-center gap-3 flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5">
+              <i class="fas fa-lock text-gray-400 flex-shrink-0"></i>
+              <span id="pvPwDisplay" class="font-mono text-sm text-gray-800 select-all flex-1">${escHtml(currentPw)}</span>
+              <button onclick="document.getElementById('pvPwDisplay').style.filter=document.getElementById('pvPwDisplay').style.filter?'':'blur(5px)'"
+                class="text-xs text-gray-400 hover:text-gray-600 flex-shrink-0"><i class="fas fa-eye"></i></button>
+            </div>
+            <button onclick="navigator.clipboard.writeText(${JSON.stringify(currentPw)}).then(()=>showToast('Password copied!','success'))"
+              class="flex-shrink-0 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium flex items-center gap-2 transition">
+              <i class="fas fa-copy text-xs"></i> Copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Change password -->
+        <div class="p-4 rounded-xl bg-amber-50 border border-amber-200">
+          <p class="text-xs font-bold text-amber-700 mb-2 flex items-center gap-1.5">
+            <i class="fas fa-key"></i> Change Password
+          </p>
+          <p class="text-xs text-amber-600 mb-3">Setting a new password here updates it immediately. Anyone who currently has a session open will not be affected until their session expires or they revisit the page. Send the new password to CareValidate after changing.</p>
+          <div class="flex gap-2">
+            <input id="pvNewPw" type="text" placeholder="New password…"
+              class="flex-1 text-sm border border-amber-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
+              value="${escHtml(currentPw)}"/>
+            <button onclick="pvSavePassword()"
+              class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold flex items-center gap-2 transition flex-shrink-0">
+              <i class="fas fa-save text-xs"></i> Save
+            </button>
+          </div>
+          <div id="pvPwMsg" class="hidden mt-2 text-xs font-medium"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ── What CV sees: status summary ──────────────────── -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100">
+        <h2 class="font-bold text-gray-800 text-sm flex items-center gap-2">
+          <i class="fas fa-eye text-purple-500"></i> What CareValidate Sees — Live Preview
+        </h2>
+        <p class="text-xs text-gray-400 mt-0.5">This is exactly the data returned by the shared endpoint right now.</p>
+      </div>
+
+      <!-- KPI summary bar -->
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-px bg-gray-100 border-b border-gray-100">
+        <div class="bg-white px-5 py-4 text-center">
+          <div class="text-2xl font-bold text-gray-800">${providers.length}</div>
+          <div class="text-xs text-gray-500 mt-0.5 font-medium">Active Providers</div>
+        </div>
+        <div class="bg-white px-5 py-4 text-center">
+          <div class="text-2xl font-bold text-gray-800">${rows.length}</div>
+          <div class="text-xs text-gray-500 mt-0.5 font-medium">State Licenses</div>
+        </div>
+        <div class="bg-white px-5 py-4 text-center">
+          <div class="text-2xl font-bold ${cpaPendingCount > 0 ? 'text-amber-600' : 'text-green-600'}">${cpaPendingCount}</div>
+          <div class="text-xs text-gray-500 mt-0.5 font-medium">CPA Pending</div>
+        </div>
+        <div class="bg-white px-5 py-4 text-center">
+          <div class="text-2xl font-bold ${missingActions > 0 ? 'text-orange-500' : 'text-green-600'}">${missingActions}</div>
+          <div class="text-xs text-gray-500 mt-0.5 font-medium">Missing Permitted Actions</div>
+        </div>
+      </div>
+
+      <!-- Provider list -->
+      <div class="divide-y divide-gray-50">
+        ${providers.map(prov => {
+          const pendingCpa = prov.licenses.filter(l => cpaPending(l))
+          const missingPerm = prov.licenses.filter(l => !l.permitted_actions)
+          return `
+          <details class="group">
+            <summary class="px-5 py-3 cursor-pointer hover:bg-gray-50 flex items-center gap-3 select-none list-none">
+              <div class="flex-1 flex items-center gap-2 flex-wrap">
+                <span class="font-semibold text-gray-700 text-sm">${escHtml(prov.name)}</span>
+                <span class="text-xs text-gray-400">${escHtml(prov.role_group)}</span>
+                ${pendingCpa.length > 0 ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300"><i class="fas fa-exclamation-triangle text-[10px]"></i>CPA Pending (${pendingCpa.length})</span>` : ''}
+                ${missingPerm.length > 0 ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700 border border-orange-300"><i class="fas fa-question-circle text-[10px]"></i>Missing Actions (${missingPerm.length})</span>` : ''}
+              </div>
+              <span class="text-xs text-gray-400 flex-shrink-0">${prov.licenses.length} state${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
+            </summary>
+            <div class="px-5 pb-4">
+              <div class="rounded-xl border border-gray-100 overflow-hidden">
+                <table class="w-full text-xs">
+                  <thead class="bg-gray-50 text-gray-500 uppercase tracking-wide">
+                    <tr>
+                      <th class="px-3 py-2 text-left font-semibold">State</th>
+                      <th class="px-3 py-2 text-left font-semibold">Status</th>
+                      <th class="px-3 py-2 text-left font-semibold">License #</th>
+                      <th class="px-3 py-2 text-left font-semibold">Permitted Actions</th>
+                      <th class="px-3 py-2 text-left font-semibold">CPA</th>
+                    </tr>
+                  </thead>
+                  <tbody class="divide-y divide-gray-50">
+                    ${prov.licenses.sort((a,b)=>a.state.localeCompare(b.state)).map(l => `
+                    <tr class="hover:bg-gray-50">
+                      <td class="px-3 py-2 font-bold text-gray-700">${escHtml(l.state)}</td>
+                      <td class="px-3 py-2">
+                        <span class="px-1.5 py-0.5 rounded-full font-semibold ${l.status==='active'?'bg-green-100 text-green-700':l.status==='expired'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">${escHtml(l.status||'')}</span>
+                      </td>
+                      <td class="px-3 py-2 font-mono text-gray-600">${l.license_number ? escHtml(l.license_number) : '<span class="text-red-400 italic">Missing</span>'}</td>
+                      <td class="px-3 py-2">
+                        ${l.permitted_actions
+                          ? `<span class="px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>`
+                          : '<span class="text-orange-400 italic">Not set</span>'}
+                      </td>
+                      <td class="px-3 py-2">
+                        ${cpaPending(l) ? cpaBadgeHtml(l.notes) : (l.notes ? `<span class="text-gray-400 italic">${escHtml(l.notes)}</span>` : '<span class="text-gray-300">—</span>')}
+                      </td>
+                    </tr>`).join('')}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </details>`
+        }).join('')}
+        ${providers.length === 0 ? `<div class="px-5 py-12 text-center text-gray-400"><i class="fas fa-folder-open text-3xl mb-3 block"></i><p>No active providers with licenses on file.</p></div>` : ''}
+      </div>
+    </div>
+
+    <!-- ── Notes for the team ────────────────────────────── -->
+    <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 text-sm text-blue-800 space-y-2">
+      <p class="font-bold flex items-center gap-2"><i class="fas fa-info-circle"></i> Notes for the team</p>
+      <ul class="space-y-1.5 text-xs text-blue-700 list-disc list-inside">
+        <li>The shared link above is what you send to CareValidate — it requires the password to open.</li>
+        <li>The shared view shows: provider name, state, license #, license type, expiry, collab physician, permitted actions, and practice type. It does <strong>not</strong> show internal notes, payroll data, or documents.</li>
+        <li>To change the password: type the new password in the field above and click Save. The change takes effect immediately. Send the new password to CareValidate directly after changing.</li>
+        <li>Providers fill in their <strong>Permitted Actions</strong> from their own portal (State Licenses → Edit). Admins and license editors can also set it. CareValidate uses this to know what permissions to grant.</li>
+        <li>States showing <strong>CPA Pending</strong> mean the collaborating physician agreement is not yet fully signed — those providers may not be fully active in those states yet.</li>
+      </ul>
+    </div>
+
+  </div>`
+}
+
+async function pvSavePassword() {
+  const newPw = ($('pvNewPw').value || '').trim()
+  const msgEl = $('pvPwMsg')
+  msgEl.classList.add('hidden')
+  if (!newPw || newPw.length < 6) {
+    msgEl.textContent = 'Password must be at least 6 characters.'
+    msgEl.className = 'mt-2 text-xs font-medium text-red-600'
+    msgEl.classList.remove('hidden')
+    return
+  }
+  try {
+    await api('/api/admin/config/shared_view_password', { method: 'PUT', body: JSON.stringify({ value: newPw }) })
+    msgEl.textContent = '✅ Password updated! Share the new password with CareValidate.'
+    msgEl.className = 'mt-2 text-xs font-medium text-green-700'
+    msgEl.classList.remove('hidden')
+    // Update the displayed password
+    const disp = $('pvPwDisplay')
+    if (disp) disp.textContent = newPw
+    showToast('Password updated successfully', 'success')
+  } catch(e) {
+    msgEl.textContent = 'Error: ' + e.message
+    msgEl.className = 'mt-2 text-xs font-medium text-red-600'
+    msgEl.classList.remove('hidden')
+  }
+}
+
 async function renderPublicLicensing() {
   // ── Password gate ─────────────────────────────────────────────────
   const PUB_KEY = 'lmd_pub_auth'
-  const CORRECT = 'LionProviders2026!'
+  // Password is stored in D1 app_config; fall back to hardcoded default if unavailable
+  const FALLBACK_PW = 'LionProviders2026!'
   if (sessionStorage.getItem(PUB_KEY) !== '1') {
     document.body.innerHTML = `
     <div class="min-h-screen bg-gray-50 flex items-center justify-center font-sans">
@@ -15298,9 +15546,15 @@ async function renderPublicLicensing() {
       </div>
     </div>`
     document.title = 'LionMDs — Licensing'
-    window.pubGateSubmit = function() {
+    window.pubGateSubmit = async function() {
       const val = document.getElementById('pubGatePw').value
-      if (val === CORRECT) {
+      // Fetch current password from backend (unauthenticated endpoint)
+      let correct = FALLBACK_PW
+      try {
+        const res = await fetch('/api/shared-view-password')
+        if (res.ok) { const d = await res.json(); correct = d.password || FALLBACK_PW }
+      } catch(_) {}
+      if (val === correct) {
         sessionStorage.setItem(PUB_KEY, '1')
         renderPublicLicensing()
       } else {
@@ -15609,7 +15863,8 @@ window.addEventListener('DOMContentLoaded', async () => {
     '/manager/consults':      'mgr_consults',
     '/manager/availability':  'mgr_availability',
     '/licensing':             'lic_dashboard',
-    '/licensing/edit':     'lic_edit',
+    '/licensing/edit':        'lic_edit',
+    '/partner-view':          'partner_view',
   }
 
   const appPage = PATH_TO_PAGE[path]

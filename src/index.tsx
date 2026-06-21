@@ -3747,6 +3747,13 @@ app.get('/api/licensing/dashboard', requireLicenseEditor, async (c) => {
   return c.json({ contractors: contractors.results, licenses: licenses.results })
 })
 
+// ── GET /api/shared-view-password  — public endpoint for password gate ──
+// Returns the current shared view password so the gate can validate without hardcoding
+app.get('/api/shared-view-password', async (c) => {
+  const row = await c.env.DB.prepare(`SELECT value FROM app_config WHERE key='shared_view_password'`).first() as any
+  return c.json({ password: row?.value || 'LionProviders2026!' })
+})
+
 // ── GET /api/licensing/public  — no auth, read-only for external viewers ──
 app.get('/api/licensing/public', async (c) => {
   await ensureProviderSchema(c.env.DB)
@@ -3766,6 +3773,25 @@ app.get('/api/licensing/public', async (c) => {
     ).all()
   ])
   return c.json({ contractors: contractorsRes.results, licenses: licensesRes.results })
+})
+
+// ── Admin: GET /api/admin/config/:key ────────────────────────────
+app.get('/api/admin/config/:key', requireAdmin, async (c) => {
+  const key = c.req.param('key')
+  const row = await c.env.DB.prepare(`SELECT value FROM app_config WHERE key=?`).bind(key).first() as any
+  return c.json({ key, value: row?.value ?? null })
+})
+
+// ── Admin: PUT /api/admin/config/:key ────────────────────────────
+app.put('/api/admin/config/:key', requireAdmin, async (c) => {
+  const key = c.req.param('key')
+  const { value } = await c.req.json() as any
+  if (value === undefined || value === null) return c.json({ error: 'value required' }, 400)
+  await c.env.DB.prepare(
+    `INSERT INTO app_config (key, value, updated_at) VALUES (?,?,CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP`
+  ).bind(key, String(value)).run()
+  return c.json({ ok: true })
 })
 
 // ── Admin: PATCH /api/admin/contractors/:id/phone ────────────────
