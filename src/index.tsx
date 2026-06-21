@@ -549,16 +549,28 @@ app.delete('/api/contractors/:id', async (c) => {
 
 // Permanent hard-delete: removes contractor and ALL associated data
 app.delete('/api/contractors/:id/permanent', requireAdmin, async (c) => {
-  const id = c.req.param('id')
-  // Delete all associated data first (FK cascade not guaranteed in D1)
-  await c.env.DB.prepare(`DELETE FROM contractor_documents WHERE contractor_id=?`).bind(id).run()
-  await c.env.DB.prepare(`DELETE FROM portal_users WHERE contractor_id=?`).bind(id).run()
-  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE contractor_id=?`).bind(id).run()
-  await c.env.DB.prepare(`DELETE FROM provider_availability WHERE contractor_id=?`).bind(id).run()
-  await c.env.DB.prepare(`DELETE FROM provider_blocks WHERE contractor_id=?`).bind(id).run()
-  await c.env.DB.prepare(`UPDATE consults SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
-  await c.env.DB.prepare(`DELETE FROM contractors WHERE id=?`).bind(id).run()
-  return c.json({ ok: true })
+  const id = parseInt(c.req.param('id'), 10)
+  if (!id || isNaN(id)) return c.json({ error: 'Invalid contractor id' }, 400)
+  try {
+    // Use D1 batch to execute all statements atomically.
+    // Defer FK checks so child-row cleanup and parent delete happen in one go.
+    await c.env.DB.batch([
+      c.env.DB.prepare(`PRAGMA defer_foreign_keys=ON`),
+      c.env.DB.prepare(`DELETE FROM contractor_documents WHERE contractor_id=?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM portal_users WHERE contractor_id=?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM provider_licenses WHERE contractor_id=?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM provider_availability WHERE contractor_id=?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM provider_blocks WHERE contractor_id=?`).bind(id),
+      c.env.DB.prepare(`UPDATE onboarding_candidates SET converted_contractor_id=NULL WHERE converted_contractor_id=?`).bind(id),
+      c.env.DB.prepare(`UPDATE consults SET contractor_id=NULL WHERE contractor_id=?`).bind(id),
+      c.env.DB.prepare(`DELETE FROM contractors WHERE id=?`).bind(id),
+    ])
+    return c.json({ ok: true })
+  } catch (err: any) {
+    const msg = err?.message || String(err)
+    console.error(`[permanent-delete] contractor ${id} failed:`, msg)
+    return c.json({ error: 'Delete failed: ' + msg }, 500)
+  }
 })
 
 // ──────────────────────────────────────────────────────────────────
