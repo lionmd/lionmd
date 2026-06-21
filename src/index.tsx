@@ -3464,7 +3464,7 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
   const body = await c.req.json() as any
   const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
   if (!state) return c.json({ error: 'state required' }, 400)
-  if (!license_number) return c.json({ error: 'License number is required' }, 400)
+  if (!license_number && (status || 'active') === 'active') return c.json({ error: 'License number is required for active licenses' }, 400)
   const r = await c.env.DB.prepare(
     `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(pu.contractor_id, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'').run()
@@ -3477,7 +3477,7 @@ app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json() as any
   const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
-  if (!license_number) return c.json({ error: 'License number is required' }, 400)
+  if (!license_number && (status || 'active') === 'active') return c.json({ error: 'License number is required for active licenses' }, 400)
   const hasFile = body.license_file_data && body.license_file_data.length > 0
   if (hasFile) {
     await c.env.DB.prepare(
@@ -3610,7 +3610,7 @@ app.put('/api/admin/licenses/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json() as any
   const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
-  if (!license_number) return c.json({ error: 'License number is required' }, 400)
+  if (!license_number && (status || 'active') === 'active') return c.json({ error: 'License number is required for active licenses' }, 400)
   const hasFile = body.license_file_data && body.license_file_data.length > 0
   if (hasFile) {
     await c.env.DB.prepare(

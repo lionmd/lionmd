@@ -7687,7 +7687,7 @@ async function ctSaveLicense(contractorId, licId) {
   const errEl   = $('ctLicError')
   errEl.classList.add('hidden')
   if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
-  if (!num)   { errEl.textContent = 'License number is required.'; errEl.classList.remove('hidden'); return }
+  if (!num && status === 'active') { errEl.textContent = 'License number is required for active licenses.'; errEl.classList.remove('hidden'); return }
   const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes }
   if (_ctLicFile.file_data) {
     payload.license_file_name = _ctLicFile.file_name
@@ -13207,7 +13207,7 @@ async function ppSaveLicense(licId) {
   const errEl      = $('ppLicError')
   errEl.classList.add('hidden')
   if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
-  if (!num)   { errEl.textContent = 'License number is required.'; errEl.classList.remove('hidden'); return }
+  if (!num && status === 'active') { errEl.textContent = 'License number is required for active licenses.'; errEl.classList.remove('hidden'); return }
   const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp, permitted_actions, practice_type }
   if (_ppLicFile.file_data) {
     payload.license_file_name = _ppLicFile.file_name
@@ -15592,7 +15592,7 @@ async function licSaveModal(licId, contractorId, mode) {
   const errEl     = $('licMErr')
   const saveBtn   = $('licMSaveBtn')
   if (!state_val) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
-  if (!num) { errEl.textContent = 'License number is required.'; errEl.classList.remove('hidden'); return }
+  if (!num && status === 'active') { errEl.textContent = 'License number is required for active licenses.'; errEl.classList.remove('hidden'); return }
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…' }
   errEl.classList.add('hidden')
   const permitted_actions = ($('licMPermitted').value||'').trim()
