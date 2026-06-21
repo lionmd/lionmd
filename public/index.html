@@ -2075,7 +2075,8 @@ function buildNav() {
     { id: 'rates',       icon: 'fa-sliders-h',        label: 'Payment Rates' },
     { id: 'carevalidate',icon: 'fa-eye',              label: 'CareValidate View' },
     { id: 'users',       icon: 'fa-users-cog',        label: 'User Management' },
-    { id: 'payments',   icon: 'fa-credit-card',       label: 'Client Payments' },
+    { id: 'payments',      icon: 'fa-credit-card',       label: 'Client Payments' },
+    { id: 'availability',  icon: 'fa-calendar-check',    label: 'Availability' },
   ]
   const cvNav = [
     { id: 'cv_dashboard', icon: 'fa-chart-bar', label: 'Summary' },
@@ -2091,16 +2092,18 @@ function buildNav() {
     { id: 'provider_payroll',   icon: 'fa-money-bill-wave', label: 'My Payroll' },
     { id: 'provider_consults',  icon: 'fa-file-medical',   label: 'My Consults' },
     { id: 'provider_licenses',  icon: 'fa-map-marker-alt', label: 'State Licenses' },
-    { id: 'provider_documents', icon: 'fa-file-alt',       label: 'My Documents' },
+    { id: 'provider_documents',     icon: 'fa-file-alt',       label: 'My Documents' },
+    { id: 'provider_availability',  icon: 'fa-calendar-check',  label: 'My Availability' },
   ]
   const candidateNav = [
     { id: 'candidate_status',    icon: 'fa-clipboard-list', label: 'My Application' },
     { id: 'candidate_documents', icon: 'fa-file-alt',       label: 'My Documents' },
   ]
   const managerNav = [
-    { id: 'mgr_contractors', icon: 'fa-user-md',          label: 'Contractors' },
-    { id: 'mgr_licenses',    icon: 'fa-map-marker-alt',   label: 'Licenses' },
-    { id: 'mgr_consults',    icon: 'fa-table',            label: 'Consult Records' },
+    { id: 'mgr_contractors',        icon: 'fa-user-md',          label: 'Contractors' },
+    { id: 'mgr_licenses',          icon: 'fa-map-marker-alt',   label: 'Licenses' },
+    { id: 'mgr_consults',          icon: 'fa-table',            label: 'Consult Records' },
+    { id: 'mgr_availability',      icon: 'fa-calendar-check',   label: 'Availability' },
   ]
 
   // Admin in onboarding view gets the same 3-item nav as the onboarding role
@@ -2139,8 +2142,11 @@ const PAGE_PATHS = {
   provider_payroll:    '/portal/payroll',
   provider_consults:   '/portal/consults',
   provider_licenses:   '/portal/licenses',
-  provider_documents:  '/portal/documents',
-  candidate_status:    '/candidate/status',
+  provider_documents:     '/portal/documents',
+  provider_availability:  '/portal/availability',
+  availability:           '/availability',
+  mgr_availability:       '/manager/availability',
+  candidate_status:       '/candidate/status',
   candidate_documents: '/candidate/documents',
   lic_dashboard:       '/licensing',
   lic_edit:            '/licensing/edit',
@@ -2176,10 +2182,11 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
   $('pageTitle').textContent = titles[page] || page
 
-  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults,
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
+  availability: renderAvailabilityDashboard, provider_availability: renderProviderAvailability,
   lic_dashboard: renderLicDashboard, lic_edit: renderLicEdit }
   if (pages[page]) pages[page]()
 
@@ -15369,8 +15376,11 @@ window.addEventListener('DOMContentLoaded', async () => {
     '/portal/payroll':     'provider_payroll',
     '/portal/consults':    'provider_consults',
     '/portal/licenses':    'provider_licenses',
-    '/portal/documents':   'provider_documents',
-    '/licensing':          'lic_dashboard',
+    '/portal/documents':      'provider_documents',
+    '/portal/availability':   'provider_availability',
+    '/availability':          'availability',
+    '/manager/availability':  'mgr_availability',
+    '/licensing':             'lic_dashboard',
     '/licensing/edit':     'lic_edit',
   }
 
@@ -15435,6 +15445,659 @@ window.addEventListener('DOMContentLoaded', async () => {
     // In-app popstate: browser back/forward handled naturally by navigate()
   })
 })
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROVIDER AVAILABILITY MODULE — Frontend
+// ════════════════════════════════════════════════════════════════════════════
+
+const avState = {
+  schedule: [],       // weekly schedule rows
+  blocks:   [],       // upcoming block entries
+  saving:   false,
+}
+
+const AV_DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+const AV_DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function avFmtDate(dateStr) {
+  if (!dateStr) return ''
+  const d = new Date(dateStr + 'T12:00:00')
+  return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' })
+}
+
+function avNext30Days() {
+  const days = []
+  const today = new Date()
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(today)
+    d.setDate(today.getDate() + i)
+    days.push(d.toISOString().slice(0, 10))
+  }
+  return days
+}
+
+function avTodayStr() {
+  return new Date().toISOString().slice(0, 10)
+}
+
+// Get effective limit for a contractor on a given date
+// Checks block overrides first, then weekly schedule, then default
+function avEffectiveLimit(schedule, blocks, dateStr) {
+  // Check block override
+  const block = (blocks || []).find(b => b.block_date === dateStr)
+  if (block) return { limit: block.max_consults || 0, source: 'block', block }
+  // Check weekly schedule
+  const dow = new Date(dateStr + 'T12:00:00').getDay()
+  const sched = (schedule || []).find(s => s.day_of_week === dow)
+  if (sched) return { limit: sched.max_consults, source: 'schedule', sched }
+  // Default: available, no set limit
+  return { limit: null, source: 'default' }
+}
+
+function avStatusChip(limit, small) {
+  const sz = small ? 'text-xs px-1.5 py-0.5' : 'text-sm px-2.5 py-1'
+  if (limit === 0)    return `<span class="${sz} rounded-full font-semibold bg-red-100 text-red-700"><i class="fas fa-ban mr-1"></i>Unavailable</span>`
+  if (limit === null) return `<span class="${sz} rounded-full font-semibold bg-green-100 text-green-700"><i class="fas fa-check mr-1"></i>Available</span>`
+  return `<span class="${sz} rounded-full font-semibold bg-amber-100 text-amber-700"><i class="fas fa-tachometer-alt mr-1"></i>${limit} max</span>`
+}
+
+// ── PROVIDER PORTAL: My Availability ──────────────────────────────────────
+
+async function renderProviderAvailability() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const [schedule, blocks] = await Promise.all([
+      api('/api/availability/schedule'),
+      api('/api/availability/blocks'),
+    ])
+    avState.schedule = schedule || []
+    avState.blocks   = blocks   || []
+    avDrawProviderPage()
+  } catch(e) {
+    mc.innerHTML = `<div class="text-red-500 p-6">Error loading availability: ${e.message}</div>`
+  }
+}
+
+function avDrawProviderPage() {
+  const mc = $('mainContent')
+  const today = avTodayStr()
+  const futureBlocks = avState.blocks.filter(b => b.block_date >= today).sort((a,b) => a.block_date.localeCompare(b.block_date))
+
+  // Build schedule map: dow → row
+  const schedMap = {}
+  for (const s of avState.schedule) schedMap[s.day_of_week] = s
+
+  mc.innerHTML = `
+  <div class="max-w-3xl space-y-6">
+
+    <!-- Weekly Schedule Card -->
+    <div class="card p-0 overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-week mr-2 text-teal-600"></i>Weekly Schedule</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Set your default consult limit for each day of the week.</p>
+        </div>
+        <button onclick="avSaveSchedule()" id="avSaveSchedBtn"
+          class="btn-primary px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-1.5">
+          <i class="fas fa-save"></i> Save Schedule
+        </button>
+      </div>
+      <div class="divide-y divide-gray-50">
+        ${[1,2,3,4,5,6,0].map(dow => {
+          const row = schedMap[dow]
+          const maxC = row ? row.max_consults : 10
+          const loc  = row ? (row.location || '') : ''
+          const isOff = maxC === 0
+          return `
+          <div class="flex items-center gap-4 px-5 py-3 ${isOff ? 'bg-gray-50 opacity-70' : ''}">
+            <div class="w-24 flex-shrink-0">
+              <span class="text-sm font-semibold ${isOff ? 'text-gray-400' : 'text-gray-700'}">${AV_DAYS[dow]}</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-gray-400">Max consults</label>
+              <input type="number" min="0" max="99" value="${maxC}"
+                id="avSched_${dow}" onchange="avRefreshDayRow(${dow})"
+                class="w-16 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-teal-300 outline-none">
+              <span id="avSchedStatus_${dow}" class="ml-1">${avStatusChip(maxC, true)}</span>
+            </div>
+            <div class="flex-1">
+              <input type="text" value="${escHtml(loc)}" id="avSchedLoc_${dow}" placeholder="Location (optional)"
+                class="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-600 focus:ring-2 focus:ring-teal-300 outline-none">
+            </div>
+          </div>`
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Block Out a Date Card -->
+    <div class="card p-0 overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-times mr-2 text-red-500"></i>Block Out a Date</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Out of town, vacation, limited day? Submit here — your team will be notified.</p>
+        </div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Date *</label>
+            <input type="date" id="avBlockDate" min="${today}"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-300 outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Type</label>
+            <select id="avBlockType" onchange="avToggleBlockLimit()"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-300 outline-none">
+              <option value="unavailable">🔴 Fully unavailable</option>
+              <option value="limited">🟡 Limited availability</option>
+            </select>
+          </div>
+          <div id="avBlockLimitWrap" class="hidden">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Max consults that day</label>
+            <input type="number" min="1" max="99" value="3" id="avBlockLimit"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-300 outline-none">
+          </div>
+          <div class="${''}">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Reason <span class="font-normal text-gray-400">(optional — shared with admin)</span></label>
+            <input type="text" id="avBlockReason" placeholder="e.g. Out of town, conference, vacation…"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-gray-300 outline-none">
+          </div>
+        </div>
+        <button onclick="avSubmitBlock()"
+          class="bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-1.5">
+          <i class="fas fa-paper-plane"></i> Submit Block-out
+        </button>
+        <p class="text-xs text-gray-400 mt-2"><i class="fas fa-bell mr-1"></i>Your LionMD team will receive an email notification when you submit.</p>
+      </div>
+    </div>
+
+    <!-- Upcoming Blocks -->
+    <div class="card p-0 overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100">
+        <h2 class="text-base font-bold text-gray-800"><i class="fas fa-list-ul mr-2 text-indigo-500"></i>Your Upcoming Block-outs</h2>
+      </div>
+      ${futureBlocks.length === 0 ? `
+        <div class="text-center py-10 text-gray-300">
+          <i class="fas fa-calendar-check text-4xl mb-3 block"></i>
+          <p class="text-sm">No upcoming block-outs. You're all set!</p>
+        </div>` : `
+      <div class="divide-y divide-gray-50">
+        ${futureBlocks.map(b => `
+        <div class="flex items-center gap-4 px-5 py-3 group">
+          <div class="w-36 flex-shrink-0">
+            <div class="text-sm font-semibold text-gray-800">${avFmtDate(b.block_date)}</div>
+          </div>
+          <div class="flex-1">
+            ${avStatusChip(b.max_consults === 0 ? 0 : b.max_consults, true)}
+            ${b.reason ? `<span class="ml-2 text-xs text-gray-400 italic">${escHtml(b.reason)}</span>` : ''}
+          </div>
+          <div class="text-xs text-gray-400">${b.created_by === 'admin' ? '<span class="text-purple-500">Admin set</span>' : 'You submitted'}</div>
+          ${b.block_date >= today && b.created_by !== 'admin' ? `
+          <button onclick="avDeleteBlock(${b.id})"
+            class="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500 transition text-xs">
+            <i class="fas fa-trash"></i>
+          </button>` : '<div class="w-7"></div>'}
+        </div>`).join('')}
+      </div>`}
+    </div>
+
+  </div>`
+}
+
+function avRefreshDayRow(dow) {
+  const inp = $('avSched_' + dow)
+  const statusEl = $('avSchedStatus_' + dow)
+  if (!inp || !statusEl) return
+  const val = parseInt(inp.value)
+  const limit = isNaN(val) ? null : val
+  statusEl.innerHTML = avStatusChip(limit, true)
+}
+
+function avToggleBlockLimit() {
+  const type = $('avBlockType')?.value
+  const wrap = $('avBlockLimitWrap')
+  if (wrap) wrap.classList.toggle('hidden', type !== 'limited')
+}
+
+async function avSaveSchedule() {
+  const btn = $('avSaveSchedBtn')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Saving…' }
+  try {
+    const days = [0,1,2,3,4,5,6].map(dow => ({
+      day_of_week:  dow,
+      max_consults: parseInt($('avSched_' + dow)?.value ?? '10') || 0,
+      location:     $('avSchedLoc_' + dow)?.value?.trim() || '',
+    }))
+    await api('/api/availability/schedule', { method: 'PUT', body: JSON.stringify({ days }) })
+    avState.schedule = await api('/api/availability/schedule')
+    showToast('Weekly schedule saved!', 'success')
+  } catch(e) { showToast('Save failed: ' + e.message, 'error') }
+  finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Schedule' } }
+}
+
+async function avSubmitBlock() {
+  const block_date = $('avBlockDate')?.value
+  if (!block_date) { showToast('Please select a date', 'error'); return }
+  const block_type   = $('avBlockType')?.value || 'unavailable'
+  const max_consults = block_type === 'limited' ? (parseInt($('avBlockLimit')?.value) || 0) : 0
+  const reason       = $('avBlockReason')?.value?.trim() || ''
+  try {
+    await api('/api/availability/blocks', { method: 'POST', body: JSON.stringify({ block_date, block_type, max_consults, reason }) })
+    showToast('Block-out submitted! Your team has been notified.', 'success')
+    // Reset form
+    if ($('avBlockDate'))   $('avBlockDate').value = ''
+    if ($('avBlockReason')) $('avBlockReason').value = ''
+    // Reload
+    avState.blocks = await api('/api/availability/blocks')
+    avDrawProviderPage()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function avDeleteBlock(id) {
+  if (!confirm('Remove this block-out?')) return
+  try {
+    await api('/api/availability/blocks/' + id, { method: 'DELETE' })
+    showToast('Block-out removed.', 'success')
+    avState.blocks = await api('/api/availability/blocks')
+    avDrawProviderPage()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── ADMIN AVAILABILITY DASHBOARD ───────────────────────────────────────────
+
+const avAdminState = {
+  data: null,        // full dashboard response
+  notifications: [], // recent provider submissions
+  view: 'today',     // 'today' | 'week' | 'calendar'
+}
+
+async function renderAvailabilityDashboard() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const [data, notifs] = await Promise.all([
+      api('/api/availability/dashboard'),
+      api('/api/availability/notifications'),
+    ])
+    avAdminState.data          = data
+    avAdminState.notifications = notifs || []
+    avDrawAdminDashboard()
+  } catch(e) {
+    mc.innerHTML = `<div class="text-red-500 p-6">Error: ${e.message}</div>`
+  }
+}
+
+// Manager version — same dashboard but no edit controls
+async function renderMgrAvailability() {
+  await renderAvailabilityDashboard()
+}
+
+function avDrawAdminDashboard() {
+  const mc = $('mainContent')
+  const { providers } = avAdminState.data || { providers: [] }
+  const today = avTodayStr()
+  const isAdmin = state.role === 'admin'
+
+  // ── Today strip ──
+  const todayProviders = providers.map(p => {
+    const eff = avEffectiveLimit(p.schedule, p.blocks, today)
+    return { ...p, eff }
+  })
+
+  // ── Next 7 days for calendar ──
+  const days7 = []
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i)
+    days7.push(d.toISOString().slice(0, 10))
+  }
+
+  // Notification count (unread = within last 24h)
+  const recentNotifs = avAdminState.notifications.filter(n => {
+    const age = Date.now() - new Date(n.created_at).getTime()
+    return age < 86400000 // 24h
+  })
+
+  mc.innerHTML = `
+  <div class="max-w-5xl space-y-6">
+
+    <!-- Header + view toggle -->
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <h1 class="text-xl font-bold text-gray-800"><i class="fas fa-calendar-check mr-2 text-teal-600"></i>Provider Availability</h1>
+        <p class="text-xs text-gray-400 mt-0.5">Live capacity dashboard · ${providers.length} active providers</p>
+      </div>
+      <div class="flex items-center gap-2">
+        ${recentNotifs.length > 0 ? `
+        <button onclick="avScrollToNotifs()" class="relative flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold hover:bg-amber-100 transition">
+          <i class="fas fa-bell"></i> ${recentNotifs.length} new alert${recentNotifs.length > 1 ? 's' : ''}
+        </button>` : ''}
+        <div class="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-semibold">
+          <button onclick="avSetView('today')"  id="avViewToday"  class="px-3 py-2 transition ${avAdminState.view==='today'  ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Today</button>
+          <button onclick="avSetView('week')"   id="avViewWeek"   class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='week'   ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">7-Day</button>
+          <button onclick="avSetView('schedule')" id="avViewSched" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='schedule' ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Schedule</button>
+        </div>
+        ${isAdmin ? `
+        <button onclick="avAdminAddBlock()" class="btn-primary px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5">
+          <i class="fas fa-plus"></i> Add Block
+        </button>` : ''}
+      </div>
+    </div>
+
+    <!-- Summary stat chips -->
+    <div class="grid grid-cols-3 gap-3">
+      ${(() => {
+        const available  = todayProviders.filter(p => p.eff.limit !== 0).length
+        const blocked    = todayProviders.filter(p => p.eff.limit === 0).length
+        const limited    = todayProviders.filter(p => p.eff.limit !== null && p.eff.limit > 0).length
+        const totalCap   = todayProviders.reduce((s, p) => s + (p.eff.limit ?? 10), 0)
+        return `
+        <div class="card p-4 text-center">
+          <div class="text-3xl font-bold text-green-600">${available}</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Available Today</div>
+        </div>
+        <div class="card p-4 text-center">
+          <div class="text-3xl font-bold text-red-500">${blocked}</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Blocked Today</div>
+        </div>
+        <div class="card p-4 text-center">
+          <div class="text-3xl font-bold text-teal-600">${totalCap}</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Total Capacity</div>
+        </div>`
+      })()}
+    </div>
+
+    <!-- Main view panel -->
+    <div id="avMainPanel">
+      ${avRenderView(todayProviders, days7, isAdmin)}
+    </div>
+
+    <!-- Notification log -->
+    <div class="card p-0 overflow-hidden" id="avNotifSection">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h2 class="text-sm font-bold text-gray-700"><i class="fas fa-bell mr-1.5 text-amber-500"></i>Provider Submissions</h2>
+        <span class="text-xs text-gray-400">${avAdminState.notifications.length} total</span>
+      </div>
+      ${avAdminState.notifications.length === 0 ? `
+        <div class="text-center py-8 text-gray-300"><i class="fas fa-inbox text-3xl mb-2 block"></i><p class="text-sm">No provider submissions yet.</p></div>` : `
+      <div class="divide-y divide-gray-50 max-h-72 overflow-y-auto">
+        ${avAdminState.notifications.slice(0, 20).map(n => {
+          const isNew = (Date.now() - new Date(n.created_at).getTime()) < 86400000
+          return `
+          <div class="flex items-center gap-3 px-5 py-3 ${isNew ? 'bg-amber-50' : ''}">
+            ${isNew ? '<span class="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"></span>' : '<span class="w-2 h-2 flex-shrink-0"></span>'}
+            <div class="flex-1 min-w-0">
+              <span class="text-sm font-semibold text-gray-800">${escHtml(n.contractor_name)}</span>
+              <span class="text-xs text-gray-400 ml-2">${avFmtDate(n.block_date)}</span>
+            </div>
+            <div>${avStatusChip(n.max_consults === 0 ? 0 : n.max_consults, true)}</div>
+            ${n.reason ? `<div class="text-xs text-gray-400 italic max-w-xs truncate">${escHtml(n.reason)}</div>` : ''}
+            <div class="text-xs text-gray-300 flex-shrink-0">${new Date(n.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+            ${isAdmin ? `
+            <button onclick="avAdminDeleteBlock(${n.id})" class="p-1.5 rounded hover:bg-red-50 text-gray-300 hover:text-red-400 transition text-xs flex-shrink-0">
+              <i class="fas fa-times"></i>
+            </button>` : ''}
+          </div>`
+        }).join('')}
+      </div>`}
+    </div>
+
+  </div>
+
+  <!-- Admin Add Block Modal -->
+  <div id="avAdminBlockModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+      <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-calendar-plus mr-2 text-teal-600"></i>Add Availability Block</h3>
+      <div class="space-y-3 mb-5">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Provider *</label>
+          <select id="avAdminContractor" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+            ${providers.map(p => `<option value="${p.contractor.id}">${escHtml(p.contractor.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Date *</label>
+          <input type="date" id="avAdminDate" min="${today}" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Type</label>
+          <select id="avAdminType" onchange="avAdminToggleLimit()" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+            <option value="unavailable">🔴 Fully unavailable</option>
+            <option value="limited">🟡 Limited availability</option>
+          </select>
+        </div>
+        <div id="avAdminLimitWrap" class="hidden">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Max consults</label>
+          <input type="number" min="1" max="99" value="3" id="avAdminLimit" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Reason / Note</label>
+          <input type="text" id="avAdminReason" placeholder="Optional note" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="avAdminSubmitBlock()" class="btn-primary flex-1 py-2 rounded-lg text-sm font-semibold">Save Block</button>
+        <button onclick="$('avAdminBlockModal').classList.add('hidden')" class="flex-1 py-2 rounded-lg border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function avRenderView(todayProviders, days7, isAdmin) {
+  if (avAdminState.view === 'today')    return avRenderTodayView(todayProviders, isAdmin)
+  if (avAdminState.view === 'week')     return avRenderWeekView(todayProviders, days7, isAdmin)
+  if (avAdminState.view === 'schedule') return avRenderScheduleView(isAdmin)
+  return ''
+}
+
+function avRenderTodayView(todayProviders, isAdmin) {
+  const today = avTodayStr()
+  const todayLabel = new Date(today + 'T12:00:00').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric'})
+  return `
+  <div class="card p-0 overflow-hidden">
+    <div class="px-5 py-3 border-b border-gray-100 bg-gray-50">
+      <span class="text-xs font-bold text-gray-500 uppercase tracking-wide"><i class="fas fa-calendar-day mr-1.5"></i>${todayLabel}</span>
+    </div>
+    <div class="divide-y divide-gray-50">
+      ${todayProviders.length === 0 ? '<div class="text-center py-10 text-gray-300 text-sm">No active providers found.</div>' :
+        todayProviders.map(p => {
+          const { limit, source, block } = p.eff
+          const blockOnDay = (p.blocks || []).find(b => b.block_date === today)
+          return `
+          <div class="flex items-center gap-4 px-5 py-3.5 hover:bg-gray-50 transition group">
+            <div class="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0" style="background:var(--lion-gold)">
+              ${(p.contractor.name||'?')[0].toUpperCase()}
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold text-gray-800">${escHtml(p.contractor.name)}</div>
+              ${p.contractor.specialty ? `<div class="text-xs text-gray-400">${escHtml(p.contractor.specialty)}</div>` : ''}
+            </div>
+            <div class="flex items-center gap-2 flex-wrap justify-end">
+              ${avStatusChip(limit, false)}
+              ${blockOnDay?.reason ? `<span class="text-xs text-gray-400 italic max-w-xs truncate">${escHtml(blockOnDay.reason)}</span>` : ''}
+              ${source === 'block' ? '<span class="text-xs text-red-400 font-medium">Block override</span>' : ''}
+            </div>
+            ${isAdmin ? `
+            <button onclick="avAdminAddBlockFor(${p.contractor.id})"
+              class="opacity-0 group-hover:opacity-100 ml-2 text-xs text-teal-600 hover:text-teal-800 px-2 py-1 rounded-lg hover:bg-teal-50 transition flex-shrink-0">
+              <i class="fas fa-plus mr-1"></i>Edit
+            </button>` : ''}
+          </div>`
+        }).join('')}
+    </div>
+  </div>`
+}
+
+function avRenderWeekView(todayProviders, days7, isAdmin) {
+  const { providers } = avAdminState.data || { providers: [] }
+  return `
+  <div class="card p-0 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full min-w-max">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200">
+            <th class="py-3 pl-5 pr-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide w-36">Provider</th>
+            ${days7.map(d => {
+              const isToday = d === avTodayStr()
+              const label = new Date(d + 'T12:00:00').toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'})
+              return `<th class="py-3 px-2 text-center text-xs font-bold ${isToday ? 'text-teal-700 bg-teal-50' : 'text-gray-500'} uppercase tracking-wide">${label}${isToday ? '<br><span class="text-teal-500 normal-case font-normal">today</span>' : ''}</th>`
+            }).join('')}
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          ${providers.map(p => `
+          <tr class="hover:bg-gray-50 transition">
+            <td class="py-3 pl-5 pr-3">
+              <div class="text-sm font-semibold text-gray-800 truncate max-w-32">${escHtml(p.contractor.name)}</div>
+              ${p.contractor.specialty ? `<div class="text-xs text-gray-400 truncate">${escHtml(p.contractor.specialty)}</div>` : ''}
+            </td>
+            ${days7.map(d => {
+              const eff = avEffectiveLimit(p.schedule, p.blocks, d)
+              const isToday = d === avTodayStr()
+              const cellBg = isToday ? 'bg-teal-50/50' : ''
+              if (eff.limit === 0)    return `<td class="py-3 px-2 text-center ${cellBg}"><span class="inline-block w-8 h-8 rounded-full bg-red-100 text-red-600 text-xs font-bold flex items-center justify-center mx-auto leading-8">✕</span></td>`
+              if (eff.limit === null) return `<td class="py-3 px-2 text-center ${cellBg}"><span class="inline-block w-8 h-8 rounded-full bg-green-100 text-green-600 text-xs font-bold flex items-center justify-center mx-auto leading-8">✓</span></td>`
+              return `<td class="py-3 px-2 text-center ${cellBg}"><span class="inline-block min-w-8 h-8 px-1 rounded-full bg-amber-100 text-amber-700 text-xs font-bold flex items-center justify-center mx-auto leading-8">${eff.limit}</span></td>`
+            }).join('')}
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="px-5 py-3 border-t border-gray-100 bg-gray-50 flex items-center gap-4 text-xs text-gray-400">
+      <span><span class="inline-block w-4 h-4 rounded-full bg-green-100 mr-1 align-middle"></span>Available (no limit set)</span>
+      <span><span class="inline-block w-4 h-4 rounded-full bg-amber-100 mr-1 align-middle"></span>Limited (number = max)</span>
+      <span><span class="inline-block w-4 h-4 rounded-full bg-red-100 mr-1 align-middle"></span>Unavailable</span>
+    </div>
+  </div>`
+}
+
+function avRenderScheduleView(isAdmin) {
+  const { providers } = avAdminState.data || { providers: [] }
+  return `
+  <div class="space-y-3">
+    ${providers.map(p => {
+      const schedMap = {}
+      for (const s of p.schedule) schedMap[s.day_of_week] = s
+      return `
+      <div class="card p-0 overflow-hidden">
+        <div class="flex items-center gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50">
+          <div class="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm flex-shrink-0" style="background:var(--lion-gold)">
+            ${(p.contractor.name||'?')[0].toUpperCase()}
+          </div>
+          <div class="flex-1">
+            <span class="text-sm font-bold text-gray-800">${escHtml(p.contractor.name)}</span>
+            ${p.contractor.specialty ? `<span class="ml-2 text-xs text-gray-400">${escHtml(p.contractor.specialty)}</span>` : ''}
+          </div>
+          ${isAdmin ? `
+          <button onclick="avAdminAddBlockFor(${p.contractor.id})"
+            class="text-xs text-teal-600 hover:text-teal-800 px-2 py-1 rounded-lg hover:bg-teal-50 transition">
+            <i class="fas fa-plus mr-1"></i>Add Block
+          </button>` : ''}
+        </div>
+        <div class="flex divide-x divide-gray-100">
+          ${[1,2,3,4,5,6,0].map(dow => {
+            const row = schedMap[dow]
+            const max = row ? row.max_consults : null
+            const bg = max === 0 ? 'bg-red-50' : max === null ? 'bg-green-50' : 'bg-amber-50'
+            const txt = max === 0 ? 'text-red-500' : max === null ? 'text-green-600' : 'text-amber-700'
+            return `
+            <div class="flex-1 text-center py-3 px-1 ${bg}">
+              <div class="text-xs font-bold ${txt}">${AV_DAYS_SHORT[dow]}</div>
+              <div class="text-lg font-bold ${txt} mt-0.5">${max === null ? '∞' : max === 0 ? '✕' : max}</div>
+              ${row?.location ? `<div class="text-xs text-gray-400 truncate px-1">${escHtml(row.location)}</div>` : ''}
+            </div>`
+          }).join('')}
+        </div>
+      </div>`
+    }).join('')}
+  </div>`
+}
+
+function avSetView(view) {
+  avAdminState.view = view
+  const panel = $('avMainPanel')
+  if (!panel) return
+  const { providers } = avAdminState.data || { providers: [] }
+  const today = avTodayStr()
+  const days7 = []
+  for (let i = 0; i < 7; i++) { const d = new Date(); d.setDate(d.getDate() + i); days7.push(d.toISOString().slice(0, 10)) }
+  const todayProviders = providers.map(p => ({ ...p, eff: avEffectiveLimit(p.schedule, p.blocks, today) }))
+  const isAdmin = state.role === 'admin'
+  panel.innerHTML = avRenderView(todayProviders, days7, isAdmin)
+  // Update button styles
+  ;['today','week','schedule'].forEach(v => {
+    const btn = $('avView' + v.charAt(0).toUpperCase() + v.slice(1))
+    if (btn) btn.className = btn.className.replace(/bg-teal-600 text-white|bg-white text-gray-500 hover:bg-gray-50/g,
+      v === view ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50')
+  })
+}
+
+function avScrollToNotifs() {
+  const el = $('avNotifSection')
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function avAdminAddBlock() {
+  const modal = $('avAdminBlockModal')
+  if (modal) modal.classList.remove('hidden')
+}
+
+function avAdminAddBlockFor(contractorId) {
+  const modal = $('avAdminBlockModal')
+  if (!modal) return
+  const sel = $('avAdminContractor')
+  if (sel) sel.value = contractorId
+  modal.classList.remove('hidden')
+}
+
+function avAdminToggleLimit() {
+  const type = $('avAdminType')?.value
+  const wrap = $('avAdminLimitWrap')
+  if (wrap) wrap.classList.toggle('hidden', type !== 'limited')
+}
+
+async function avAdminSubmitBlock() {
+  const contractor_id = $('avAdminContractor')?.value
+  const block_date    = $('avAdminDate')?.value
+  if (!contractor_id || !block_date) { showToast('Provider and date are required', 'error'); return }
+  const block_type   = $('avAdminType')?.value || 'unavailable'
+  const max_consults = block_type === 'limited' ? (parseInt($('avAdminLimit')?.value) || 0) : 0
+  const reason       = $('avAdminReason')?.value?.trim() || ''
+  try {
+    await api('/api/availability/blocks', { method: 'POST', body: JSON.stringify({ contractor_id, block_date, block_type, max_consults, reason }) })
+    showToast('Block saved!', 'success')
+    $('avAdminBlockModal').classList.add('hidden')
+    // Refresh dashboard
+    const [data, notifs] = await Promise.all([
+      api('/api/availability/dashboard'),
+      api('/api/availability/notifications'),
+    ])
+    avAdminState.data = data
+    avAdminState.notifications = notifs || []
+    avDrawAdminDashboard()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function avAdminDeleteBlock(id) {
+  if (!confirm('Remove this block?')) return
+  try {
+    await api('/api/availability/blocks/' + id, { method: 'DELETE' })
+    showToast('Block removed.', 'success')
+    const [data, notifs] = await Promise.all([
+      api('/api/availability/dashboard'),
+      api('/api/availability/notifications'),
+    ])
+    avAdminState.data = data
+    avAdminState.notifications = notifs || []
+    avDrawAdminDashboard()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── END PROVIDER AVAILABILITY MODULE ───────────────────────────────────────
+
+// In-app popstate: browser back/forward handled naturally by navigate()
 </script>
 </body>
 </html>

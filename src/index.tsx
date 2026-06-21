@@ -4273,6 +4273,436 @@ app.post('/api/onboarding/candidates/:id/convert', async (c) => {
 })
 
 // ════════════════════════════════════════════════════════════════════
+// PROVIDER AVAILABILITY MODULE
+// Tables: provider_availability (weekly), provider_blocks (date overrides)
+// ════════════════════════════════════════════════════════════════════
+
+async function ensureAvailabilitySchema(db: D1Database) {
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS provider_availability (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      contractor_id INTEGER NOT NULL,
+      day_of_week   INTEGER NOT NULL CHECK(day_of_week BETWEEN 0 AND 6),
+      max_consults  INTEGER NOT NULL DEFAULT 10,
+      location      TEXT    DEFAULT '',
+      notes         TEXT    DEFAULT '',
+      is_active     INTEGER DEFAULT 1,
+      updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (contractor_id) REFERENCES contractors(id),
+      UNIQUE(contractor_id, day_of_week)
+    )
+  `).run().catch(() => {})
+
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS provider_blocks (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      contractor_id INTEGER NOT NULL,
+      block_date    TEXT    NOT NULL,
+      block_type    TEXT    NOT NULL DEFAULT 'unavailable',
+      max_consults  INTEGER DEFAULT 0,
+      reason        TEXT    DEFAULT '',
+      notified_at   DATETIME DEFAULT NULL,
+      created_by    TEXT    DEFAULT 'provider',
+      created_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY (contractor_id) REFERENCES contractors(id)
+    )
+  `).run().catch(() => {})
+
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pav_contractor  ON provider_availability(contractor_id)`).run().catch(() => {})
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pblk_contractor ON provider_blocks(contractor_id)`).run().catch(() => {})
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pblk_date       ON provider_blocks(block_date)`).run().catch(() => {})
+}
+
+// ── Helper: send availability notification email to all admins ────────────
+async function sendAvailabilityNotification(
+  apiKey: string,
+  providerName: string,
+  blockDate: string,
+  blockType: string,
+  maxConsults: number,
+  reason: string,
+  admins: { name: string; email: string }[]
+): Promise<void> {
+  if (!apiKey || admins.length === 0) return
+
+  const dateLabel = (() => {
+    const d = new Date(blockDate + 'T12:00:00')
+    return d.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })
+  })()
+
+  const statusLabel = blockType === 'unavailable' || maxConsults === 0
+    ? '🔴 <strong>Fully unavailable</strong>'
+    : `🟡 <strong>Limited to ${maxConsults} consult${maxConsults === 1 ? '' : 's'}</strong>`
+
+  const html = `<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><title>Availability Update</title></head>
+<body style="margin:0;padding:0;background:#f5f5f5;font-family:'Helvetica Neue',Helvetica,Arial,sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f5f5f5;padding:40px 0;">
+    <tr><td align="center">
+      <table width="560" cellpadding="0" cellspacing="0" style="background:#ffffff;border-radius:12px;overflow:hidden;box-shadow:0 2px 8px rgba(0,0,0,0.08);">
+        <tr>
+          <td style="background:#1a1a2e;padding:24px 40px;text-align:center;">
+            <div style="font-size:18px;font-weight:700;color:#d4a017;letter-spacing:0.5px;">Lion MD Portal</div>
+            <div style="font-size:11px;color:#8888aa;margin-top:4px;letter-spacing:1px;">AVAILABILITY ALERT</div>
+          </td>
+        </tr>
+        <tr>
+          <td style="padding:36px 40px 28px;">
+            <p style="margin:0 0 20px;font-size:22px;font-weight:700;color:#111827;">📅 Provider Availability Update</p>
+            <table width="100%" cellpadding="0" cellspacing="0" style="background:#f9fafb;border-radius:8px;border:1px solid #e5e7eb;margin-bottom:24px;">
+              <tr><td style="padding:20px 24px;">
+                <p style="margin:0 0 8px;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Provider</p>
+                <p style="margin:0 0 16px;font-size:18px;font-weight:700;color:#111827;">${providerName}</p>
+                <p style="margin:0 0 8px;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Date</p>
+                <p style="margin:0 0 16px;font-size:16px;color:#374151;">${dateLabel}</p>
+                <p style="margin:0 0 8px;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Status</p>
+                <p style="margin:0 0 ${reason ? 16 : 0}px;font-size:16px;color:#374151;">${statusLabel}</p>
+                ${reason ? `<p style="margin:0 0 8px;font-size:14px;color:#6b7280;text-transform:uppercase;letter-spacing:0.5px;font-weight:600;">Reason</p>
+                <p style="margin:0;font-size:15px;color:#374151;font-style:italic;">"${reason}"</p>` : ''}
+              </td></tr>
+            </table>
+            <p style="margin:0;font-size:13px;color:#9ca3af;">Log in to the Lion MD Portal to view the full availability dashboard and adjust scheduling as needed.</p>
+          </td>
+        </tr>
+        <tr>
+          <td style="background:#f9fafb;padding:16px 40px;border-top:1px solid #e5e7eb;text-align:center;">
+            <p style="margin:0;font-size:12px;color:#9ca3af;">© 2026 Lion MD Portal™ · Automated availability notification</p>
+          </td>
+        </tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`
+
+  // Send to all admins (fire and forget each — don't let one failure block others)
+  const sends = admins.map(admin =>
+    fetch('https://api.resend.com/emails', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: 'Lion MD Portal <noreply@lion.md>',
+        to: [`${admin.name} <${admin.email}>`],
+        subject: `📅 ${providerName} — Availability Update for ${dateLabel}`,
+        html,
+      }),
+    }).catch(() => null)
+  )
+  await Promise.all(sends)
+}
+
+// ── GET /api/availability/schedule ───────────────────────────────────────
+// Provider: own schedule. Admin/manager: all or ?contractor_id=X
+app.get('/api/availability/schedule', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const isAdmin = payload.role === 'admin' || payload.role === 'manager'
+  const requestedId = c.req.query('contractor_id')
+
+  let contractorId: number | null = null
+  if (isAdmin && requestedId) {
+    contractorId = parseInt(requestedId)
+  } else if (payload.role === 'provider') {
+    const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(payload.id).first() as any
+    if (!pu?.contractor_id) return c.json({ error: 'Profile not linked' }, 400)
+    contractorId = pu.contractor_id
+  } else if (!isAdmin) {
+    return c.json({ error: 'Access denied' }, 403)
+  }
+
+  if (contractorId) {
+    const rows = await c.env.DB.prepare(
+      `SELECT * FROM provider_availability WHERE contractor_id=? AND is_active=1 ORDER BY day_of_week`
+    ).bind(contractorId).all().then(r => r.results)
+    return c.json(rows)
+  }
+
+  // Admin with no specific contractor — return all
+  const rows = await c.env.DB.prepare(`
+    SELECT pa.*, ct.name AS contractor_name
+    FROM provider_availability pa
+    JOIN contractors ct ON ct.id = pa.contractor_id
+    WHERE pa.is_active=1
+    ORDER BY ct.name, pa.day_of_week
+  `).all().then(r => r.results)
+  return c.json(rows)
+})
+
+// ── PUT /api/availability/schedule ───────────────────────────────────────
+// Upsert weekly schedule for a contractor. Body: array of { day_of_week, max_consults, location, notes }
+app.put('/api/availability/schedule', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const isAdmin = payload.role === 'admin'
+  const body = await c.req.json() as any
+  const days: { day_of_week: number; max_consults: number; location?: string; notes?: string }[] = body.days || []
+  const requestedContractorId = body.contractor_id
+
+  let contractorId: number
+  if (isAdmin && requestedContractorId) {
+    contractorId = parseInt(requestedContractorId)
+  } else if (payload.role === 'provider') {
+    const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(payload.id).first() as any
+    if (!pu?.contractor_id) return c.json({ error: 'Profile not linked' }, 400)
+    contractorId = pu.contractor_id
+  } else {
+    return c.json({ error: 'Access denied' }, 403)
+  }
+
+  for (const d of days) {
+    await c.env.DB.prepare(`
+      INSERT INTO provider_availability (contractor_id, day_of_week, max_consults, location, notes, updated_at)
+      VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(contractor_id, day_of_week) DO UPDATE SET
+        max_consults=excluded.max_consults,
+        location=excluded.location,
+        notes=excluded.notes,
+        updated_at=CURRENT_TIMESTAMP
+    `).bind(contractorId, d.day_of_week, d.max_consults ?? 10, d.location || '', d.notes || '').run()
+  }
+
+  return c.json({ ok: true })
+})
+
+// ── GET /api/availability/blocks ──────────────────────────────────────────
+// Provider: own blocks. Admin/manager: all or ?contractor_id=X, ?from=YYYY-MM-DD&to=YYYY-MM-DD
+app.get('/api/availability/blocks', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const isAdmin = payload.role === 'admin' || payload.role === 'manager' || payload.role === 'carevalidate'
+  const requestedId = c.req.query('contractor_id')
+  const from = c.req.query('from') || new Date().toISOString().slice(0, 10)
+  const to   = c.req.query('to')   || (() => { const d = new Date(); d.setDate(d.getDate() + 60); return d.toISOString().slice(0, 10) })()
+
+  if (isAdmin) {
+    if (requestedId) {
+      const rows = await c.env.DB.prepare(
+        `SELECT * FROM provider_blocks WHERE contractor_id=? AND block_date >= ? AND block_date <= ? ORDER BY block_date`
+      ).bind(parseInt(requestedId), from, to).all().then(r => r.results)
+      return c.json(rows)
+    }
+    // All blocks in range with contractor name
+    const rows = await c.env.DB.prepare(`
+      SELECT pb.*, ct.name AS contractor_name
+      FROM provider_blocks pb
+      JOIN contractors ct ON ct.id = pb.contractor_id
+      WHERE pb.block_date >= ? AND pb.block_date <= ?
+      ORDER BY pb.block_date, ct.name
+    `).bind(from, to).all().then(r => r.results)
+    return c.json(rows)
+  }
+
+  if (payload.role === 'provider') {
+    const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(payload.id).first() as any
+    if (!pu?.contractor_id) return c.json({ error: 'Profile not linked' }, 400)
+    const rows = await c.env.DB.prepare(
+      `SELECT * FROM provider_blocks WHERE contractor_id=? AND block_date >= ? ORDER BY block_date`
+    ).bind(pu.contractor_id, from).all().then(r => r.results)
+    return c.json(rows)
+  }
+
+  return c.json({ error: 'Access denied' }, 403)
+})
+
+// ── POST /api/availability/blocks ─────────────────────────────────────────
+// Provider submits a block-out. Admin can also create on behalf of anyone.
+app.post('/api/availability/blocks', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const body = await c.req.json() as any
+  const { block_date, block_type, max_consults, reason, contractor_id: bodyContractorId } = body
+
+  if (!block_date) return c.json({ error: 'block_date required' }, 400)
+
+  const isAdmin = payload.role === 'admin'
+  const createdBy = isAdmin ? 'admin' : 'provider'
+
+  let contractorId: number
+  if (isAdmin && bodyContractorId) {
+    contractorId = parseInt(bodyContractorId)
+  } else if (payload.role === 'provider') {
+    const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(payload.id).first() as any
+    if (!pu?.contractor_id) return c.json({ error: 'Profile not linked' }, 400)
+    contractorId = pu.contractor_id
+  } else {
+    return c.json({ error: 'Access denied' }, 403)
+  }
+
+  const resolvedType   = block_type    || 'unavailable'
+  const resolvedMax    = (resolvedType === 'limited' && max_consults != null) ? parseInt(max_consults) : 0
+
+  const r = await c.env.DB.prepare(`
+    INSERT INTO provider_blocks (contractor_id, block_date, block_type, max_consults, reason, created_by)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `).bind(contractorId, block_date, resolvedType, resolvedMax, reason || '', createdBy).run()
+
+  const blockId = r.meta.last_row_id
+
+  // Notify all admins by email (only when provider submits, not admin)
+  if (createdBy === 'provider' && c.env.RESEND_API_KEY) {
+    const ct = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(contractorId).first() as any
+    const admins = await c.env.DB.prepare(
+      `SELECT name, email FROM portal_users WHERE role='admin' AND is_active=1 AND email IS NOT NULL AND email != ''`
+    ).all().then(r2 => r2.results as { name: string; email: string }[])
+
+    if (ct && admins.length > 0) {
+      // fire-and-forget; mark notified_at regardless
+      sendAvailabilityNotification(
+        c.env.RESEND_API_KEY,
+        ct.name as string,
+        block_date,
+        resolvedType,
+        resolvedMax,
+        reason || '',
+        admins
+      ).then(() => {
+        c.env.DB.prepare(`UPDATE provider_blocks SET notified_at=CURRENT_TIMESTAMP WHERE id=?`).bind(blockId).run().catch(() => {})
+      }).catch(() => {})
+    }
+  }
+
+  return c.json({ ok: true, id: blockId })
+})
+
+// ── DELETE /api/availability/blocks/:id ──────────────────────────────────
+// Provider can delete own future blocks. Admin can delete any.
+app.delete('/api/availability/blocks/:id', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+
+  const id = c.req.param('id')
+
+  if (payload.role === 'admin') {
+    await c.env.DB.prepare(`DELETE FROM provider_blocks WHERE id=?`).bind(id).run()
+    return c.json({ ok: true })
+  }
+
+  if (payload.role === 'provider') {
+    const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(payload.id).first() as any
+    if (!pu?.contractor_id) return c.json({ error: 'Profile not linked' }, 400)
+    // Only delete own future blocks
+    await c.env.DB.prepare(
+      `DELETE FROM provider_blocks WHERE id=? AND contractor_id=? AND block_date >= date('now')`
+    ).bind(id, pu.contractor_id).run()
+    return c.json({ ok: true })
+  }
+
+  return c.json({ error: 'Access denied' }, 403)
+})
+
+// ── GET /api/availability/dashboard ──────────────────────────────────────
+// Admin/manager dashboard: for each active contractor, their schedule + upcoming blocks
+// Returns { providers: [ { contractor, schedule, blocks[] } ] }
+app.get('/api/availability/dashboard', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+
+  const allowed = ['admin', 'manager', 'carevalidate']
+  if (!allowed.includes(payload.role)) return c.json({ error: 'Access denied' }, 403)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const from = c.req.query('from') || new Date().toISOString().slice(0, 10)
+  const to   = c.req.query('to')   || (() => { const d = new Date(); d.setDate(d.getDate() + 30); return d.toISOString().slice(0, 10) })()
+
+  // Get all active providers
+  const contractors = await c.env.DB.prepare(
+    `SELECT id, name, first_name, last_name, specialty, role_group FROM contractors WHERE is_active=1 ORDER BY name`
+  ).all().then(r => r.results as any[])
+
+  // Get all schedules and blocks in one pass
+  const allSchedules = await c.env.DB.prepare(
+    `SELECT * FROM provider_availability WHERE is_active=1`
+  ).all().then(r => r.results as any[])
+
+  const allBlocks = await c.env.DB.prepare(
+    `SELECT * FROM provider_blocks WHERE block_date >= ? AND block_date <= ? ORDER BY block_date`
+  ).bind(from, to).all().then(r => r.results as any[])
+
+  // Group by contractor_id
+  const scheduleMap: Record<number, any[]> = {}
+  for (const s of allSchedules) {
+    if (!scheduleMap[s.contractor_id]) scheduleMap[s.contractor_id] = []
+    scheduleMap[s.contractor_id].push(s)
+  }
+  const blockMap: Record<number, any[]> = {}
+  for (const b of allBlocks) {
+    if (!blockMap[b.contractor_id]) blockMap[b.contractor_id] = []
+    blockMap[b.contractor_id].push(b)
+  }
+
+  const providers = contractors.map(ct => ({
+    contractor: ct,
+    schedule: scheduleMap[ct.id] || [],
+    blocks: blockMap[ct.id] || [],
+  }))
+
+  return c.json({ providers, from, to })
+})
+
+// ── GET /api/availability/notifications ──────────────────────────────────
+// Admin: recent blocks submitted by providers (notification log)
+app.get('/api/availability/notifications', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  let payload: any
+  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
+  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  if (payload.role !== 'admin' && payload.role !== 'manager') return c.json({ error: 'Access denied' }, 403)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const rows = await c.env.DB.prepare(`
+    SELECT pb.*, ct.name AS contractor_name
+    FROM provider_blocks pb
+    JOIN contractors ct ON ct.id = pb.contractor_id
+    WHERE pb.created_by = 'provider'
+    ORDER BY pb.created_at DESC
+    LIMIT 50
+  `).all().then(r => r.results)
+
+  return c.json(rows)
+})
+
+// ════════════════════════════════════════════════════════════════════
 // CLIENT PAYMENTS MODULE  (admin-only)
 // Tables: cp_clients, cp_payment_entries
 // ════════════════════════════════════════════════════════════════════
