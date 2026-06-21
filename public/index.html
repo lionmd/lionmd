@@ -4745,11 +4745,50 @@ function renderContractorGroupedTable(contractors, duplicateIds = new Set(), cli
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Name</th>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Group</th>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Company</th>
-        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">EIN / SSN</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Collab</th>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Email</th>
         <th class="text-center px-5 py-3 text-gray-500 font-semibold text-xs">Actions</th>
       </tr>
     </thead>`
+
+  // Build a quick collab map from all licenses: NP→physician name+states; MD→NPs supervised
+  const allLicenses = (state.allLicenses || [])
+  // For each contractor, summarize their collab role
+  const collabSummaryFor = (ct) => {
+    if (ct.role_group === 'NP' || ct.role_group === 'Physician') {
+      const ctLicenses = allLicenses.filter(l => l.contractor_id === ct.id && l.collab_physician && l.collab_physician.trim())
+      if (ct.role_group === 'NP' && ctLicenses.length > 0) {
+        // Group by physician name
+        const byPhys = {}
+        ctLicenses.forEach(l => {
+          const p = l.collab_physician.trim()
+          if (!byPhys[p]) byPhys[p] = []
+          byPhys[p].push(l.state)
+        })
+        return Object.entries(byPhys).map(([phys, states]) =>
+          '<span class="inline-flex items-center gap-1 text-xs text-purple-700">' +
+          '<i class="fas fa-user-md text-[10px] text-purple-400"></i>' +
+          escHtml(phys) + ' <span class="text-gray-400">·</span> <span class="font-mono">' + (states as string[]).join(', ') + '</span></span>'
+        ).join('<br>')
+      }
+      if (ct.role_group === 'Physician') {
+        // Find NPs who list this MD
+        const ctLastName = (ct.last_name || ct.name || '').split(' ').pop()?.toLowerCase() || ''
+        const supervised = ctLastName
+          ? allLicenses.filter(l => l.collab_physician && l.collab_physician.toLowerCase().includes(ctLastName) && l.contractor_id !== ct.id)
+          : []
+        if (supervised.length === 0) return '<span class="text-xs text-gray-300">—</span>'
+        // Count distinct NPs
+        const npIds = new Set(supervised.map(l => l.contractor_id))
+        const stateSet = new Set(supervised.map(l => l.state))
+        return '<span class="inline-flex items-center gap-1 text-xs text-indigo-700">' +
+          '<i class="fas fa-users text-[10px] text-indigo-400"></i>' +
+          npIds.size + ' NP' + (npIds.size !== 1 ? 's' : '') +
+          ' <span class="text-gray-400">·</span> <span class="font-mono text-[10px]">' + [...stateSet].sort().join(', ') + '</span></span>'
+      }
+    }
+    return '<span class="text-xs text-gray-300">—</span>'
+  }
 
   return groups.filter(g => byGroup[g.key].length > 0).map(g => {
     const list = byGroup[g.key]
@@ -4773,7 +4812,7 @@ function renderContractorGroupedTable(contractors, duplicateIds = new Set(), cli
           </td>
           <td class="px-5 py-3">${roleGroupBadge(c.role_group || '')}</td>
           <td class="px-5 py-3 text-gray-600">${escHtml(c.company || '—')}</td>
-          <td class="px-5 py-3 font-mono text-xs text-gray-500">${escHtml(c.ein_ssn || '—')}</td>
+          <td class="px-5 py-3">${collabSummaryFor(c)}</td>
           <td class="px-5 py-3 text-gray-500 text-xs">${escHtml(c.email || '—')}</td>
           <td class="px-5 py-3 text-center" onclick="event.stopPropagation()">
             <div class="flex gap-2 justify-center flex-wrap">
@@ -4885,9 +4924,13 @@ function renderInactiveContractorsSection() {
 
 // ── Load both active + inactive contractors into state ───────────────────────
 async function reloadContractors() {
-  const all = await api('/api/contractors/all')
+  const [all, licData] = await Promise.all([
+    api('/api/contractors/all'),
+    api('/api/licensing/dashboard').catch(() => ({ licenses: [] })),
+  ])
   state.contractors         = all.filter(c => c.is_active)
   state.inactiveContractors = all.filter(c => !c.is_active)
+  state.allLicenses         = licData.licenses || []
 }
 
 function renderContractors() {
@@ -4953,7 +4996,7 @@ function renderContractors() {
         <div class="space-y-4">
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1.5">Group</label>
-            <select id="ctRoleGroup" class="w-full">
+            <select id="ctRoleGroup" class="w-full" onchange="$('ctExternalCpaSection').classList.toggle('hidden', this.value!=='Physician')">
               <option value="">— Unassigned —</option>
               <option value="NP">NP / ARNP / PA</option>
               <option value="Physician">Physician</option>
@@ -5006,6 +5049,16 @@ function renderContractors() {
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1.5">Email</label>
             <input type="email" id="ctEmail" class="w-full" placeholder="doctor@example.com"/>
+          </div>
+          <!-- External CPA notes — visible only for Physicians -->
+          <div id="ctExternalCpaSection" class="hidden">
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+              <i class="fas fa-handshake mr-1 text-indigo-400"></i>External CPA Agreements
+              <span class="ml-1 font-normal text-gray-400">(outside of LionMD)</span>
+            </label>
+            <textarea id="ctExternalCpaNotes" class="w-full text-sm" rows="3"
+              placeholder="e.g. CA: supervising 2 NPs at Acme Clinic&#10;TX: 3 agreements at external practice"></textarea>
+            <p class="text-xs text-gray-400 mt-1">List any CPA agreements with other organizations so we can track capacity limits.</p>
           </div>
         </div>
         <input type="hidden" id="ctId"/>
@@ -5280,6 +5333,10 @@ function openContractorModal(contractor = null) {
   $('ctCompany').value = contractor?.company || ''
   $('ctEin').value = contractor?.ein_ssn || ''
   $('ctEmail').value = contractor?.email || ''
+  $('ctExternalCpaNotes').value = contractor?.external_cpa_notes || ''
+  // Show CPA notes section only for Physicians
+  const isPhys = (contractor?.role_group || '') === 'Physician'
+  $('ctExternalCpaSection').classList.toggle('hidden', !isPhys)
   toggleGustoFields()
   $('contractorModal').classList.remove('hidden')
 }
@@ -5305,7 +5362,8 @@ async function saveContractor() {
     email: $('ctEmail').value.trim(),
     contractor_type: $('ctType').value,
     gusto_type: gustoType,
-    role_group: $('ctRoleGroup').value
+    role_group: $('ctRoleGroup').value,
+    external_cpa_notes: $('ctExternalCpaNotes').value.trim(),
   }
   if (!data.name) { showToast('Name is required', 'warning'); return }
   try {
@@ -7216,6 +7274,88 @@ function obRenderContractorDetail(data) {
             `).join('')
           })()}
         </div>` : ''}
+
+        ${(() => {
+          // CPA capacity warning + external notes — only shown for Physicians
+          if (ct.role_group !== 'Physician') return ''
+
+          // State CPA limits for supervising physicians (NPs per physician)
+          const cpaLimits = {
+            CA: { limit: 4,  unit: 'NPs' },
+            GA: { limit: 4,  unit: 'NPs' },
+            FL: { limit: 4,  unit: 'office locations' },
+            NV: { limit: 3,  unit: 'NPs' },
+            NY: { limit: 4,  unit: 'off-site NPs' },
+            VA: { limit: 6,  unit: 'NPs' },
+            OK: { limit: 6,  unit: 'prescribing NPs' },
+            OH: { limit: 5,  unit: 'prescribing NPs' },
+            SC: { limit: 6,  unit: 'FTEs' },
+            MO: { limit: 6,  unit: 'FTEs' },
+            TX: { limit: 7,  unit: 'FTEs' },
+            AL: { limit: 9,  unit: 'FTEs / 360 hrs' },
+          }
+
+          // Count LionMD-supervised NPs per state from collabProviders
+          const lionmdByState = {}
+          for (const r of collabProviders) {
+            if (!lionmdByState[r.state]) lionmdByState[r.state] = 0
+            lionmdByState[r.state]++
+          }
+
+          const limitedStates = Object.keys(cpaLimits).filter(s => lionmdByState[s] > 0 || (ct.external_cpa_notes || '').toLowerCase().includes(s.toLowerCase()))
+          const warningRows = []
+          for (const s of Object.keys(cpaLimits).filter(s => lionmdByState[s] > 0)) {
+            const lion = lionmdByState[s] || 0
+            const { limit, unit } = cpaLimits[s]
+            const pct = lion / limit
+            const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.75 ? 'bg-amber-400' : 'bg-green-400'
+            warningRows.push(
+              '<div class="flex items-center gap-2">' +
+              '<span class="w-8 text-center text-xs font-bold text-gray-700 bg-white border border-gray-200 rounded py-0.5 flex-shrink-0">' + s + '</span>' +
+              '<div class="flex-1">' +
+              '<div class="flex items-center justify-between text-xs mb-0.5">' +
+              '<span class="text-gray-600">' + unit + '</span>' +
+              '<span class="font-semibold ' + (pct >= 1 ? 'text-red-600' : pct >= 0.75 ? 'text-amber-600' : 'text-green-600') + '">' + lion + ' / ' + limit + '</span>' +
+              '</div>' +
+              '<div class="h-1.5 bg-gray-100 rounded-full overflow-hidden">' +
+              '<div class="h-full rounded-full transition-all ' + barColor + '" style="width:' + Math.min(100, Math.round(pct*100)) + '%"></div>' +
+              '</div>' +
+              '</div>' +
+              '</div>'
+            )
+          }
+
+          const externalNotes = (ct.external_cpa_notes || '').trim()
+          const hasCapacityData = warningRows.length > 0
+          const hasExternalNotes = externalNotes.length > 0
+          if (!hasCapacityData && !hasExternalNotes) return ''
+
+          let html = '<div class="p-4 rounded-xl bg-amber-50 border border-amber-200">'
+          html += '<div class="flex items-center justify-between mb-3">'
+          html += '<p class="text-xs font-bold text-amber-700 uppercase tracking-wider"><i class="fas fa-balance-scale mr-1"></i>CPA Capacity</p>'
+          html += '<button onclick="openContractorModal(' + JSON.stringify(ct).replace(/"/g, '&quot;') + ')" class="text-xs text-amber-600 hover:underline">Edit Notes →</button>'
+          html += '</div>'
+
+          if (hasCapacityData) {
+            html += '<div class="space-y-2 mb-3">' + warningRows.join('') + '</div>'
+            if (warningRows.some(r => r.includes('text-red-600'))) {
+              html += '<p class="text-xs text-red-600 font-semibold"><i class="fas fa-exclamation-triangle mr-1"></i>At or over state limit — review before adding NPs in this state.</p>'
+            } else if (warningRows.some(r => r.includes('text-amber-600'))) {
+              html += '<p class="text-xs text-amber-600"><i class="fas fa-info-circle mr-1"></i>Approaching state limit — monitor capacity.</p>'
+            }
+          }
+
+          if (hasExternalNotes) {
+            html += '<div class="mt-3 pt-3 border-t border-amber-200">'
+            html += '<p class="text-xs font-semibold text-amber-700 mb-1"><i class="fas fa-building mr-1"></i>External CPA Agreements</p>'
+            html += '<p class="text-xs text-gray-700 whitespace-pre-line">' + escHtml(externalNotes) + '</p>'
+            html += '</div>'
+          }
+
+          html += '</div>'
+          return html
+        })()}
+
       </div>
     </div>
 
