@@ -4,6 +4,7 @@ import { cors } from 'hono/cors'
 type Bindings = {
   DB: D1Database
   RESEND_API_KEY: string
+  TOKEN_SECRET: string
 }
 
 // ──────────────────────────────────────────────
@@ -553,6 +554,8 @@ app.delete('/api/contractors/:id/permanent', requireAdmin, async (c) => {
   await c.env.DB.prepare(`DELETE FROM contractor_documents WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`DELETE FROM portal_users WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`DELETE FROM provider_availability WHERE contractor_id=?`).bind(id).run()
+  await c.env.DB.prepare(`DELETE FROM provider_blocks WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`UPDATE upload_sessions SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`UPDATE consult_records SET contractor_id=NULL WHERE contractor_id=?`).bind(id).run()
   await c.env.DB.prepare(`DELETE FROM contractors WHERE id=?`).bind(id).run()
@@ -2555,12 +2558,20 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
 }
 
 // Simple signed session token: base64(payload).base64(hmac-sha256)
-const TOKEN_SECRET = 'lionmd-portal-secret-2026'
+// TOKEN_SECRET: read from Cloudflare secret (TOKEN_SECRET env var).
+// Fallback to hardcoded value only for local dev if env is not set.
+// To set in production: wrangler secret put TOKEN_SECRET
+const TOKEN_SECRET_FALLBACK = 'lionmd-portal-secret-2026'
 
-async function signToken(payload: object): Promise<string> {
+function getTokenSecret(env?: Bindings): string {
+  return (env as any)?.TOKEN_SECRET || TOKEN_SECRET_FALLBACK
+}
+
+async function signToken(payload: object, env?: Bindings): Promise<string> {
   const enc = new TextEncoder()
+  const secret = getTokenSecret(env)
   const key = await crypto.subtle.importKey(
-    'raw', enc.encode(TOKEN_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
+    'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
   )
   const data = btoa(JSON.stringify(payload))
   const sig = await crypto.subtle.sign('HMAC', key, enc.encode(data))
@@ -2568,13 +2579,14 @@ async function signToken(payload: object): Promise<string> {
   return `${data}.${sigHex}`
 }
 
-async function verifyToken(token: string): Promise<any | null> {
+async function verifyToken(token: string, env?: Bindings): Promise<any | null> {
   try {
     const [data, sigHex] = token.split('.')
     if (!data || !sigHex) return null
     const enc = new TextEncoder()
+    const secret = getTokenSecret(env)
     const key = await crypto.subtle.importKey(
-      'raw', enc.encode(TOKEN_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+      'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
     )
     const sigBytes = new Uint8Array(sigHex.match(/.{2}/g)!.map(h => parseInt(h, 16)))
     const valid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(data))
@@ -2595,7 +2607,7 @@ async function requireAuth(c: any, next: any) {
   const auth = c.req.header('Authorization') || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  const payload = await verifyToken(token)
+  const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   c.set('user', payload)
   return next()
@@ -2605,7 +2617,7 @@ async function requireAdmin(c: any, next: any) {
   const auth = c.req.header('Authorization') || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  const payload = await verifyToken(token)
+  const payload = await verifyToken(token, c.env)
   if (!payload || payload.role !== 'admin') return c.json({ error: 'Admin access required' }, 403)
   c.set('user', payload)
   return next()
@@ -2625,7 +2637,7 @@ app.post('/api/auth/bootstrap', async (c) => {
   const r = await c.env.DB.prepare(
     `INSERT INTO portal_users (name, email, password_hash, role, is_active, must_set_password) VALUES (?,?,?,'admin',1,0)`
   ).bind(name, email.toLowerCase().trim(), hash).run()
-  const token = await signToken({ id: r.meta.last_row_id, email: email.toLowerCase().trim(), name, role: 'admin', exp: Date.now() + 86400000 * 30 })
+  const token = await signToken({ id: r.meta.last_row_id, email: email.toLowerCase().trim(), name, role: 'admin', exp: Date.now() + 86400000 * 30 }, c.env)
   return c.json({ ok: true, token, user: { id: r.meta.last_row_id, name, email, role: 'admin' } })
 })
 
@@ -2654,7 +2666,7 @@ app.post('/api/auth/login', async (c) => {
 
   await c.env.DB.prepare('UPDATE portal_users SET last_login=CURRENT_TIMESTAMP WHERE id=?').bind(user.id).run()
 
-  const token = await signToken({ id: user.id, email: user.email, name: user.name, role: user.role, exp: Date.now() + 86400000 * 30 })
+  const token = await signToken({ id: user.id, email: user.email, name: user.name, role: user.role, exp: Date.now() + 86400000 * 30 }, c.env)
   return c.json({ ok: true, token, user: { id: user.id, name: user.name, email: user.email, role: user.role } })
 })
 
@@ -2762,7 +2774,7 @@ app.post('/api/auth/setup-password', async (c) => {
      invite_token_expires=NULL, last_login=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE id=?`
   ).bind(hash, user.id).run()
 
-  const token = await signToken({ id: user.id, email: user.email, name: user.name, role: user.role, exp: Date.now() + 86400000 * 30 })
+  const token = await signToken({ id: user.id, email: user.email, name: user.name, role: user.role, exp: Date.now() + 86400000 * 30 }, c.env)
   return c.json({ ok: true, token, user: { id: user.id, name: user.name, email: user.email, role: user.role } })
 })
 
@@ -3021,7 +3033,7 @@ async function requireCandidate(c: any, next: any) {
   const auth = c.req.header('Authorization') || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  const payload = await verifyToken(token)
+  const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   if (payload.role !== 'admin' && payload.role !== 'candidate') return c.json({ error: 'Access denied' }, 403)
   c.set('user', payload)
@@ -3226,7 +3238,7 @@ async function requireProvider(c: any, next: any) {
   const auth = c.req.header('Authorization') || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  const payload = await verifyToken(token)
+  const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   if (payload.role !== 'admin' && payload.role !== 'provider') return c.json({ error: 'Access denied' }, 403)
   c.set('user', payload)
@@ -3582,7 +3594,7 @@ async function requireLicenseEditor(c: any, next: any) {
   const auth = c.req.header('Authorization') || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  const payload = await verifyToken(token)
+  const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   if (payload.role !== 'admin' && payload.role !== 'license_editor') {
     return c.json({ error: 'License editor access required' }, 403)
@@ -3810,7 +3822,7 @@ async function requireManager(c: any, next: any) {
   const auth = c.req.header('Authorization') || ''
   const token = auth.startsWith('Bearer ') ? auth.slice(7) : ''
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  const payload = await verifyToken(token)
+  const payload = await verifyToken(token, c.env)
   if (!payload || (payload.role !== 'admin' && payload.role !== 'manager')) {
     return c.json({ error: 'Manager access required' }, 403)
   }
@@ -4398,9 +4410,8 @@ app.get('/api/availability/schedule', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
 
   await ensureAvailabilitySchema(c.env.DB)
 
@@ -4442,9 +4453,8 @@ app.put('/api/availability/schedule', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
 
   await ensureAvailabilitySchema(c.env.DB)
 
@@ -4485,9 +4495,8 @@ app.get('/api/availability/blocks', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
 
   await ensureAvailabilitySchema(c.env.DB)
 
@@ -4532,9 +4541,8 @@ app.post('/api/availability/blocks', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
 
   await ensureAvailabilitySchema(c.env.DB)
 
@@ -4599,9 +4607,8 @@ app.delete('/api/availability/blocks/:id', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
 
   const id = c.req.param('id')
 
@@ -4630,9 +4637,8 @@ app.get('/api/availability/dashboard', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
 
   const allowed = ['admin', 'manager', 'carevalidate']
   if (!allowed.includes(payload.role)) return c.json({ error: 'Access denied' }, 403)
@@ -4683,9 +4689,8 @@ app.get('/api/availability/notifications', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
-  let payload: any
-  try { payload = JSON.parse(atob(token.split('.')[1])) } catch { return c.json({ error: 'Invalid token' }, 401) }
-  if (!payload || Date.now() > payload.exp) return c.json({ error: 'Token expired' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   if (payload.role !== 'admin' && payload.role !== 'manager') return c.json({ error: 'Access denied' }, 403)
 
   await ensureAvailabilitySchema(c.env.DB)
@@ -4743,7 +4748,7 @@ async function ensureClientPaymentsSchema(db: D1Database) {
 app.get('/api/client-payments/clients', requireAdmin, async (c) => {
   await ensureClientPaymentsSchema(c.env.DB)
   const rows = await c.env.DB.prepare(
-    `SELECT * FROM cp_clients ORDER BY name`
+    `SELECT * FROM cp_clients WHERE is_active=1 ORDER BY name`
   ).all()
   return c.json(rows.results)
 })

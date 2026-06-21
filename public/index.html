@@ -2145,6 +2145,9 @@ const PAGE_PATHS = {
   provider_documents:     '/portal/documents',
   provider_availability:  '/portal/availability',
   availability:           '/availability',
+  mgr_contractors:        '/manager/contractors',
+  mgr_licenses:           '/manager/licenses',
+  mgr_consults:           '/manager/consults',
   mgr_availability:       '/manager/availability',
   candidate_status:       '/candidate/status',
   candidate_documents: '/candidate/documents',
@@ -2230,7 +2233,7 @@ async function loadInitialData() {
     // Resolve target page BEFORE selectPeriod so its navigate(state.currentPage) uses the right page
     const savedPage = localStorage.getItem('lmd_last_page')
     const defaultPage = state.role === 'carevalidate' ? 'cv_dashboard' : 'dashboard'
-    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','carevalidate','cv_dashboard','cv_detail','users','payments']
+    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','carevalidate','cv_dashboard','cv_detail','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
     state.currentPage = (savedPage && validPages.includes(savedPage)) ? savedPage : defaultPage
 
     if (state.periods.length > 0) {
@@ -2724,7 +2727,7 @@ function renderContractorBars(doctors) {
   }).join('')
 }
 
-function escHtml(s) { return (s || '').replace(/'/g, "\\'") }
+function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
 
 // ════════════════════════════════════════════════════
 // UPLOAD PAGE
@@ -11962,6 +11965,10 @@ async function cpDetailToggleActive() {
     return
   }
   const e = cpDetailState.currentEntry
+  if (!e.id) {
+    showToast('No real entry exists yet for this period — add a payment first', 'error')
+    return
+  }
   const isInactive = e.is_active === 0 || e.is_active === '0'
   await cpToggleClientActive(e.id, isInactive ? 0 : 1)
 }
@@ -13710,7 +13717,7 @@ async function mgrSubmitDocument() {
     formData.append('file', file)
     formData.append('doc_type', docType)
     if (label) formData.append('label', label)
-    const token = localStorage.getItem('lionmd_token') || sessionStorage.getItem('lionmd_token') || ''
+    const token = localStorage.getItem('lmd_token') || sessionStorage.getItem('lmd_token') || ''
     const res = await fetch(`/api/manager/contractors/${ct.id}/documents`, {
       method: 'POST',
       headers: { 'Authorization': `Bearer ${token}` },
@@ -15379,6 +15386,9 @@ window.addEventListener('DOMContentLoaded', async () => {
     '/portal/documents':      'provider_documents',
     '/portal/availability':   'provider_availability',
     '/availability':          'availability',
+    '/manager/contractors':   'mgr_contractors',
+    '/manager/licenses':      'mgr_licenses',
+    '/manager/consults':      'mgr_consults',
     '/manager/availability':  'mgr_availability',
     '/licensing':             'lic_dashboard',
     '/licensing/edit':     'lic_edit',
@@ -15479,7 +15489,8 @@ function avNext30Days() {
 }
 
 function avTodayStr() {
-  return new Date().toISOString().slice(0, 10)
+  const d = new Date()
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
 }
 
 // Get effective limit for a contractor on a given date
@@ -15777,7 +15788,7 @@ function avDrawAdminDashboard() {
         <div class="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-semibold">
           <button onclick="avSetView('today')"  id="avViewToday"  class="px-3 py-2 transition ${avAdminState.view==='today'  ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Today</button>
           <button onclick="avSetView('week')"   id="avViewWeek"   class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='week'   ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">7-Day</button>
-          <button onclick="avSetView('schedule')" id="avViewSched" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='schedule' ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Schedule</button>
+          <button onclick="avSetView('schedule')" id="avViewSchedule" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='schedule' ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Schedule</button>
         </div>
         ${isAdmin ? `
         <button onclick="avAdminAddBlock()" class="btn-primary px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5">
@@ -15957,9 +15968,9 @@ function avRenderWeekView(todayProviders, days7, isAdmin) {
               const eff = avEffectiveLimit(p.schedule, p.blocks, d)
               const isToday = d === avTodayStr()
               const cellBg = isToday ? 'bg-teal-50/50' : ''
-              if (eff.limit === 0)    return `<td class="py-3 px-2 text-center ${cellBg}"><span class="inline-block w-8 h-8 rounded-full bg-red-100 text-red-600 text-xs font-bold flex items-center justify-center mx-auto leading-8">✕</span></td>`
-              if (eff.limit === null) return `<td class="py-3 px-2 text-center ${cellBg}"><span class="inline-block w-8 h-8 rounded-full bg-green-100 text-green-600 text-xs font-bold flex items-center justify-center mx-auto leading-8">✓</span></td>`
-              return `<td class="py-3 px-2 text-center ${cellBg}"><span class="inline-block min-w-8 h-8 px-1 rounded-full bg-amber-100 text-amber-700 text-xs font-bold flex items-center justify-center mx-auto leading-8">${eff.limit}</span></td>`
+              if (eff.limit === 0)    return `<td class="py-3 px-2 text-center ${cellBg}"><span class="flex w-8 h-8 rounded-full bg-red-100 text-red-600 text-xs font-bold items-center justify-center mx-auto">✕</span></td>`
+              if (eff.limit === null) return `<td class="py-3 px-2 text-center ${cellBg}"><span class="flex w-8 h-8 rounded-full bg-green-100 text-green-600 text-xs font-bold items-center justify-center mx-auto">✓</span></td>`
+              return `<td class="py-3 px-2 text-center ${cellBg}"><span class="flex min-w-8 h-8 px-1 rounded-full bg-amber-100 text-amber-700 text-xs font-bold items-center justify-center mx-auto">${eff.limit}</span></td>`
             }).join('')}
           </tr>`).join('')}
         </tbody>
