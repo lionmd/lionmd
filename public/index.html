@@ -7353,6 +7353,41 @@ function cpaBadgeHtml(notes) {
   return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300 whitespace-nowrap"><i class="fas fa-exclamation-triangle text-[10px]"></i>${escHtml(label)}</span>`
 }
 
+// ── CPA-required state intelligence ────────────────────────────────
+// Source: AANP State Practice Environment map (updated 05/2026)
+// Restricted = CPA required for ALL clinical practice (cannot see patients, prescribe, or diagnose without it)
+// Reduced    = CPA required for at least one element (typically prescribing/Rx authority)
+// Full       = NP may practice fully independently — no CPA needed
+const CPA_RESTRICTED_STATES = new Set([
+  'CA','FL','GA','MI','MO','NC','OK','SC','TN','TX','VA'
+])
+const CPA_REDUCED_STATES = new Set([
+  'AL','AR','IL','IN','KY','LA','MS','NJ','OH','PA','UT','WI','WV'
+  // Note: DE, NY moved to Full Practice as of 2024-2025 per AANP
+])
+// Returns 'restricted', 'reduced', or 'full'
+function cpaStateType(state) {
+  if (CPA_RESTRICTED_STATES.has(state)) return 'restricted'
+  if (CPA_REDUCED_STATES.has(state))    return 'reduced'
+  return 'full'
+}
+// Returns true if this license is for an NP/PA in a state that legally
+// requires a CPA — meaning an unsigned CPA should block Active status
+function cpaRequiredForLic(lic) {
+  const rg = (lic.role_group || lic.contractor_role_group || '').toUpperCase()
+  const isNpPa = rg.includes('NP') || rg.includes('PA') || rg.includes('NURSE')
+  if (!isNpPa) return false
+  return cpaStateType(lic.state) !== 'full'
+}
+// The key gate: returns true when a license should display as PENDING
+// (not Active) because the CPA is required by state law but not yet signed.
+// Only fires when DB status is 'active' — pending/expired stay as-is.
+function cpaBlocksActive(lic) {
+  if (lic.status !== 'active') return false
+  if (!cpaRequiredForLic(lic)) return false
+  return cpaPending(lic)
+}
+
 // Renders the file upload widget HTML (injected into each modal)
 // widgetId: unique prefix so multiple modals don't clash
 // existingFileName: name of already-saved file (if editing)
@@ -14418,10 +14453,12 @@ function licDrawDashboard() {
   const expiring = active.filter(l => licIsExpiringSoon(l.expiry_date))
   const withCollab = all.filter(l => l.collab_physician && l.collab_physician.trim())
   const collabExpiring = withCollab.filter(l => licIsExpiringSoon(l.collab_expiry))
+  // CPA compliance: NP/PA in a CPA-required state where CPA is not yet signed
+  const cpaBlocked = all.filter(l => cpaBlocksActive(l))
 
   mc.innerHTML = `
   <!-- KPI bar -->
-  <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 mb-5">
+  <div class="grid grid-cols-2 sm:grid-cols-3 ${cpaBlocked.length > 0 ? 'lg:grid-cols-7' : 'lg:grid-cols-6'} gap-3 mb-5">
     <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
       <div class="text-2xl font-bold text-gray-800">${licState.contractors.length}</div>
       <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Providers</div>
@@ -14431,7 +14468,7 @@ function licDrawDashboard() {
       <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Total Licenses</div>
     </div>
     <div class="bg-white rounded-xl border border-green-200 p-3 shadow-sm">
-      <div class="text-2xl font-bold text-green-600">${active.length}</div>
+      <div class="text-2xl font-bold text-green-600">${active.length - cpaBlocked.length}</div>
       <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Active</div>
     </div>
     <div class="bg-white rounded-xl border border-yellow-200 p-3 shadow-sm">
@@ -14446,11 +14483,28 @@ function licDrawDashboard() {
       <div class="text-2xl font-bold ${expiring.length > 0 ? 'text-orange-500' : 'text-gray-400'}">${expiring.length}</div>
       <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Exp. ≤60 days</div>
     </div>
+    ${cpaBlocked.length > 0 ? `
+    <div class="bg-amber-50 rounded-xl border border-amber-300 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-amber-600">${cpaBlocked.length}</div>
+      <div class="text-xs text-amber-700 font-semibold uppercase tracking-wide mt-1">CPA Unsigned</div>
+    </div>` : ''}
   </div>
 
   <!-- Alerts -->
-  ${expiring.length > 0 || expired.length > 0 || collabExpiring.length > 0 ? `
+  ${expiring.length > 0 || expired.length > 0 || collabExpiring.length > 0 || cpaBlocked.length > 0 ? `
   <div class="mb-4 space-y-2">
+    ${cpaBlocked.length > 0 ? `
+    <div class="p-3 rounded-xl bg-amber-50 border border-amber-300 flex items-start gap-2 text-sm">
+      <i class="fas fa-file-signature text-amber-500 mt-0.5 flex-shrink-0"></i>
+      <div class="flex-1 min-w-0">
+        <span class="font-semibold text-amber-800">${cpaBlocked.length} NP license${cpaBlocked.length > 1 ? 's' : ''} marked Active but CPA not yet signed — state law requires a signed CPA to practice:</span>
+        <div class="mt-1 flex flex-wrap gap-1">
+          ${cpaBlocked.slice(0,8).map(l => `<span class="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-100 text-amber-800 text-xs font-medium">${escHtml(l.contractor_name.split(' ').pop())} / ${l.state} <span class="text-amber-500 text-[10px]">(${cpaStateType(l.state)})</span></span>`).join('')}
+          ${cpaBlocked.length > 8 ? `<span class="text-xs text-amber-600 font-medium">+${cpaBlocked.length - 8} more</span>` : ''}
+        </div>
+        <p class="text-xs text-amber-700 mt-1.5">These should be <strong>Pending</strong> until the CPA is fully signed. Use the Collab Agreements tab or click any amber cell to update.</p>
+      </div>
+    </div>` : ''}
     ${expired.length > 0 ? `
     <div class="p-3 rounded-xl bg-red-50 border border-red-200 flex items-start gap-2 text-sm">
       <i class="fas fa-times-circle text-red-500 mt-0.5 flex-shrink-0"></i>
@@ -14541,6 +14595,7 @@ function licIsExpired(l) {
 function licStatusColor(l) {
   if (licIsExpired(l))                  return { bg: 'bg-red-500',    text: 'Exp',   ring: 'ring-red-300' }
   if (l.status === 'pending')           return { bg: 'bg-yellow-400', text: 'Pend',  ring: 'ring-yellow-300' }
+  if (cpaBlocksActive(l))               return { bg: 'bg-amber-400',  text: 'CPA?',  ring: 'ring-amber-300' }
   if (licIsExpiringSoon(l.expiry_date)) return { bg: 'bg-orange-400', text: '!Exp',  ring: 'ring-orange-300' }
   return                                       { bg: 'bg-green-500',  text: 'Act',   ring: 'ring-green-300' }
 }
@@ -14589,7 +14644,7 @@ function licDrawMatrix() {
       lic.license_number ? '#' + lic.license_number : '',
       lic.expiry_date ? 'Exp: ' + lic.expiry_date : '',
       hasCollab ? 'Collab: ' + lic.collab_physician : '',
-      lic.notes ? lic.notes : '',
+      cpaBlocksActive(lic) ? '⚠ CPA required — not yet signed' : (lic.notes ? lic.notes : ''),
     ].filter(Boolean).join(' | ')
     return `<td class="p-0 border-r border-b border-gray-100" title="${escHtml(tooltipParts)}">
       <div class="w-10 h-8 mx-auto flex items-center justify-center">
@@ -14612,6 +14667,7 @@ function licDrawMatrix() {
       <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-orange-400 inline-block"></span>Expiring ≤60d</span>
       <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-yellow-400 inline-block"></span>Pending</span>
       <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-red-500 inline-block"></span>Expired</span>
+      <span class="flex items-center gap-1.5 text-amber-700 font-semibold"><span class="w-5 h-4 rounded bg-amber-400 inline-block"></span>CPA Req. (unsigned)</span>
       <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-green-500 ring-2 ring-purple-400 ring-offset-1 inline-block"></span><span class="relative inline-block w-2.5 h-2.5 rounded-full bg-purple-500 border border-white -ml-2.5 mr-0.5"></span>Has Collab Agreement</span>
     </div>
     <div class="overflow-x-auto">
@@ -14759,7 +14815,7 @@ function licDrawByProvider() {
                 <div class="flex-1 min-w-0">
                   <div class="flex items-center gap-1.5 flex-wrap">
                     <span class="font-semibold text-sm text-gray-800">${l.state}</span>
-                    <span class="px-1.5 py-0.5 rounded text-xs font-bold ${licIsExpired(l) ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : licIsExpiringSoon(l.expiry_date) ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}">${l.status}</span>
+                    <span class="px-1.5 py-0.5 rounded text-xs font-bold ${licIsExpired(l) ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : cpaBlocksActive(l) ? 'bg-amber-100 text-amber-700' : licIsExpiringSoon(l.expiry_date) ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}">${cpaBlocksActive(l) ? 'CPA Req.' : l.status}</span>
                   </div>
                   ${l.license_type ? `<div class="text-xs text-gray-500 mt-0.5">${escHtml(l.license_type)}</div>` : ''}
                   ${l.license_number ? `<div class="text-xs text-gray-400"><i class="fas fa-hashtag text-[10px] mr-0.5"></i>${escHtml(l.license_number)}</div>` : ''}
@@ -14806,7 +14862,8 @@ function licShowDetail(licId) {
     expired: 'bg-red-100 text-red-700',
     in_progress: 'bg-blue-100 text-blue-700'
   }
-  const sc = statusColors[lic.status] || 'bg-gray-100 text-gray-600'
+  const cpaBlocked = cpaBlocksActive(lic)
+  const sc = cpaBlocked ? 'bg-amber-100 text-amber-700' : (statusColors[lic.status] || 'bg-gray-100 text-gray-600')
   const hasCollab = lic.collab_physician && lic.collab_physician.trim()
   const cpaIsPending = cpaPending(lic)
   const collabExpSoon = hasCollab && licIsExpiringSoon(lic.collab_expiry)
@@ -14823,7 +14880,7 @@ function licShowDetail(licId) {
     <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
       <div class="flex items-center gap-3">
         <div class="w-10 h-8 rounded-lg flex items-center justify-center text-white text-sm font-bold shadow-sm
-          ${lic.status==='expired'||licIsExpired(lic) ? 'bg-red-500' : lic.status==='pending' ? 'bg-yellow-400' : licIsExpiringSoon(lic.expiry_date) ? 'bg-orange-400' : 'bg-green-500'}">
+          ${lic.status==='expired'||licIsExpired(lic) ? 'bg-red-500' : lic.status==='pending' ? 'bg-yellow-400' : cpaBlocksActive(lic) ? 'bg-amber-400' : licIsExpiringSoon(lic.expiry_date) ? 'bg-orange-400' : 'bg-green-500'}">
           ${lic.state}
         </div>
         <div>
@@ -14842,7 +14899,8 @@ function licShowDetail(licId) {
       <div class="grid grid-cols-2 gap-3">
         <div class="bg-gray-50 rounded-xl p-3">
           <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Status</p>
-          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${sc}">${lic.status}</span>
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${sc}">${cpaBlocked ? 'CPA Required' : lic.status}</span>
+          ${cpaBlocked ? `<p class="text-[10px] text-amber-600 mt-1 font-medium">CPA not signed · ${cpaStateType(lic.state) === 'restricted' ? 'Restricted state' : 'Reduced state'}</p>` : ''}
         </div>
         <div class="bg-gray-50 rounded-xl p-3">
           <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">License #</p>
@@ -15590,11 +15648,12 @@ function buildPublicLicensingHTML(data) {
 
   const today = new Date(); today.setHours(0,0,0,0)
   const in60  = new Date(today); in60.setDate(in60.getDate() + 60)
-  let cntActive=0, cntExpiring=0, cntExpired=0, cntCollab=0
+  let cntActive=0, cntExpiring=0, cntExpired=0, cntCollab=0, cntCpaReq=0
   for (const r of rows) {
     const exp = r.expiry_date ? new Date(r.expiry_date) : null
     if (r.status === 'expired' || (exp && exp < today)) cntExpired++
     else if (exp && exp <= in60) cntExpiring++
+    else if (cpaBlocksActive(r)) cntCpaReq++
     else if (r.status === 'active') cntActive++
     if (r.collab_physician) cntCollab++
   }
@@ -15612,11 +15671,15 @@ function buildPublicLicensingHTML(data) {
     if (r.status === 'expired' || (exp && exp < today))       return { bg:'bg-red-100',    text:'text-red-700',    ring:'ring-red-200' }
     if (exp && exp <= in60)                                   return { bg:'bg-orange-100',  text:'text-orange-700', ring:'ring-orange-200' }
     if (r.status === 'pending' || r.status === 'in_progress') return { bg:'bg-yellow-50',   text:'text-yellow-700', ring:'ring-yellow-200' }
+    if (cpaBlocksActive(r))                                   return { bg:'bg-amber-100',   text:'text-amber-700',  ring:'ring-amber-200' }
     if (r.status === 'active')                                return { bg:'bg-green-100',   text:'text-green-700',  ring:'ring-green-200' }
     return { bg:'bg-gray-100', text:'text-gray-600', ring:'ring-gray-200' }
   }
   const fmtDate = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : ''
-  const statusLabel = s => ({ active:'Active', pending:'Pending', expired:'Expired', in_progress:'In Progress', inactive:'Inactive' }[s] || s)
+  const statusLabel = (s, r) => {
+    if (r && cpaBlocksActive(r)) return 'CPA Req.'
+    return { active:'Active', pending:'Pending', expired:'Expired', in_progress:'In Progress', inactive:'Inactive' }[s] || s
+  }
 
   // Matrix
   const matrixRows = providers.map(prov => {
@@ -15631,7 +15694,7 @@ function buildPublicLicensingHTML(data) {
       const expTip = l.expiry_date ? ` title="Expires ${fmtDate(l.expiry_date)}"` : ''
       return `<td class="px-2 py-2 text-center">
         <span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring} whitespace-nowrap"${expTip}>
-          ${statusLabel(l.status)}${collabDot}${cpaDot}
+          ${statusLabel(l.status, l)}${collabDot}${cpaDot}
         </span>
       </td>`
     }).join('')
@@ -15652,6 +15715,7 @@ function buildPublicLicensingHTML(data) {
     <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 ring-1 ring-green-200 font-semibold">Active</span>
     <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 ring-1 ring-orange-200 font-semibold">Expiring ≤60d</span>
     <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200 font-semibold">Pending</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 ring-1 ring-amber-200 font-semibold">CPA Req.</span>
     <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 ring-1 ring-red-200 font-semibold">Expired</span>
     <span class="inline-flex items-center gap-1 ml-2">
       <span class="inline-block w-2 h-2 rounded-full bg-purple-500"></span>
@@ -15678,7 +15742,7 @@ function buildPublicLicensingHTML(data) {
         <td class="px-4 py-2 font-medium text-gray-700 text-sm w-14">${l.state}</td>
         <td class="px-4 py-2 text-xs text-gray-500">${l.license_type || '—'}</td>
         <td class="px-4 py-2">
-          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring}">${statusLabel(l.status)}</span>
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring}">${statusLabel(l.status, l)}</span>
         </td>
         <td class="px-4 py-2 text-xs text-gray-500">${expStr}${collabStr}${permBadge}</td>
         ${cpaBadge}
@@ -15700,11 +15764,12 @@ function buildPublicLicensingHTML(data) {
 
   return `
     <!-- KPI bar -->
-    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+    <div class="grid grid-cols-2 sm:grid-cols-4 ${cntCpaReq > 0 ? 'lg:grid-cols-5' : ''} gap-4 mb-8">
       ${kpiCard('fas fa-check-circle', 'Active Licenses', cntActive, 'bg-green-500')}
       ${kpiCard('fas fa-exclamation-triangle', 'Expiring Soon', cntExpiring, 'bg-orange-400')}
       ${kpiCard('fas fa-times-circle', 'Expired', cntExpired, 'bg-red-500')}
       ${kpiCard('fas fa-handshake', 'Collab Agreements', cntCollab, 'bg-purple-500')}
+      ${cntCpaReq > 0 ? kpiCard('fas fa-file-signature', 'CPA Unsigned', cntCpaReq, 'bg-amber-500') : ''}
     </div>
 
     <!-- Matrix -->
