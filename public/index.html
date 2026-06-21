@@ -15292,25 +15292,8 @@ async function renderPartnerView() {
 
   const sharedUrl = window.location.origin + '/licensing/public'
 
-  // Deduplicate & build provider/license summary same as public view
-  const seen = new Map()
-  for (const r of (licData?.licenses || [])) {
-    const key = r.contractor_id + '-' + r.state
-    const ex = seen.get(key)
-    if (!ex || (r.license_number && !ex.license_number)) seen.set(key, r)
-  }
-  const rows = Array.from(seen.values())
-  const providerMap = {}
-  for (const r of rows) {
-    if (!providerMap[r.provider_name]) providerMap[r.provider_name] = { name: r.provider_name, role_group: r.role_group || '', licenses: [] }
-    providerMap[r.provider_name].licenses.push(r)
-  }
-  const providers = Object.values(providerMap).sort((a,b) => a.name.localeCompare(b.name))
-  const states = [...new Set(rows.map(r => r.state))].sort()
-
-  // CPA pending count for summary
-  const cpaPendingCount = rows.filter(r => cpaPending(r)).length
-  const missingActions  = rows.filter(r => !r.permitted_actions).length
+  // Build the live preview using the exact same function as the public view
+  const previewHTML = buildPublicLicensingHTML(licData)
 
   mc.innerHTML = `
   <div class="max-w-5xl space-y-6">
@@ -15320,7 +15303,7 @@ async function renderPartnerView() {
       <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
         <i class="fas fa-share-alt text-blue-500"></i> Partner View Management
       </h1>
-      <p class="text-sm text-gray-400 mt-1">Everything in one place — the shared licensing link sent to CareValidate, access controls, and a live preview of what they see.</p>
+      <p class="text-sm text-gray-400 mt-1">Everything in one place — the shared licensing link sent to CareValidate, access controls, and a live preview of exactly what they see.</p>
     </div>
 
     <!-- ── Access card ────────────────────────────────────── -->
@@ -15359,8 +15342,8 @@ async function renderPartnerView() {
             <div class="flex items-center gap-3 flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5">
               <i class="fas fa-lock text-gray-400 flex-shrink-0"></i>
               <span id="pvPwDisplay" class="font-mono text-sm text-gray-800 select-all flex-1">${escHtml(currentPw)}</span>
-              <button onclick="document.getElementById('pvPwDisplay').style.filter=document.getElementById('pvPwDisplay').style.filter?'':'blur(5px)'"
-                class="text-xs text-gray-400 hover:text-gray-600 flex-shrink-0"><i class="fas fa-eye"></i></button>
+              <button onclick="(el=>el.style.filter=el.style.filter?'':'blur(4px)')($('pvPwDisplay'))"
+                class="text-xs text-gray-400 hover:text-gray-600 flex-shrink-0" title="Toggle visibility"><i class="fas fa-eye"></i></button>
             </div>
             <button onclick="navigator.clipboard.writeText(${JSON.stringify(currentPw)}).then(()=>showToast('Password copied!','success'))"
               class="flex-shrink-0 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium flex items-center gap-2 transition">
@@ -15371,10 +15354,10 @@ async function renderPartnerView() {
 
         <!-- Change password -->
         <div class="p-4 rounded-xl bg-amber-50 border border-amber-200">
-          <p class="text-xs font-bold text-amber-700 mb-2 flex items-center gap-1.5">
+          <p class="text-xs font-bold text-amber-700 mb-1 flex items-center gap-1.5">
             <i class="fas fa-key"></i> Change Password
           </p>
-          <p class="text-xs text-amber-600 mb-3">Setting a new password here updates it immediately. Anyone who currently has a session open will not be affected until their session expires or they revisit the page. Send the new password to CareValidate after changing.</p>
+          <p class="text-xs text-amber-600 mb-3">Updates immediately — no redeploy needed. Send the new password to CareValidate after saving.</p>
           <div class="flex gap-2">
             <input id="pvNewPw" type="text" placeholder="New password…"
               class="flex-1 text-sm border border-amber-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
@@ -15390,102 +15373,53 @@ async function renderPartnerView() {
       </div>
     </div>
 
-    <!-- ── What CV sees: status summary ──────────────────── -->
-    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-      <div class="px-5 py-4 border-b border-gray-100">
-        <h2 class="font-bold text-gray-800 text-sm flex items-center gap-2">
-          <i class="fas fa-eye text-purple-500"></i> What CareValidate Sees — Live Preview
-        </h2>
-        <p class="text-xs text-gray-400 mt-0.5">This is exactly the data returned by the shared endpoint right now.</p>
-      </div>
-
-      <!-- KPI summary bar -->
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-px bg-gray-100 border-b border-gray-100">
-        <div class="bg-white px-5 py-4 text-center">
-          <div class="text-2xl font-bold text-gray-800">${providers.length}</div>
-          <div class="text-xs text-gray-500 mt-0.5 font-medium">Active Providers</div>
-        </div>
-        <div class="bg-white px-5 py-4 text-center">
-          <div class="text-2xl font-bold text-gray-800">${rows.length}</div>
-          <div class="text-xs text-gray-500 mt-0.5 font-medium">State Licenses</div>
-        </div>
-        <div class="bg-white px-5 py-4 text-center">
-          <div class="text-2xl font-bold ${cpaPendingCount > 0 ? 'text-amber-600' : 'text-green-600'}">${cpaPendingCount}</div>
-          <div class="text-xs text-gray-500 mt-0.5 font-medium">CPA Pending</div>
-        </div>
-        <div class="bg-white px-5 py-4 text-center">
-          <div class="text-2xl font-bold ${missingActions > 0 ? 'text-orange-500' : 'text-green-600'}">${missingActions}</div>
-          <div class="text-xs text-gray-500 mt-0.5 font-medium">Missing Permitted Actions</div>
-        </div>
-      </div>
-
-      <!-- Provider list -->
-      <div class="divide-y divide-gray-50">
-        ${providers.map(prov => {
-          const pendingCpa = prov.licenses.filter(l => cpaPending(l))
-          const missingPerm = prov.licenses.filter(l => !l.permitted_actions)
-          return `
-          <details class="group">
-            <summary class="px-5 py-3 cursor-pointer hover:bg-gray-50 flex items-center gap-3 select-none list-none">
-              <div class="flex-1 flex items-center gap-2 flex-wrap">
-                <span class="font-semibold text-gray-700 text-sm">${escHtml(prov.name)}</span>
-                <span class="text-xs text-gray-400">${escHtml(prov.role_group)}</span>
-                ${pendingCpa.length > 0 ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300"><i class="fas fa-exclamation-triangle text-[10px]"></i>CPA Pending (${pendingCpa.length})</span>` : ''}
-                ${missingPerm.length > 0 ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700 border border-orange-300"><i class="fas fa-question-circle text-[10px]"></i>Missing Actions (${missingPerm.length})</span>` : ''}
-              </div>
-              <span class="text-xs text-gray-400 flex-shrink-0">${prov.licenses.length} state${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
-            </summary>
-            <div class="px-5 pb-4">
-              <div class="rounded-xl border border-gray-100 overflow-hidden">
-                <table class="w-full text-xs">
-                  <thead class="bg-gray-50 text-gray-500 uppercase tracking-wide">
-                    <tr>
-                      <th class="px-3 py-2 text-left font-semibold">State</th>
-                      <th class="px-3 py-2 text-left font-semibold">Status</th>
-                      <th class="px-3 py-2 text-left font-semibold">License #</th>
-                      <th class="px-3 py-2 text-left font-semibold">Permitted Actions</th>
-                      <th class="px-3 py-2 text-left font-semibold">CPA</th>
-                    </tr>
-                  </thead>
-                  <tbody class="divide-y divide-gray-50">
-                    ${prov.licenses.sort((a,b)=>a.state.localeCompare(b.state)).map(l => `
-                    <tr class="hover:bg-gray-50">
-                      <td class="px-3 py-2 font-bold text-gray-700">${escHtml(l.state)}</td>
-                      <td class="px-3 py-2">
-                        <span class="px-1.5 py-0.5 rounded-full font-semibold ${l.status==='active'?'bg-green-100 text-green-700':l.status==='expired'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">${escHtml(l.status||'')}</span>
-                      </td>
-                      <td class="px-3 py-2 font-mono text-gray-600">${l.license_number ? escHtml(l.license_number) : '<span class="text-red-400 italic">Missing</span>'}</td>
-                      <td class="px-3 py-2">
-                        ${l.permitted_actions
-                          ? `<span class="px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>`
-                          : '<span class="text-orange-400 italic">Not set</span>'}
-                      </td>
-                      <td class="px-3 py-2">
-                        ${cpaPending(l) ? cpaBadgeHtml(l.notes) : (l.notes ? `<span class="text-gray-400 italic">${escHtml(l.notes)}</span>` : '<span class="text-gray-300">—</span>')}
-                      </td>
-                    </tr>`).join('')}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          </details>`
-        }).join('')}
-        ${providers.length === 0 ? `<div class="px-5 py-12 text-center text-gray-400"><i class="fas fa-folder-open text-3xl mb-3 block"></i><p>No active providers with licenses on file.</p></div>` : ''}
-      </div>
-    </div>
-
     <!-- ── Notes for the team ────────────────────────────── -->
-    <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 text-sm text-blue-800 space-y-2">
-      <p class="font-bold flex items-center gap-2"><i class="fas fa-info-circle"></i> Notes for the team</p>
+    <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 space-y-2">
+      <p class="font-bold text-blue-800 text-sm flex items-center gap-2"><i class="fas fa-info-circle"></i> Notes for the team</p>
       <ul class="space-y-1.5 text-xs text-blue-700 list-disc list-inside">
         <li>The shared link above is what you send to CareValidate — it requires the password to open.</li>
-        <li>The shared view shows: provider name, state, license #, license type, expiry, collab physician, permitted actions, and practice type. It does <strong>not</strong> show internal notes, payroll data, or documents.</li>
-        <li>To change the password: type the new password in the field above and click Save. The change takes effect immediately. Send the new password to CareValidate directly after changing.</li>
-        <li>Providers fill in their <strong>Permitted Actions</strong> from their own portal (State Licenses → Edit). Admins and license editors can also set it. CareValidate uses this to know what permissions to grant.</li>
-        <li>States showing <strong>CPA Pending</strong> mean the collaborating physician agreement is not yet fully signed — those providers may not be fully active in those states yet.</li>
+        <li>The view shows: provider name, state, license #, license type, expiry, collab physician, permitted actions. It does <strong>not</strong> show payroll, internal notes, or documents.</li>
+        <li>Providers fill in <strong>Permitted Actions</strong> from their own portal under State Licenses → Edit. Admins and license editors can also set it. CareValidate uses this to know what permissions to grant each provider per state.</li>
+        <li>States showing <strong>CPA Pending</strong> mean the collaborating physician agreement is not yet fully signed.</li>
       </ul>
     </div>
 
+  </div>
+
+  <!-- ── Live preview — breaks out of max-w-5xl to match the real full-width public view ── -->
+  <div class="mt-6">
+    <div class="flex items-center gap-2 mb-3 max-w-5xl">
+      <h2 class="text-base font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-eye text-purple-500"></i> Live Preview — What CareValidate Sees
+      </h2>
+      <span class="text-xs bg-purple-50 text-purple-600 border border-purple-200 rounded-full px-2.5 py-0.5 font-medium">Read-only · Exact match</span>
+    </div>
+    <!-- Mirror the exact public shell: bg-gray-50 page, max-w-7xl centered body, px-4 py-8 — no extra wrapper padding -->
+    <div class="rounded-2xl border-2 border-dashed border-purple-200 overflow-hidden">
+      <!-- Mimics the public view header bar -->
+      <div class="bg-white border-b border-gray-200 shadow-sm px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-xl bg-blue-600 flex items-center justify-center shadow">
+            <i class="fas fa-shield-alt text-white text-sm"></i>
+          </div>
+          <div>
+            <p class="text-sm font-bold text-gray-800 leading-none">LionMDs Provider Licensing</p>
+            <p class="text-xs text-gray-400 mt-0.5">Provider licensing status — read-only view</p>
+          </div>
+        </div>
+        <span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
+          <i class="fas fa-lock text-blue-500"></i> Password Protected
+        </span>
+      </div>
+      <!-- Mimics pubBody: max-w-7xl mx-auto px-4 py-8 on bg-gray-50 -->
+      <div class="bg-gray-50 px-4 py-8">
+        ${previewHTML}
+      </div>
+      <!-- Mimics the public footer -->
+      <div class="border-t border-gray-200 py-3 text-center text-xs text-gray-400 bg-white">
+        LionMDs &mdash; Provider Licensing Status &mdash; Data refreshed in real time
+      </div>
+    </div>
   </div>`
 }
 
@@ -15513,6 +15447,178 @@ async function pvSavePassword() {
     msgEl.className = 'mt-2 text-xs font-medium text-red-600'
     msgEl.classList.remove('hidden')
   }
+}
+
+// ── Shared rendering helper — produces the exact HTML CV sees ──────
+// Called by both renderPublicLicensing() and renderPartnerView() so
+// the admin preview is a pixel-identical match to the live shared view.
+function buildPublicLicensingHTML(data) {
+  const seen = new Map()
+  for (const r of (data?.licenses || [])) {
+    const key = r.contractor_id + '-' + r.state
+    const ex = seen.get(key)
+    if (!ex || (r.license_number && !ex.license_number)) seen.set(key, r)
+  }
+  const rows = Array.from(seen.values())
+
+  if (!rows.length) {
+    return `<div class="text-center text-gray-400 py-16"><i class="fas fa-folder-open text-4xl mb-3"></i><p>No licensing data available.</p></div>`
+  }
+
+  const providerMap = {}
+  const stateSet = new Set()
+  for (const r of rows) {
+    if (!providerMap[r.provider_name]) providerMap[r.provider_name] = { name: r.provider_name, role_group: r.role_group || '', licenses: [] }
+    providerMap[r.provider_name].licenses.push(r)
+    stateSet.add(r.state)
+  }
+  const providers = Object.values(providerMap).sort((a,b) => a.name.localeCompare(b.name))
+  const states = [...stateSet].sort()
+
+  const today = new Date(); today.setHours(0,0,0,0)
+  const in60  = new Date(today); in60.setDate(in60.getDate() + 60)
+  let cntActive=0, cntExpiring=0, cntExpired=0, cntCollab=0
+  for (const r of rows) {
+    const exp = r.expiry_date ? new Date(r.expiry_date) : null
+    if (r.status === 'expired' || (exp && exp < today)) cntExpired++
+    else if (exp && exp <= in60) cntExpiring++
+    else if (r.status === 'active') cntActive++
+    if (r.collab_physician) cntCollab++
+  }
+
+  const kpiCard = (icon, label, val, color) =>
+    `<div class="bg-white rounded-xl border border-gray-200 shadow-sm px-5 py-4 flex items-center gap-4">
+      <div class="w-10 h-10 rounded-xl ${color} flex items-center justify-center flex-shrink-0">
+        <i class="${icon} text-white"></i>
+      </div>
+      <div><p class="text-2xl font-bold text-gray-800">${val}</p><p class="text-xs text-gray-500 mt-0.5">${label}</p></div>
+    </div>`
+
+  const pubStatusColor = (r) => {
+    const exp = r.expiry_date ? new Date(r.expiry_date) : null
+    if (r.status === 'expired' || (exp && exp < today))       return { bg:'bg-red-100',    text:'text-red-700',    ring:'ring-red-200' }
+    if (exp && exp <= in60)                                   return { bg:'bg-orange-100',  text:'text-orange-700', ring:'ring-orange-200' }
+    if (r.status === 'pending' || r.status === 'in_progress') return { bg:'bg-yellow-50',   text:'text-yellow-700', ring:'ring-yellow-200' }
+    if (r.status === 'active')                                return { bg:'bg-green-100',   text:'text-green-700',  ring:'ring-green-200' }
+    return { bg:'bg-gray-100', text:'text-gray-600', ring:'ring-gray-200' }
+  }
+  const fmtDate = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : ''
+  const statusLabel = s => ({ active:'Active', pending:'Pending', expired:'Expired', in_progress:'In Progress', inactive:'Inactive' }[s] || s)
+
+  // Matrix
+  const matrixRows = providers.map(prov => {
+    const licByState = {}
+    for (const l of prov.licenses) licByState[l.state] = l
+    const cells = states.map(st => {
+      const l = licByState[st]
+      if (!l) return `<td class="px-2 py-2 text-center"><span class="text-gray-200 text-xs">—</span></td>`
+      const c = pubStatusColor(l)
+      const collabDot = l.collab_physician ? `<span class="ml-1 inline-block w-2 h-2 rounded-full bg-purple-500 align-middle" title="Collab: ${l.collab_physician}"></span>` : ''
+      const cpaDot = cpaPending(l) ? `<span class="ml-0.5 inline-block w-2 h-2 rounded-full bg-amber-400 align-middle" title="CPA pending: ${escHtml(l.notes)}"></span>` : ''
+      const expTip = l.expiry_date ? ` title="Expires ${fmtDate(l.expiry_date)}"` : ''
+      return `<td class="px-2 py-2 text-center">
+        <span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring} whitespace-nowrap"${expTip}>
+          ${statusLabel(l.status)}${collabDot}${cpaDot}
+        </span>
+      </td>`
+    }).join('')
+    const rgBadge = prov.role_group ? `<span class="ml-2 text-xs text-gray-400 font-normal">${prov.role_group}</span>` : ''
+    return `<tr class="border-b border-gray-100 hover:bg-blue-50/30 transition">
+      <td class="px-3 py-2 font-semibold text-gray-700 text-sm whitespace-nowrap sticky left-0 bg-white z-10">${prov.name}${rgBadge}</td>
+      ${cells}
+    </tr>`
+  }).join('')
+
+  const matrixHeader = `<tr class="bg-gray-50 border-b border-gray-200">
+    <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 sticky left-0 bg-gray-50 z-10 min-w-[160px]">Provider</th>
+    ${states.map(s => `<th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 min-w-[90px]">${s}</th>`).join('')}
+  </tr>`
+
+  const legend = `<div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+    <span class="font-semibold text-gray-600 mr-1">Legend:</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 ring-1 ring-green-200 font-semibold">Active</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 ring-1 ring-orange-200 font-semibold">Expiring ≤60d</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200 font-semibold">Pending</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 ring-1 ring-red-200 font-semibold">Expired</span>
+    <span class="inline-flex items-center gap-1 ml-2">
+      <span class="inline-block w-2 h-2 rounded-full bg-purple-500"></span>
+      <span>Collab MD on file</span>
+    </span>
+    <span class="inline-flex items-center gap-1">
+      <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
+      <span class="text-amber-700 font-medium">CPA not yet signed</span>
+    </span>
+  </div>`
+
+  // Provider detail rows
+  const detailRows = providers.map(prov => {
+    const pendingCpaLics = prov.licenses.filter(l => cpaPending(l))
+    const hasCpaPending = pendingCpaLics.length > 0
+    const licRows = prov.licenses.sort((a,b)=>a.state.localeCompare(b.state)).map(l => {
+      const c = pubStatusColor(l)
+      const expStr = l.expiry_date ? fmtDate(l.expiry_date) : '—'
+      const collabStr = l.collab_physician
+        ? `<span class="ml-2 text-xs text-purple-600"><i class="fas fa-handshake mr-1"></i>${l.collab_physician}${l.collab_expiry ? ' · exp ' + fmtDate(l.collab_expiry) : ''}</span>` : ''
+      const cpaBadge = cpaPending(l) ? `<td class="px-4 py-2">${cpaBadgeHtml(l.notes)}</td>` : '<td class="px-4 py-2"></td>'
+      const permBadge = l.permitted_actions ? `<span class="ml-1 text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''
+      return `<tr class="border-b border-gray-50 last:border-0">
+        <td class="px-4 py-2 font-medium text-gray-700 text-sm w-14">${l.state}</td>
+        <td class="px-4 py-2 text-xs text-gray-500">${l.license_type || '—'}</td>
+        <td class="px-4 py-2">
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring}">${statusLabel(l.status)}</span>
+        </td>
+        <td class="px-4 py-2 text-xs text-gray-500">${expStr}${collabStr}${permBadge}</td>
+        ${cpaBadge}
+      </tr>`
+    }).join('')
+    return `<details class="group">
+      <summary class="px-5 py-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between select-none list-none">
+        <span class="font-semibold text-gray-700 text-sm flex items-center gap-2 flex-wrap">
+          ${prov.name} <span class="text-xs font-normal text-gray-400">${prov.role_group}</span>
+          ${hasCpaPending ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300"><i class="fas fa-exclamation-triangle text-[10px]"></i>CPA Pending (${pendingCpaLics.length} state${pendingCpaLics.length!==1?'s':''})</span>` : ''}
+        </span>
+        <span class="text-xs text-gray-400 flex-shrink-0">${prov.licenses.length} license${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
+      </summary>
+      <div class="px-4 pb-3">
+        <table class="w-full text-sm"><tbody>${licRows}</tbody></table>
+      </div>
+    </details>`
+  }).join('')
+
+  return `
+    <!-- KPI bar -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
+      ${kpiCard('fas fa-check-circle', 'Active Licenses', cntActive, 'bg-green-500')}
+      ${kpiCard('fas fa-exclamation-triangle', 'Expiring Soon', cntExpiring, 'bg-orange-400')}
+      ${kpiCard('fas fa-times-circle', 'Expired', cntExpired, 'bg-red-500')}
+      ${kpiCard('fas fa-handshake', 'Collab Agreements', cntCollab, 'bg-purple-500')}
+    </div>
+
+    <!-- Matrix -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
+      <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h2 class="text-base font-bold text-gray-800">State Licensing Matrix</h2>
+          <p class="text-xs text-gray-400 mt-0.5">${providers.length} provider${providers.length!==1?'s':''} &nbsp;·&nbsp; ${states.length} state${states.length!==1?'s':''} &nbsp;·&nbsp; ${rows.length} license record${rows.length!==1?'s':''}</p>
+        </div>
+        ${legend}
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full border-collapse text-sm">
+          <thead>${matrixHeader}</thead>
+          <tbody>${matrixRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Provider detail list -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100">
+        <h2 class="text-base font-bold text-gray-800">Provider Detail</h2>
+        <p class="text-xs text-gray-400 mt-0.5">License type, expiry date, and collaborating physician per provider</p>
+      </div>
+      <div class="divide-y divide-gray-100">${detailRows}</div>
+    </div>`
 }
 
 async function renderPublicLicensing() {
@@ -15621,190 +15727,13 @@ async function renderPublicLicensing() {
       if (!r.ok) throw new Error('Failed to load licensing data')
       return r.json()
     })
-    // API now returns { contractors, licenses } — deduplicate double-import rows
-    const seen = new Map()
-    for (const r of (data.licenses || [])) {
-      const key = r.contractor_id + '-' + r.state
-      const ex = seen.get(key)
-      if (!ex || (r.license_number && !ex.license_number)) seen.set(key, r)
-    }
-    const rows = Array.from(seen.values())
 
     // Timestamp
     const ts = document.getElementById('pubTimestamp')
     if (ts) ts.textContent = 'Last loaded: ' + new Date().toLocaleString()
 
-    if (!rows || rows.length === 0) {
-      body.innerHTML = `<div class="text-center text-gray-400 py-16"><i class="fas fa-folder-open text-4xl mb-3"></i><p>No licensing data available.</p></div>`
-      return
-    }
-
-    // ── Derive unique providers + states ──────────────
-    const providerMap = {}  // name → { name, role_group, licenses: [] }
-    const stateSet = new Set()
-    for (const r of rows) {
-      if (!providerMap[r.provider_name]) providerMap[r.provider_name] = { name: r.provider_name, role_group: r.role_group || '', licenses: [] }
-      providerMap[r.provider_name].licenses.push(r)
-      stateSet.add(r.state)
-    }
-    const providers = Object.values(providerMap).sort((a,b) => a.name.localeCompare(b.name))
-    const states = [...stateSet].sort()
-
-    // ── KPI bar ────────────────────────────────────────
-    const today = new Date(); today.setHours(0,0,0,0)
-    const in60  = new Date(today); in60.setDate(in60.getDate() + 60)
-    let cntActive=0, cntExpiring=0, cntExpired=0, cntCollab=0
-    for (const r of rows) {
-      const exp = r.expiry_date ? new Date(r.expiry_date) : null
-      if (r.status === 'expired' || (exp && exp < today)) { cntExpired++ }
-      else if (exp && exp <= in60) { cntExpiring++ }
-      else if (r.status === 'active') { cntActive++ }
-      if (r.collab_physician) cntCollab++
-    }
-
-    const kpiCard = (icon, label, val, color) =>
-      `<div class="bg-white rounded-xl border border-gray-200 shadow-sm px-5 py-4 flex items-center gap-4">
-        <div class="w-10 h-10 rounded-xl ${color} flex items-center justify-center flex-shrink-0">
-          <i class="${icon} text-white"></i>
-        </div>
-        <div><p class="text-2xl font-bold text-gray-800">${val}</p><p class="text-xs text-gray-500 mt-0.5">${label}</p></div>
-      </div>`
-
-    // ── Status color helper (public, no lic numbers) ──
-    const pubStatusColor = (r) => {
-      const exp = r.expiry_date ? new Date(r.expiry_date) : null
-      if (r.status === 'expired' || (exp && exp < today))        return { bg:'bg-red-100',    text:'text-red-700',    ring:'ring-red-200' }
-      if (exp && exp <= in60)                                    return { bg:'bg-orange-100',  text:'text-orange-700', ring:'ring-orange-200' }
-      if (r.status === 'pending' || r.status === 'in_progress')  return { bg:'bg-yellow-50',   text:'text-yellow-700', ring:'ring-yellow-200' }
-      if (r.status === 'active')                                 return { bg:'bg-green-100',   text:'text-green-700',  ring:'ring-green-200' }
-      return { bg:'bg-gray-100', text:'text-gray-600', ring:'ring-gray-200' }
-    }
-
-    const fmtDate = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : ''
-    const statusLabel = s => ({ active:'Active', pending:'Pending', expired:'Expired', in_progress:'In Progress', inactive:'Inactive' }[s] || s)
-
-    // ── Matrix table ───────────────────────────────────
-    const matrixRows = providers.map(prov => {
-      const licByState = {}
-      for (const l of prov.licenses) licByState[l.state] = l
-
-      const cells = states.map(st => {
-        const l = licByState[st]
-        if (!l) return `<td class="px-2 py-2 text-center"><span class="text-gray-200 text-xs">—</span></td>`
-        const c = pubStatusColor(l)
-        const collabDot = l.collab_physician
-          ? `<span class="ml-1 inline-block w-2 h-2 rounded-full bg-purple-500 align-middle" title="Collab: ${l.collab_physician}"></span>` : ''
-        const cpaDot = cpaPending(l)
-          ? `<span class="ml-0.5 inline-block w-2 h-2 rounded-full bg-amber-400 align-middle" title="CPA pending: ${escHtml(l.notes)}"></span>` : ''
-        const expTip = l.expiry_date ? ` title="Expires ${fmtDate(l.expiry_date)}"` : ''
-        return `<td class="px-2 py-2 text-center">
-          <span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring} whitespace-nowrap"${expTip}>
-            ${statusLabel(l.status)}${collabDot}${cpaDot}
-          </span>
-        </td>`
-      }).join('')
-
-      const rgBadge = prov.role_group
-        ? `<span class="ml-2 text-xs text-gray-400 font-normal">${prov.role_group}</span>` : ''
-
-      return `<tr class="border-b border-gray-100 hover:bg-blue-50/30 transition">
-        <td class="px-3 py-2 font-semibold text-gray-700 text-sm whitespace-nowrap sticky left-0 bg-white z-10">
-          ${prov.name}${rgBadge}
-        </td>
-        ${cells}
-      </tr>`
-    }).join('')
-
-    const matrixHeader = `<tr class="bg-gray-50 border-b border-gray-200">
-      <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 sticky left-0 bg-gray-50 z-10 min-w-[160px]">Provider</th>
-      ${states.map(s => `<th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 min-w-[90px]">${s}</th>`).join('')}
-    </tr>`
-
-    // ── Legend ─────────────────────────────────────────
-    const legend = `<div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
-      <span class="font-semibold text-gray-600 mr-1">Legend:</span>
-      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 ring-1 ring-green-200 font-semibold">Active</span>
-      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 ring-1 ring-orange-200 font-semibold">Expiring ≤60d</span>
-      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200 font-semibold">Pending</span>
-      <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 ring-1 ring-red-200 font-semibold">Expired</span>
-      <span class="inline-flex items-center gap-1 ml-2">
-        <span class="inline-block w-2 h-2 rounded-full bg-purple-500"></span>
-        <span>Collab MD on file</span>
-      </span>
-      <span class="inline-flex items-center gap-1">
-        <span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span>
-        <span class="text-amber-700 font-medium">CPA not yet signed</span>
-      </span>
-    </div>`
-
-    body.innerHTML = `
-      <!-- KPI bar -->
-      <div class="grid grid-cols-2 sm:grid-cols-4 gap-4 mb-8">
-        ${kpiCard('fas fa-check-circle', 'Active Licenses', cntActive, 'bg-green-500')}
-        ${kpiCard('fas fa-exclamation-triangle', 'Expiring Soon', cntExpiring, 'bg-orange-400')}
-        ${kpiCard('fas fa-times-circle', 'Expired', cntExpired, 'bg-red-500')}
-        ${kpiCard('fas fa-handshake', 'Collab Agreements', cntCollab, 'bg-purple-500')}
-      </div>
-
-      <!-- Matrix -->
-      <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
-        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4 flex-wrap">
-          <div>
-            <h2 class="text-base font-bold text-gray-800">State Licensing Matrix</h2>
-            <p class="text-xs text-gray-400 mt-0.5">${providers.length} provider${providers.length!==1?'s':''} &nbsp;·&nbsp; ${states.length} state${states.length!==1?'s':''} &nbsp;·&nbsp; ${rows.length} license record${rows.length!==1?'s':''}</p>
-          </div>
-          ${legend}
-        </div>
-        <div class="overflow-x-auto">
-          <table class="w-full border-collapse text-sm">
-            <thead>${matrixHeader}</thead>
-            <tbody>${matrixRows}</tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- Provider detail list -->
-      <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
-        <div class="px-5 py-4 border-b border-gray-100">
-          <h2 class="text-base font-bold text-gray-800">Provider Detail</h2>
-          <p class="text-xs text-gray-400 mt-0.5">License type, expiry date, and collaborating physician per provider</p>
-        </div>
-        <div class="divide-y divide-gray-100">
-          ${providers.map(prov => {
-            const pendingCpaLics = prov.licenses.filter(l => cpaPending(l))
-            const hasCpaPending = pendingCpaLics.length > 0
-            const licRows = prov.licenses.sort((a,b)=>a.state.localeCompare(b.state)).map(l => {
-              const c = pubStatusColor(l)
-              const expStr = l.expiry_date ? fmtDate(l.expiry_date) : '—'
-              const collabStr = l.collab_physician
-                ? `<span class="ml-2 text-xs text-purple-600"><i class="fas fa-handshake mr-1"></i>${l.collab_physician}${l.collab_expiry ? ' · exp ' + fmtDate(l.collab_expiry) : ''}</span>` : ''
-              const cpaBadge = cpaPending(l) ? `<td class="px-4 py-2">${cpaBadgeHtml(l.notes)}</td>` : '<td class="px-4 py-2"></td>'
-              const permBadge = l.permitted_actions ? `<span class="ml-1 text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''
-              return `<tr class="border-b border-gray-50 last:border-0">
-                <td class="px-4 py-2 font-medium text-gray-700 text-sm w-14">${l.state}</td>
-                <td class="px-4 py-2 text-xs text-gray-500">${l.license_type || '—'}</td>
-                <td class="px-4 py-2">
-                  <span class="px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring}">${statusLabel(l.status)}</span>
-                </td>
-                <td class="px-4 py-2 text-xs text-gray-500">${expStr}${collabStr}${permBadge}</td>
-                ${cpaBadge}
-              </tr>`
-            }).join('')
-            return `<details class="group">
-              <summary class="px-5 py-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between select-none list-none">
-                <span class="font-semibold text-gray-700 text-sm flex items-center gap-2 flex-wrap">
-                  ${prov.name} <span class="text-xs font-normal text-gray-400">${prov.role_group}</span>
-                  ${hasCpaPending ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300"><i class="fas fa-exclamation-triangle text-[10px]"></i>CPA Pending (${pendingCpaLics.length} state${pendingCpaLics.length!==1?'s':''})</span>` : ''}
-                </span>
-                <span class="text-xs text-gray-400 flex-shrink-0">${prov.licenses.length} license${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
-              </summary>
-              <div class="px-4 pb-3">
-                <table class="w-full text-sm"><tbody>${licRows}</tbody></table>
-              </div>
-            </details>`
-          }).join('')}
-        </div>
-      </div>`
+    // Delegate all rendering to the shared helper
+    body.innerHTML = buildPublicLicensingHTML(data)
 
   } catch(err) {
     body.innerHTML = `<div class="text-center text-red-500 py-16">
