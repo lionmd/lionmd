@@ -14678,6 +14678,27 @@ function licDrawMatrix() {
     ? allStates.filter(s => licState.pinnedStates.includes(s))
     : allStates
 
+  // Build chip bar HTML outside the main template literal to avoid nested-backtick issues
+  const allStatesBtn = '<button onclick="licState.pinnedStates=[];licDrawMatrix()" class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition ' +
+    (licState.pinnedStates.length === 0 ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600') +
+    '">All states</button>'
+
+  const stateChips = allStates.map(s => {
+    const selected = licState.pinnedStates.includes(s)
+    const hasCpaIssue = providers.some(ct => { const l = licMap[ct.id + '_' + s]; return l && (cpaBlocksActive(l) || cpaPending(l)) })
+    const cls = selected
+      ? 'bg-blue-600 text-white border-blue-600'
+      : hasCpaIssue
+        ? 'bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100'
+        : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'
+    return '<button onclick="licTogglePinnedState(\'' + s + '\')" class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition ' + cls + '">' +
+      s + (hasCpaIssue ? ' \u26a0' : '') + '</button>'
+  }).join('')
+
+  const filterNote = licState.pinnedStates.length > 0
+    ? '<p class="text-[10px] text-blue-600 mt-1.5 font-medium">Showing ' + visibleStates.length + ' of ' + allStates.length + ' states \u00b7 <button onclick="licState.pinnedStates=[];licDrawMatrix()" class="underline">Clear filter</button></p>'
+    : ''
+
   body.innerHTML = `
   <div class="p-2">
     <!-- Legend -->
@@ -14694,22 +14715,10 @@ function licDrawMatrix() {
     <div class="mb-3 px-2">
       <div class="flex items-center gap-2 flex-wrap">
         <span class="text-[10px] font-bold text-gray-400 uppercase tracking-wider flex-shrink-0">Filter columns:</span>
-        <button onclick="licState.pinnedStates=[];licDrawMatrix()"
-          class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition
-            ${licState.pinnedStates.length === 0 ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'}">
-          All states
-        </button>
-        ${allStates.map(s => {
-          const selected = licState.pinnedStates.includes(s)
-          const hasCpaIssue = providers.some(ct => { const l = licMap[ct.id+'_'+s]; return l && (cpaBlocksActive(l)||cpaPending(l)) })
-          return `<button onclick="licTogglePinnedState('${s}')"
-            class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition
-              ${selected ? 'bg-blue-600 text-white border-blue-600' : hasCpaIssue ? 'bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600'}">
-            ${s}${hasCpaIssue ? ' ⚠' : ''}
-          </button>`
-        }).join('')}
+        ${allStatesBtn}
+        ${stateChips}
       </div>
-      ${licState.pinnedStates.length > 0 ? `<p class="text-[10px] text-blue-600 mt-1.5 font-medium">Showing ${visibleStates.length} of ${allStates.length} states · <button onclick="licState.pinnedStates=[];licDrawMatrix()" class="underline">Clear filter</button></p>` : ''}
+      ${filterNote}
     </div>
 
     <div class="overflow-x-auto">
