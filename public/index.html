@@ -1306,8 +1306,13 @@ async function api(path, options = {}) {
   const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
   if (state.token) headers['Authorization'] = 'Bearer ' + state.token
   const res = await fetch(path, { ...options, headers })
-  if (res.status === 401) { logout(); return }
-  if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `API error ${res.status}`) }
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}))
+    const msg = e.error || `API error ${res.status}`
+    // Only auto-logout on 401 for non-mutating requests; for mutations always surface the error
+    if (res.status === 401 && !options.method) { logout(); return }
+    throw new Error(msg)
+  }
   return res.json()
 }
 

@@ -2591,20 +2591,32 @@ async function signToken(payload: object, env?: Bindings): Promise<string> {
 }
 
 async function verifyToken(token: string, env?: Bindings): Promise<any | null> {
+  // Try env secret first, then always retry with the fallback.
+  // This ensures tokens issued before TOKEN_SECRET was set (or during a secret rotation)
+  // remain valid so users are never silently logged out mid-session.
+  const secrets: string[] = []
+  const envSecret = (env as any)?.TOKEN_SECRET
+  if (envSecret) secrets.push(envSecret)
+  if (!secrets.includes(TOKEN_SECRET_FALLBACK)) secrets.push(TOKEN_SECRET_FALLBACK)
+
   try {
     const [data, sigHex] = token.split('.')
     if (!data || !sigHex) return null
     const enc = new TextEncoder()
-    const secret = getTokenSecret(env)
-    const key = await crypto.subtle.importKey(
-      'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
-    )
     const sigBytes = new Uint8Array(sigHex.match(/.{2}/g)!.map(h => parseInt(h, 16)))
-    const valid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(data))
-    if (!valid) return null
-    const payload = JSON.parse(atob(data))
-    if (payload.exp && Date.now() > payload.exp) return null
-    return payload
+
+    for (const secret of secrets) {
+      const key = await crypto.subtle.importKey(
+        'raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['verify']
+      )
+      const valid = await crypto.subtle.verify('HMAC', key, sigBytes, enc.encode(data))
+      if (valid) {
+        const payload = JSON.parse(atob(data))
+        if (payload.exp && Date.now() > payload.exp) return null
+        return payload
+      }
+    }
+    return null
   } catch { return null }
 }
 
