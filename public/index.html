@@ -2079,7 +2079,7 @@ function buildNav() {
     { id: 'onboarding',  icon: 'fa-user-plus',        label: 'Onboarding' },
     { id: 'rates',       icon: 'fa-sliders-h',        label: 'Payment Rates' },
     { id: 'carevalidate',icon: 'fa-eye',              label: 'CareValidate View' },
-    { id: 'partner_view',icon: 'fa-share-alt',         label: 'Partner View' },
+    { id: 'lic_dashboard',icon: 'fa-map-marker-alt',   label: 'Licensing' },
     { id: 'users',       icon: 'fa-users-cog',        label: 'User Management' },
     { id: 'payments',      icon: 'fa-credit-card',       label: 'Client Payments' },
     { id: 'availability',  icon: 'fa-calendar-check',    label: 'Availability' },
@@ -14459,6 +14459,24 @@ function licDrawDashboard() {
   const cpaBlocked = all.filter(l => cpaBlocksActive(l))
 
   mc.innerHTML = `
+  <!-- Header: title + public view link -->
+  <div class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-xl font-bold text-gray-800"><i class="fas fa-map-marker-alt mr-2 text-blue-600"></i>Licensing Dashboard</h1>
+      <p class="text-sm text-gray-400 mt-0.5">Full provider state matrix &mdash; click any cell to view or edit</p>
+    </div>
+    <div class="flex items-center gap-2">
+      <a href="/licensing/public" target="_blank"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-600 hover:border-blue-400 hover:text-blue-600 transition shadow-sm">
+        <i class="fas fa-external-link-alt text-xs"></i> Public View
+      </a>
+      <a href="/licensing/public" target="_blank"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-200 bg-purple-50 text-sm text-purple-700 hover:bg-purple-100 transition shadow-sm">
+        <i class="fas fa-share-alt text-xs"></i> Partner View
+      </a>
+    </div>
+  </div>
+
   <!-- KPI bar -->
   <div class="grid grid-cols-2 sm:grid-cols-3 ${cpaBlocked.length > 0 ? 'lg:grid-cols-7' : 'lg:grid-cols-6'} gap-3 mb-5">
     <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
