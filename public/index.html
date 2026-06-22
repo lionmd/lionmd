@@ -4958,9 +4958,9 @@ function renderContractors() {
 
     <!-- Contractor Add/Edit Modal -->
     <div id="contractorModal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
-      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
-        <h3 class="text-lg font-bold text-gray-800 mb-5" id="contractorModalTitle">Add Contractor</h3>
-        <div class="space-y-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col" style="max-height:92vh">
+        <h3 class="text-lg font-bold text-gray-800 px-6 pt-6 pb-4 flex-shrink-0" id="contractorModalTitle">Add Contractor</h3>
+        <div class="space-y-4 overflow-y-auto flex-1 px-6 pb-2">
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1.5">Group</label>
             <select id="ctRoleGroup" class="w-full" onchange="$('ctExternalCpaSection').classList.toggle('hidden', this.value!=='Physician')">
@@ -5042,9 +5042,9 @@ function renderContractors() {
               placeholder="e.g. CA: supervising 2 NPs at Acme Clinic&#10;TX: 3 agreements at external practice"></textarea>
             <p class="text-xs text-gray-400 mt-1">List any CPA agreements with other organizations so we can track capacity limits.</p>
           </div>
+          <input type="hidden" id="ctId"/>
         </div>
-        <input type="hidden" id="ctId"/>
-        <div class="flex gap-3 mt-6">
+        <div class="flex gap-3 px-6 py-4 border-t border-gray-100 flex-shrink-0">
           <button onclick="saveContractor()" class="flex-1 btn-primary py-3 rounded-xl font-semibold">Save</button>
           <button onclick="$('contractorModal').classList.add('hidden')" class="flex-1 py-3 rounded-xl border border-gray-200 text-gray-600 font-medium hover:bg-gray-50">Cancel</button>
         </div>
