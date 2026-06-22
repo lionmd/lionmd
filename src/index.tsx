@@ -3561,8 +3561,9 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
 
   if (period_key) { where += ' AND s.period_key=?'; params.push(period_key) }
   if (search) {
-    where += ' AND (c.patient_name LIKE ? OR c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
-    params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+    // HIPAA: patient_name excluded from provider search — search by case ID and org only
+    where += ' AND (c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
+    params.push(`%${search}%`, `%${search}%`)
   }
 
   const countResult = await c.env.DB.prepare(
@@ -3581,7 +3582,13 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
      LIMIT ? OFFSET ?`
   ).bind(...params, limit, offset).all()
 
-  return c.json({ total: countResult?.total || 0, page, limit, data: rows.results })
+  // HIPAA: never expose full patient name to provider portal — reduce to initials server-side
+  const masked = (rows.results as any[]).map((r: any) => {
+    const words = (r.patient_name || '').trim().split(/\s+/).filter(Boolean)
+    return { ...r, patient_name: words.length ? words.map((w: string) => w[0].toUpperCase() + '.').join('') : '' }
+  })
+
+  return c.json({ total: countResult?.total || 0, page, limit, data: masked })
 })
 
 // ── Admin: GET /api/admin/contractors/:id/licenses ────────────────

@@ -13406,7 +13406,7 @@ function ppDrawConsults() {
           ${periods.map(p => `<option value="${p.period_key}" ${p.period_key===period?'selected':''}>${escHtml(p.period_label||p.period_key)}</option>`).join('')}
         </select>
       </div>
-      <input id="ppCSearch" type="text" placeholder="Search patient, case ID, org…"
+      <input id="ppCSearch" type="text" placeholder="Search case ID or org…"
         value="${escHtml(search)}"
         oninput="ppConsultState.search=this.value; ppConsultState.page=1; clearTimeout(ppConsultState._t); ppConsultState._t=setTimeout(ppLoadConsults,350)"
         class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm w-56 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
@@ -13420,7 +13420,7 @@ function ppDrawConsults() {
           <thead>
             <tr class="border-b border-gray-100 text-left bg-gray-50">
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
-              <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Patient</th>
+              <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Patient <span class="normal-case font-normal text-gray-400 ml-1">(initials only)</span></th>
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Organization</th>
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Decision</th>
@@ -13438,7 +13438,7 @@ function ppDrawConsults() {
               <tr class="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                 <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">${r.decision_date ? new Date(r.decision_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'}</td>
                 <td class="px-4 py-3">
-                  <p class="font-medium text-gray-800">${escHtml(r.patient_name || '—')}</p>
+                  <p class="font-medium text-gray-800 font-mono tracking-wider text-gray-500">${escHtml(r.patient_name || '—')}</p>
                   ${r.case_id_short ? `<p class="text-xs text-gray-400">${escHtml(r.case_id_short)}</p>` : ''}
                 </td>
                 <td class="px-4 py-3 text-gray-600 max-w-[160px] truncate">${escHtml(r.organization_name || '—')}</td>
