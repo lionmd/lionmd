@@ -4475,7 +4475,7 @@ function renderPaystubContent(data) {
               <tr>
                 <th class="text-left px-3 py-2 text-gray-500 font-semibold rounded-l-xl">Case ID</th>
                 <th class="text-left px-3 py-2 text-gray-500 font-semibold">Date</th>
-                <th class="text-left px-3 py-2 text-gray-500 font-semibold">Patient</th>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold">Patient <span class="font-normal text-gray-400">(initials)</span></th>
                 <th class="text-left px-3 py-2 text-gray-500 font-semibold">Organization</th>
                 <th class="text-left px-3 py-2 text-gray-500 font-semibold">Type</th>
                 <th class="text-right px-3 py-2 text-gray-500 font-semibold rounded-r-xl">Amount</th>
@@ -4486,7 +4486,7 @@ function renderPaystubContent(data) {
                 <tr class="border-b border-gray-50">
                   <td class="px-3 py-2 font-mono text-blue-600">${r.case_id_short || r.case_id?.substring(0,8)}</td>
                   <td class="px-3 py-2 text-gray-500">${(r.decision_date||'').substring(0,10)}</td>
-                  <td class="px-3 py-2 text-gray-700">${r.patient_name}</td>
+                  <td class="px-3 py-2 font-mono text-gray-500 tracking-wider">${(r.patient_name||'').trim().split(/\s+/).filter(Boolean).map(w=>w[0].toUpperCase()+'.').join('')||'—'}</td>
                   <td class="px-3 py-2 text-gray-500 max-w-[120px] truncate">${r.organization_name}</td>
                   <td class="px-3 py-2">${visitTypeBadge(r.visit_type, r.carevalidate_fee, r.is_orderly)}</td>
                   <td class="px-3 py-2 text-right font-semibold text-purple-600">${fmt(r.contractor_fee)}</td>
@@ -4656,11 +4656,15 @@ async function downloadPaystub() {
     yPos = doc.lastAutoTable.finalY + 10
   }
 
-  // Detail table
+  // Detail table — mask patient names to initials for HIPAA compliance
+  const maskInitials = name => {
+    const words = (name || '').trim().split(/\s+/).filter(Boolean)
+    return words.length ? words.map(w => w[0].toUpperCase() + '.').join('') : '—'
+  }
   const detailRows = (currentPaystubData.consults || []).map(r => [
     r.case_id_short || r.case_id?.substring(0, 8),
     (r.decision_date || '').substring(0, 10),
-    r.patient_name,
+    maskInitials(r.patient_name),
     r.organization_name,
     visitTypeLabel(r.visit_type),
     fmt(r.contractor_fee)
