@@ -5362,6 +5362,10 @@ async function saveContractor() {
     $('contractorModal').classList.add('hidden')
     showToast('Contractor saved!', 'success')
     renderContractors()
+    // Refresh the profile panel if it's open for this contractor
+    if (id && ctDetailState.contractorId === parseInt(id)) {
+      obOpenContractorDetail(parseInt(id))
+    }
   } catch(e) { showToast('Error: ' + e.message, 'error') }
 }
 
