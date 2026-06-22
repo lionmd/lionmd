@@ -16600,7 +16600,7 @@ function avDrawProviderPage() {
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div>
           <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-times mr-2 text-red-500"></i>Block Out a Date</h2>
-          <p class="text-xs text-gray-400 mt-0.5">Out of town, vacation, limited day? Submit here — your team will be notified.</p>
+          <p class="text-xs text-gray-400 mt-0.5">Out of town, vacation, or limited day? Submit here — your team will follow up via email to confirm your availability.</p>
         </div>
       </div>
       <div class="px-5 py-4">
@@ -16612,12 +16612,17 @@ function avDrawProviderPage() {
           </div>
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1">Type</label>
-            <select id="avBlockType"
+            <select id="avBlockType" onchange="avToggleBlockLimit()"
               class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-300 outline-none">
               <option value="unavailable">🔴 Fully unavailable</option>
+              <option value="limited">🟡 Limited availability</option>
             </select>
           </div>
-
+          <div id="avBlockLimitWrap" class="hidden">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Approx. consults available <span class="font-normal text-gray-400">(team will confirm)</span></label>
+            <input type="number" min="1" max="99" value="3" id="avBlockLimit"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-300 outline-none">
+          </div>
           <div class="${''}">
             <label class="block text-xs font-semibold text-gray-600 mb-1">Reason <span class="font-normal text-gray-400">(optional — shared with admin)</span></label>
             <input type="text" id="avBlockReason" placeholder="e.g. Out of town, conference, vacation…"
