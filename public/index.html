@@ -16560,17 +16560,14 @@ function avDrawProviderPage() {
   mc.innerHTML = `
   <div class="max-w-3xl space-y-6">
 
-    <!-- Weekly Schedule Card -->
-    <div class="card p-0 overflow-hidden">
+    <!-- Weekly Schedule Card — greyed out, not editable by providers -->
+    <div class="card p-0 overflow-hidden opacity-50 pointer-events-none select-none">
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div>
           <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-week mr-2 text-teal-600"></i>Weekly Schedule</h2>
-          <p class="text-xs text-gray-400 mt-0.5">Set your default consult limit for each day of the week.</p>
+          <p class="text-xs text-gray-400 mt-0.5">Managed by your LionMD admin — contact your team to make changes.</p>
         </div>
-        <button onclick="avSaveSchedule()" id="avSaveSchedBtn"
-          class="btn-primary px-4 py-2 rounded-lg text-sm font-semibold flex items-center gap-1.5">
-          <i class="fas fa-save"></i> Save Schedule
-        </button>
+        <span class="text-xs text-gray-400 bg-gray-100 px-3 py-1.5 rounded-lg font-medium"><i class="fas fa-lock mr-1"></i>Admin only</span>
       </div>
       <div class="divide-y divide-gray-50">
         ${[1,2,3,4,5,6,0].map(dow => {
@@ -16585,14 +16582,13 @@ function avDrawProviderPage() {
             </div>
             <div class="flex items-center gap-2">
               <label class="text-xs text-gray-400">Max consults</label>
-              <input type="number" min="0" max="99" value="${maxC}"
-                id="avSched_${dow}" onchange="avRefreshDayRow(${dow})"
-                class="w-16 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 focus:ring-2 focus:ring-teal-300 outline-none">
-              <span id="avSchedStatus_${dow}" class="ml-1">${avStatusChip(maxC, true)}</span>
+              <input type="number" min="0" max="99" value="${maxC}" disabled
+                class="w-16 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 bg-gray-50 cursor-not-allowed">
+              <span class="ml-1">${avStatusChip(maxC, true)}</span>
             </div>
             <div class="flex-1">
-              <input type="text" value="${escHtml(loc)}" id="avSchedLoc_${dow}" placeholder="Location (optional)"
-                class="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-600 focus:ring-2 focus:ring-teal-300 outline-none">
+              <input type="text" value="${escHtml(loc)}" disabled placeholder="Location (optional)"
+                class="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-400 bg-gray-50 cursor-not-allowed">
             </div>
           </div>`
         }).join('')}
@@ -16616,17 +16612,12 @@ function avDrawProviderPage() {
           </div>
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1">Type</label>
-            <select id="avBlockType" onchange="avToggleBlockLimit()"
+            <select id="avBlockType"
               class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-300 outline-none">
               <option value="unavailable">🔴 Fully unavailable</option>
-              <option value="limited">🟡 Limited availability</option>
             </select>
           </div>
-          <div id="avBlockLimitWrap" class="hidden">
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Max consults that day</label>
-            <input type="number" min="1" max="99" value="3" id="avBlockLimit"
-              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-300 outline-none">
-          </div>
+
           <div class="${''}">
             <label class="block text-xs font-semibold text-gray-600 mb-1">Reason <span class="font-normal text-gray-400">(optional — shared with admin)</span></label>
             <input type="text" id="avBlockReason" placeholder="e.g. Out of town, conference, vacation…"
