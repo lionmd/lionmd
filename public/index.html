@@ -10452,7 +10452,7 @@ async function umBulkOpen() {
     return
   }
 
-  const noEmail = umBulkState.contractors.filter(c => !c.email).length
+  const noEmail = umBulkState.contractors.filter(c => !c.work_email && !c.email).length
   $('umBulkSubtitle').textContent =
     `${umBulkState.contractors.length} contractor${umBulkState.contractors.length !== 1 ? 's' : ''} without portal access` +
     (noEmail ? ` (${noEmail} missing email — cannot be invited)` : '')
@@ -10470,7 +10470,9 @@ function umBulkRenderList() {
   const items = $('umBulkItems')
   if (!items) return
   items.innerHTML = umBulkState.contractors.map(c => {
-    const hasEmail = !!c.email
+    const effEmail = c.work_email || c.email || ''
+    const hasEmail = !!effEmail
+    const isWork = !!c.work_email
     const checked = umBulkState.selected.has(c.id) ? 'checked' : ''
     const disabledAttr = hasEmail ? '' : 'disabled'
     const rowOpacity = hasEmail ? '' : 'opacity-50'
@@ -10482,7 +10484,9 @@ function umBulkRenderList() {
         <div class="flex-1 min-w-0">
           <div class="text-sm font-medium text-gray-800 truncate">${escHtml(c.name || '—')}</div>
           ${hasEmail
-            ? `<div class="text-xs text-gray-400 truncate">${escHtml(c.email)}</div>`
+            ? `<div class="text-xs text-gray-400 truncate">${escHtml(effEmail)}
+                <span class="ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${isWork ? 'text-green-600 bg-green-50' : 'text-amber-500 bg-amber-50'}">${isWork ? 'work' : 'personal'}</span>
+               </div>`
             : `<div class="text-xs text-orange-400 font-semibold"><i class="fas fa-exclamation-triangle mr-1"></i>No email on file — cannot invite</div>`}
         </div>
         ${hasEmail ? `<span class="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-600 font-semibold flex-shrink-0">Will be invited</span>` : ''}
