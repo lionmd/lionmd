@@ -12701,13 +12701,7 @@ function ppDrawProfile(data) {
           <p class="text-xs text-gray-400 font-medium mb-1">NPI Number</p>
           <p class="text-sm font-mono text-gray-700">${escHtml(ct.npi || '—')} ${!ct.npi ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}</p>
         </div>
-        <div class="md:col-span-2">
-          <p class="text-xs text-gray-400 font-medium mb-1">States Licensed</p>
-          ${(ct.states_licensed || ob?.states_licensed) ? `
-          <div class="flex flex-wrap gap-1.5 mt-1">
-            ${(ct.states_licensed || ob?.states_licensed || '').split(',').map(s=>s.trim()).filter(Boolean).map(s=>`<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">${escHtml(s)}</span>`).join('')}
-          </div>` : `<p class="text-sm text-gray-400">— <button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button></p>`}
-        </div>
+
       </div>
     </div>
 
