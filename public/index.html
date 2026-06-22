@@ -10499,7 +10499,7 @@ function umBulkToggle(id, checked) {
 
 function umBulkSelectAll(on) {
   umBulkState.contractors
-    .filter(c => c.email)
+    .filter(c => c.work_email || c.email)
     .forEach(c => {
       if (on) umBulkState.selected.add(c.id)
       else umBulkState.selected.delete(c.id)
