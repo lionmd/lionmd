@@ -1262,7 +1262,7 @@
 // STATE
 // ════════════════════════════════════════════════════
 let state = {
-  role: null,          // 'admin' | 'carevalidate' | 'onboarding'
+  role: null,          // 'admin' | 'onboarding' | 'provider' | 'manager' | 'license_editor'
   user: null,          // { id, name, email, role }
   token: null,         // JWT session token
   periods: [],
@@ -1884,11 +1884,6 @@ function applyRoleUI(role, name) {
     roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 hidden md:block'
     if (subtitle) subtitle.textContent = adminInOb ? 'Onboarding' : 'Payroll'
     if (svBtn) svBtn.classList.remove('hidden')
-  } else if (role === 'carevalidate') {
-    roleTag.textContent = '🏥 CareValidate'
-    roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-blue-100 text-blue-800 hidden md:block'
-    if (subtitle) subtitle.textContent = 'CareValidate'
-    if (svBtn) svBtn.classList.add('hidden')
   } else if (role === 'provider') {
     roleTag.textContent = '🩺 Provider'
     roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-purple-100 text-purple-800 hidden md:block'
@@ -2081,15 +2076,10 @@ function buildNav() {
     { id: 'contractors', icon: 'fa-user-md',          label: 'Contractors' },
     { id: 'onboarding',  icon: 'fa-user-plus',        label: 'Onboarding' },
     { id: 'rates',       icon: 'fa-sliders-h',        label: 'Payment Rates' },
-    { id: 'carevalidate',icon: 'fa-eye',              label: 'CareValidate View' },
     { id: 'lic_dashboard',icon: 'fa-map-marker-alt',   label: 'Licensing' },
     { id: 'users',       icon: 'fa-users-cog',        label: 'User Management' },
     { id: 'payments',      icon: 'fa-credit-card',       label: 'Client Payments' },
     { id: 'availability',  icon: 'fa-calendar-check',    label: 'Availability' },
-  ]
-  const cvNav = [
-    { id: 'cv_dashboard', icon: 'fa-chart-bar', label: 'Summary' },
-    { id: 'cv_detail',    icon: 'fa-list',      label: 'Detail View' },
   ]
   const obNav = [
     { id: 'onboarding',  icon: 'fa-user-plus',   label: 'Onboarding' },
@@ -2128,7 +2118,7 @@ function buildNav() {
   else if (state.role === 'license_editor') items = licEditorNav
   else if (inObView) items = obNav
   else if (state.role === 'admin') items = adminNav
-  else items = cvNav
+  else items = []
   $('sidebarNav').innerHTML = items.map(item => `
     <button onclick="navigate('${item.id}')" id="nav_${item.id}"
       class="nav-item w-full flex items-center gap-3 px-3 py-3 rounded-lg text-gray-400 hover:text-white transition-all">
@@ -2147,10 +2137,7 @@ const PAGE_PATHS = {
   contractors:        '/contractors',
   onboarding:         '/onboarding',
   rates:              '/rates',
-  carevalidate:       '/carevalidate',
   partner_view:       '/partner-view',
-  cv_dashboard:       '/cv/dashboard',
-  cv_detail:          '/cv/detail',
   users:              '/users',
   payments:           '/payments',
   provider_profile:    '/portal/profile',
@@ -2200,10 +2187,10 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', carevalidate:'CareValidate View', partner_view:'Partner View', cv_dashboard:'Summary', cv_detail:'Detail View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', partner_view:'Partner View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
   $('pageTitle').textContent = titles[page] || page
 
-  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, carevalidate: renderCVView, partner_view: renderPartnerView, cv_dashboard: renderCVDashboard, cv_detail: renderCVDetail, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, partner_view: renderPartnerView, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
   availability: renderAvailabilityDashboard, provider_availability: renderProviderAvailability,
   lic_dashboard: renderLicDashboard, lic_edit: renderLicEdit }
   if (pages[page]) pages[page]()
@@ -2247,8 +2234,8 @@ async function loadInitialData() {
 
     // Resolve target page BEFORE selectPeriod so its navigate(state.currentPage) uses the right page
     const savedPage = localStorage.getItem('lmd_last_page')
-    const defaultPage = state.role === 'carevalidate' ? 'cv_dashboard' : state.role === 'license_editor' ? 'lic_dashboard' : 'dashboard'
-    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','carevalidate','partner_view','cv_dashboard','cv_detail','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
+    const defaultPage = state.role === 'license_editor' ? 'lic_dashboard' : 'dashboard'
+    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','partner_view','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
     state.currentPage = (savedPage && validPages.includes(savedPage)) ? savedPage : defaultPage
 
     if (state.periods.length > 0) {
@@ -5654,13 +5641,6 @@ async function unmatchedDoQuickAdd(doctorName, rowIdx, periodKey) {
 }
 
 // ════════════════════════════════════════════════════
-// CAREVALIDATE VIEW (Admin sees this, CV sees it too)
-// ════════════════════════════════════════════════════
-function renderCVView() {
-  if (!state.currentPeriod || !state.currentSummary) { $('mainContent').innerHTML = noDataMsg(); return }
-  renderCVDashboard()
-}
-
 async function renderCVDashboard() {
   if (!state.currentPeriod) {
     $('mainContent').innerHTML = noDataMsg(); return
@@ -5796,12 +5776,6 @@ async function renderCVDashboard() {
           </div>
         </div>` : ''}
     </div>`
-}
-
-async function renderCVDetail() {
-  if (!state.currentPeriod) { $('mainContent').innerHTML = noDataMsg(); return }
-  consultsState = { page: 1, data: [], total: 0, search: '', doctor: '', visitType: '', sortBy: 'decision_date', sortDir: 'desc' }
-  await renderConsults()
 }
 
 // ════════════════════════════════════════════════════
@@ -10277,7 +10251,6 @@ function umDrawPage() {
             <label class="block text-xs font-semibold text-gray-600 mb-1">Role *</label>
             <select id="umRole" class="w-full" onchange="umHandleRoleChange(this.value)">
               <option value="admin">👑 Admin — Full access</option>
-              <option value="carevalidate">🏥 CareValidate — Summary &amp; Detail view only</option>
               <option value="onboarding">🟢 Onboarding — Onboarding pipeline only</option>
               <option value="provider">🩺 Provider — Self-service profile portal</option>
               <option value="manager">🗂️ Manager — Licenses, consults, no financials</option>
@@ -10714,7 +10687,7 @@ function umBulkCopyLink(btn, link) {
 
 function umRoleBadge(role) {
   if (role === 'admin') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-800">👑 Admin</span>'
-  if (role === 'carevalidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-800">🏥 CareValidate</span>'
+  if (role === 'carevalidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Legacy</span>'
   if (role === 'provider') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800">🩺 Provider</span>'
   if (role === 'candidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800">📋 Applicant</span>'
   if (role === 'manager') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 text-teal-800">🗂️ Manager</span>'
@@ -16414,9 +16387,7 @@ window.addEventListener('DOMContentLoaded', async () => {
     '/onboarding':         'onboarding',
     '/onboarding/calendar':'onboarding',
     '/rates':              'rates',
-    '/carevalidate':       'carevalidate',
-    '/cv/dashboard':       'cv_dashboard',
-    '/cv/detail':          'cv_detail',
+
     '/users':              'users',
     '/payments':           'payments',
     '/portal/profile':     'provider_profile',

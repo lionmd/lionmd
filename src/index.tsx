@@ -4595,7 +4595,7 @@ app.get('/api/availability/blocks', async (c) => {
 
   await ensureAvailabilitySchema(c.env.DB)
 
-  const isAdmin = payload.role === 'admin' || payload.role === 'manager' || payload.role === 'carevalidate'
+  const isAdmin = payload.role === 'admin' || payload.role === 'manager'
   const requestedId = c.req.query('contractor_id')
   const from = c.req.query('from') || new Date().toISOString().slice(0, 10)
   const to   = c.req.query('to')   || (() => { const d = new Date(); d.setDate(d.getDate() + 60); return d.toISOString().slice(0, 10) })()
