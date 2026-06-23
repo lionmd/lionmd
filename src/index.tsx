@@ -4871,7 +4871,7 @@ app.delete('/api/availability/blocks/:id', async (c) => {
 
   // Fetch block info BEFORE deleting (for Slack notification)
   const blk = await c.env.DB.prepare(
-    `SELECT pb.block_date, pb.block_type, pb.reason, pb.consult_limit,
+    `SELECT pb.block_date, pb.block_type, pb.reason, pb.max_consults,
             co.name AS provider_name
      FROM provider_blocks pb
      JOIN contractors co ON co.id = pb.contractor_id
