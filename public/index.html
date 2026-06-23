@@ -14671,7 +14671,7 @@ function licOpenImport(mode) {
           <h3 class="font-bold text-gray-800 text-base">Import Licenses from Excel</h3>
           <p class="text-xs text-gray-400 mt-0.5">Upload a filled template. Existing licenses (matched by State) will be updated.</p>
         </div>
-        <button onclick="document.getElementById('licImportModal').remove()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+        <button id="licImportCloseBtn" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
       </div>
       <div class="px-6 py-5 flex-1 overflow-y-auto">
         <!-- Step 1: file picker -->
@@ -14681,10 +14681,10 @@ function licOpenImport(mode) {
             <p class="text-sm font-semibold text-gray-600">Click to select your filled template</p>
             <p class="text-xs text-gray-400 mt-1">.xlsx files only</p>
           </label>
-          <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden" onchange="licParseImportFile(this.files[0], '${mode}')">
+          <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden">
           <p class="text-xs text-gray-400 mt-3 text-center">
             Don't have a template? 
-            <button onclick="licDownloadTemplate('${mode}')" class="text-indigo-600 underline">Download one first</button>
+            <button id="licImportTplBtn" class="text-indigo-600 underline">Download one first</button>
           </p>
         </div>
         <!-- Step 2: preview (populated by licParseImportFile) -->
@@ -14692,7 +14692,14 @@ function licOpenImport(mode) {
       </div>
     </div>`
   document.body.appendChild(modal)
+
+  // Wire all listeners after DOM insertion to avoid inline-handler scope issues
   modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.getElementById('licImportCloseBtn').addEventListener('click', () => modal.remove())
+  document.getElementById('licImportTplBtn').addEventListener('click', () => licDownloadTemplate(mode))
+  document.getElementById('licImportFileInput').addEventListener('change', function() {
+    if (this.files && this.files[0]) licParseImportFile(this.files[0], mode)
+  })
 }
 
 // ── Parse the uploaded file and show preview ─────────────────────
@@ -14801,7 +14808,10 @@ async function licParseImportFile(file, mode) {
       <p class="text-sm font-semibold text-gray-600">Click to select your filled template</p>
       <p class="text-xs text-gray-400 mt-1">.xlsx files only</p>
     </label>
-    <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden" onchange="licParseImportFile(this.files[0], '${mode}')">`
+    <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden">`
+    document.getElementById('licImportFileInput').addEventListener('change', function() {
+      if (this.files && this.files[0]) licParseImportFile(this.files[0], mode)
+    })
   }
 }
 
