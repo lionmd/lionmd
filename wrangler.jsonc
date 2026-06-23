@@ -10,5 +10,9 @@
       "database_name": "lionmd-production",
       "database_id": "59157a2b-8d16-468c-bae0-47c126a09e1f"
     }
-  ]
+  ],
+  // NOTE: Cloudflare Pages does not support cron triggers natively.
+  // To run scheduled license expiry checks, use a standalone Cloudflare Worker
+  // with a cron trigger that calls GET /api/admin/check-expiring-licenses
+  // with a shared secret header, OR use an external scheduler (e.g. GitHub Actions cron).
 }

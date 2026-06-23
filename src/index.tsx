@@ -3573,7 +3573,25 @@ app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
 
 // ── DELETE /api/provider/licenses/:id ────────────────────────────
 app.delete('/api/provider/licenses/:id', requireProvider, async (c) => {
-  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
+  const u = c.get('user') as any
+  const lid = c.req.param('id')
+  // Fetch license + provider name BEFORE deleting
+  const lic = await c.env.DB.prepare(
+    `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
+     FROM provider_licenses pl
+     JOIN contractors co ON co.id = pl.contractor_id
+     WHERE pl.id=?`
+  ).bind(lid).first() as any
+  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(lid).run()
+  if (lic) {
+    await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *License Deleted* (by provider)`, [
+      { title: 'Provider', value: lic.provider_name || '—' },
+      { title: 'State', value: lic.state || '—' },
+      { title: 'License #', value: lic.license_number || '—' },
+      { title: 'Type', value: lic.license_type || '—' },
+      { title: 'Expiry', value: lic.expiry_date || '—' },
+    ])
+  }
   return c.json({ ok: true })
 })
 
@@ -3724,7 +3742,23 @@ app.patch('/api/admin/licenses/:id/collab-clear', requireAdmin, async (c) => {
 
 // ── Admin: DELETE /api/admin/licenses/:id ────────────────────────
 app.delete('/api/admin/licenses/:id', requireAdmin, async (c) => {
-  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
+  const lid = c.req.param('id')
+  const lic = await c.env.DB.prepare(
+    `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
+     FROM provider_licenses pl
+     JOIN contractors co ON co.id = pl.contractor_id
+     WHERE pl.id=?`
+  ).bind(lid).first() as any
+  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(lid).run()
+  if (lic) {
+    await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *License Deleted* (by admin)`, [
+      { title: 'Provider', value: lic.provider_name || '—' },
+      { title: 'State', value: lic.state || '—' },
+      { title: 'License #', value: lic.license_number || '—' },
+      { title: 'Type', value: lic.license_type || '—' },
+      { title: 'Expiry', value: lic.expiry_date || '—' },
+    ])
+  }
   return c.json({ ok: true })
 })
 
@@ -3823,7 +3857,23 @@ app.put('/api/license-editor/licenses/:id', requireLicenseEditor, async (c) => {
 
 // ── DELETE /api/license-editor/licenses/:id ───────────────────────
 app.delete('/api/license-editor/licenses/:id', requireLicenseEditor, async (c) => {
-  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(c.req.param('id')).run()
+  const lid = c.req.param('id')
+  const lic = await c.env.DB.prepare(
+    `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
+     FROM provider_licenses pl
+     JOIN contractors co ON co.id = pl.contractor_id
+     WHERE pl.id=?`
+  ).bind(lid).first() as any
+  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(lid).run()
+  if (lic) {
+    await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *License Deleted* (by license editor)`, [
+      { title: 'Provider', value: lic.provider_name || '—' },
+      { title: 'State', value: lic.state || '—' },
+      { title: 'License #', value: lic.license_number || '—' },
+      { title: 'Type', value: lic.license_type || '—' },
+      { title: 'Expiry', value: lic.expiry_date || '—' },
+    ])
+  }
   return c.json({ ok: true })
 })
 
@@ -4131,9 +4181,24 @@ app.delete('/api/manager/contractors/:id/licenses/:lid', requireManager, async (
     const ok = await managerCanAccessContractor(c.env.DB, user.id, id)
     if (!ok) return c.json({ error: 'Access denied' }, 403)
   }
+  const lic = await c.env.DB.prepare(
+    `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
+     FROM provider_licenses pl
+     JOIN contractors co ON co.id = pl.contractor_id
+     WHERE pl.id=? AND pl.contractor_id=?`
+  ).bind(lid, id).first() as any
   await c.env.DB.prepare(
     `DELETE FROM provider_licenses WHERE id=? AND contractor_id=?`
   ).bind(lid, id).run()
+  if (lic) {
+    await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *License Deleted* (by manager)`, [
+      { title: 'Provider', value: lic.provider_name || '—' },
+      { title: 'State', value: lic.state || '—' },
+      { title: 'License #', value: lic.license_number || '—' },
+      { title: 'Type', value: lic.license_type || '—' },
+      { title: 'Expiry', value: lic.expiry_date || '—' },
+    ])
+  }
   return c.json({ ok: true })
 })
 
@@ -4804,8 +4869,25 @@ app.delete('/api/availability/blocks/:id', async (c) => {
 
   const id = c.req.param('id')
 
+  // Fetch block info BEFORE deleting (for Slack notification)
+  const blk = await c.env.DB.prepare(
+    `SELECT pb.block_date, pb.block_type, pb.reason, pb.consult_limit,
+            co.name AS provider_name
+     FROM provider_blocks pb
+     JOIN contractors co ON co.id = pb.contractor_id
+     WHERE pb.id=?`
+  ).bind(id).first() as any
+
   if (payload.role === 'admin') {
     await c.env.DB.prepare(`DELETE FROM provider_blocks WHERE id=?`).bind(id).run()
+    if (blk) {
+      await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *Block-out Removed* (by admin)`, [
+        { title: 'Provider', value: blk.provider_name || '—' },
+        { title: 'Date', value: blk.block_date || '—' },
+        { title: 'Type', value: blk.block_type || '—' },
+        { title: 'Reason', value: blk.reason || '—' },
+      ])
+    }
     return c.json({ ok: true })
   }
 
@@ -4816,6 +4898,14 @@ app.delete('/api/availability/blocks/:id', async (c) => {
     await c.env.DB.prepare(
       `DELETE FROM provider_blocks WHERE id=? AND contractor_id=? AND block_date >= date('now')`
     ).bind(id, pu.contractor_id).run()
+    if (blk) {
+      await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *Block-out Removed* (by provider)`, [
+        { title: 'Provider', value: blk.provider_name || '—' },
+        { title: 'Date', value: blk.block_date || '—' },
+        { title: 'Type', value: blk.block_type || '—' },
+        { title: 'Reason', value: blk.reason || '—' },
+      ])
+    }
     return c.json({ ok: true })
   }
 
@@ -5879,5 +5969,45 @@ for (const path of frontendPaths) {
     return c.redirect('/', 302)
   })
 }
+
+// ════════════════════════════════════════════════════════════════════
+// EXPIRING LICENSES — shared helper + admin trigger endpoint
+// Cloudflare Pages doesn't support native cron triggers.
+// Use GET /api/admin/check-expiring-licenses to trigger manually
+// or wire it from an external scheduler (GitHub Actions, etc.)
+// ════════════════════════════════════════════════════════════════════
+async function checkExpiringLicenses(env: Bindings): Promise<{ count: number; licenses: any[] }> {
+  if (!env.SLACK_WEBHOOK_URL) return { count: 0, licenses: [] }
+
+  const rows = await env.DB.prepare(`
+    SELECT pl.id, pl.state, pl.license_number, pl.license_type, pl.expiry_date,
+           co.name AS provider_name
+    FROM provider_licenses pl
+    JOIN contractors co ON co.id = pl.contractor_id
+    WHERE pl.expiry_date IS NOT NULL
+      AND pl.expiry_date != ''
+      AND date(pl.expiry_date) BETWEEN date('now') AND date('now', '+30 days')
+    ORDER BY pl.expiry_date ASC
+  `).all()
+
+  const licenses = rows.results as any[]
+  if (!licenses.length) return { count: 0, licenses: [] }
+
+  const lines = licenses.map(l => {
+    const daysLeft = Math.ceil((new Date(l.expiry_date).getTime() - Date.now()) / 86400000)
+    const urgency = daysLeft <= 7 ? '🔴' : daysLeft <= 14 ? '🟠' : '🟡'
+    return `${urgency} *${l.provider_name}* — ${l.state} ${l.license_type} #${l.license_number || '—'} expires *${l.expiry_date}* (${daysLeft}d)`
+  })
+
+  const text = `⚠️ *Expiring Licenses — ${licenses.length} license${licenses.length > 1 ? 's' : ''} expiring within 30 days*\n\n${lines.join('\n')}`
+  await sendSlack(env.SLACK_WEBHOOK_URL, text)
+  return { count: licenses.length, licenses }
+}
+
+// Admin-only endpoint to trigger the expiry check manually (or from external scheduler)
+app.get('/api/admin/check-expiring-licenses', requireAdmin, async (c) => {
+  const result = await checkExpiringLicenses(c.env)
+  return c.json({ ok: true, ...result })
+})
 
 export default app
