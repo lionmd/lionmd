@@ -27,7 +27,7 @@ async function sendSlack(webhookUrl: string, text: string, fields?: { title: str
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ blocks })
-  }).catch(() => {})
+  })
 }
 
 // ──────────────────────────────────────────────
@@ -3513,7 +3513,7 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
   if (c.env.SLACK_WEBHOOK_URL) {
     const ct = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(pu.contractor_id).first() as any
     if (ct) {
-      sendSlack(
+      await sendSlack(
         c.env.SLACK_WEBHOOK_URL,
         `🪪 *New License Added* by *${ct.name}*`,
         [
@@ -3553,7 +3553,7 @@ app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
   if (c.env.SLACK_WEBHOOK_URL) {
     const lic = await c.env.DB.prepare(`SELECT l.state as lic_state, c.name FROM provider_licenses l JOIN contractors c ON c.id=l.contractor_id WHERE l.id=?`).bind(id).first() as any
     if (lic) {
-      sendSlack(
+      await sendSlack(
         c.env.SLACK_WEBHOOK_URL,
         `✏️ *License Updated* by *${lic.name}*`,
         [
@@ -4755,7 +4755,7 @@ app.post('/api/availability/blocks', async (c) => {
     const ctSlack = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(contractorId).first() as any
     if (ctSlack) {
       const typeLabel = resolvedType === 'limited' ? `🟡 Limited (~${resolvedMax} consults)` : '🔴 Fully unavailable'
-      sendSlack(
+      await sendSlack(
         c.env.SLACK_WEBHOOK_URL,
         `📅 *Block-out Submitted* by *${ctSlack.name}*`,
         [
