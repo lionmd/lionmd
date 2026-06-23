@@ -3731,6 +3731,134 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
   return c.json({ total: countResult?.total || 0, page, limit, data: masked })
 })
 
+// ── POST /api/admin/licenses/import ──────────────────────────────
+// Bulk upsert licenses from Excel import. Body: { rows: [...] }
+// Each row: { contractor_id, state, license_number, license_type, expiry_date,
+//             status, notes, collab_physician, collab_expiry, permitted_actions, practice_type }
+// Upsert logic: if a license for (contractor_id, state) already exists → UPDATE, else → INSERT
+app.post('/api/admin/licenses/import', requireLicenseEditor, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const { rows } = await c.req.json() as any
+  if (!Array.isArray(rows) || rows.length === 0) return c.json({ error: 'No rows provided' }, 400)
+
+  let inserted = 0, updated = 0, skipped = 0
+  const errors: string[] = []
+
+  for (const row of rows) {
+    const cid = parseInt(row.contractor_id)
+    const state = (row.state || '').trim().toUpperCase()
+    if (!cid || !state) { skipped++; continue }
+
+    const license_number   = (row.license_number   || '').trim()
+    const license_type     = (row.license_type     || '').trim()
+    const expiry_date      = (row.expiry_date      || '').trim()
+    const status           = (row.status           || 'active').trim().toLowerCase()
+    const notes            = (row.notes            || '').trim()
+    const collab_physician = (row.collab_physician || '').trim()
+    const collab_expiry    = (row.collab_expiry    || '').trim()
+    const permitted_actions= (row.permitted_actions|| '').trim()
+    const practice_type    = (row.practice_type    || '').trim()
+
+    try {
+      // Check if a record already exists for this contractor + state
+      const existing = await c.env.DB.prepare(
+        `SELECT id FROM provider_licenses WHERE contractor_id=? AND state=?`
+      ).bind(cid, state).first() as any
+
+      if (existing) {
+        await c.env.DB.prepare(
+          `UPDATE provider_licenses
+           SET license_number=?, license_type=?, expiry_date=?, status=?, notes=?,
+               collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?,
+               updated_at=CURRENT_TIMESTAMP
+           WHERE id=?`
+        ).bind(license_number, license_type, expiry_date, status, notes,
+               collab_physician, collab_expiry, permitted_actions, practice_type,
+               existing.id).run()
+        updated++
+      } else {
+        await c.env.DB.prepare(
+          `INSERT INTO provider_licenses
+           (contractor_id, state, license_number, license_type, expiry_date, status, notes,
+            collab_physician, collab_expiry, permitted_actions, practice_type)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(cid, state, license_number, license_type, expiry_date, status, notes,
+               collab_physician, collab_expiry, permitted_actions, practice_type).run()
+        inserted++
+      }
+    } catch (e: any) {
+      errors.push(`Row ${state}/${cid}: ${e.message}`)
+      skipped++
+    }
+  }
+
+  return c.json({ ok: true, inserted, updated, skipped, errors })
+})
+
+// ── POST /api/provider/licenses/import ────────────────────────────
+// Provider self-import: same logic but locked to their own contractor_id
+app.post('/api/provider/licenses/import', requireProvider, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
+  const cid = pu.contractor_id
+
+  const { rows } = await c.req.json() as any
+  if (!Array.isArray(rows) || rows.length === 0) return c.json({ error: 'No rows provided' }, 400)
+
+  let inserted = 0, updated = 0, skipped = 0
+  const errors: string[] = []
+
+  for (const row of rows) {
+    const state = (row.state || '').trim().toUpperCase()
+    if (!state) { skipped++; continue }
+
+    const license_number   = (row.license_number   || '').trim()
+    const license_type     = (row.license_type     || '').trim()
+    const expiry_date      = (row.expiry_date      || '').trim()
+    const status           = (row.status           || 'active').trim().toLowerCase()
+    const notes            = (row.notes            || '').trim()
+    const collab_physician = (row.collab_physician || '').trim()
+    const collab_expiry    = (row.collab_expiry    || '').trim()
+    const permitted_actions= (row.permitted_actions|| '').trim()
+    const practice_type    = (row.practice_type    || '').trim()
+
+    try {
+      const existing = await c.env.DB.prepare(
+        `SELECT id FROM provider_licenses WHERE contractor_id=? AND state=?`
+      ).bind(cid, state).first() as any
+
+      if (existing) {
+        await c.env.DB.prepare(
+          `UPDATE provider_licenses
+           SET license_number=?, license_type=?, expiry_date=?, status=?, notes=?,
+               collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?,
+               updated_at=CURRENT_TIMESTAMP
+           WHERE id=?`
+        ).bind(license_number, license_type, expiry_date, status, notes,
+               collab_physician, collab_expiry, permitted_actions, practice_type,
+               existing.id).run()
+        updated++
+      } else {
+        await c.env.DB.prepare(
+          `INSERT INTO provider_licenses
+           (contractor_id, state, license_number, license_type, expiry_date, status, notes,
+            collab_physician, collab_expiry, permitted_actions, practice_type)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?)`
+        ).bind(cid, state, license_number, license_type, expiry_date, status, notes,
+               collab_physician, collab_expiry, permitted_actions, practice_type).run()
+        inserted++
+      }
+    } catch (e: any) {
+      errors.push(`Row ${state}: ${e.message}`)
+      skipped++
+    }
+  }
+
+  return c.json({ ok: true, inserted, updated, skipped, errors })
+})
+
 // ── Admin: GET /api/admin/contractors/:id/licenses ────────────────
 app.get('/api/admin/contractors/:id/licenses', requireAdmin, async (c) => {
   await ensureProviderSchema(c.env.DB)

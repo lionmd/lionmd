@@ -49,6 +49,7 @@
     .modal-backdrop { background: rgba(0,0,0,0.5); backdrop-filter: blur(4px); }
     .tab-active { border-bottom: 2px solid var(--lion-gold); color: var(--lion-gold); font-weight: 600; }
     .spinner { border: 3px solid #f3f3f3; border-top: 3px solid var(--lion-gold); border-radius: 50%; width: 36px; height: 36px; animation: spin 0.8s linear infinite; }
+    .spinner-sm { display: inline-block; border: 2px solid #f3f3f3; border-top: 2px solid currentColor; border-radius: 50%; width: 14px; height: 14px; animation: spin 0.8s linear infinite; vertical-align: middle; }
     @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
     .loading-overlay { position: fixed; inset: 0; background: rgba(255,255,255,0.8); z-index: 9999; display: flex; align-items: center; justify-content: center; flex-direction: column; }
     input[type="number"] { -moz-appearance: textfield; }
@@ -12960,9 +12961,17 @@ function ppDrawLicenses(licenses) {
         <h2 class="text-lg font-bold text-gray-800">State Licenses</h2>
         <p class="text-sm text-gray-400 mt-0.5">${licenses.length} license${licenses.length !== 1 ? 's' : ''} on file</p>
       </div>
-      <button onclick="ppOpenAddLicense()" class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
-        <i class="fas fa-plus"></i> Add License
-      </button>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button onclick="licDownloadTemplate('provider')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-sm text-blue-700 hover:bg-blue-100 transition">
+          <i class="fas fa-file-download text-xs"></i> Template
+        </button>
+        <button onclick="licOpenImport('provider')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-sm text-indigo-700 hover:bg-indigo-100 transition">
+          <i class="fas fa-file-upload text-xs"></i> Import
+        </button>
+        <button onclick="ppOpenAddLicense()" class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
+          <i class="fas fa-plus"></i> Add License
+        </button>
+      </div>
     </div>
 
     <!-- CPA pending alert -->
@@ -14545,6 +14554,285 @@ const licState = {
   pinnedStates: [],     // matrix: manually pinned state columns (empty = show all)
 }
 
+// ════════════════════════════════════════════════════════════════════
+// LICENSE IMPORT — template download + Excel upload for admin & provider
+// ════════════════════════════════════════════════════════════════════
+
+// ── Download a pre-filled template ───────────────────────────────
+// mode: 'admin' uses licState data; 'provider' fetches own licenses
+async function licDownloadTemplate(mode) {
+  const COLUMNS = ['state','license_number','license_type','expiry_date','status',
+                   'notes','collab_physician','collab_expiry','permitted_actions','practice_type']
+  const HEADERS = ['State','License #','License Type','Expiry Date (YYYY-MM-DD)','Status (active/pending/expired)',
+                   'Notes','Collab Physician','Collab Expiry (YYYY-MM-DD)','Permitted Actions','Practice Type']
+
+  let rows = []
+  let filename = ''
+
+  if (mode === 'admin') {
+    // Admin: pre-fill ALL existing licenses, add contractor_id column
+    const licenses = licState.licenses || []
+    const contractors = licState.contractors || []
+    const nameMap = {}
+    for (const c of contractors) nameMap[c.id] = c.name
+    rows = licenses
+      .sort((a,b) => (nameMap[a.contractor_id]||'').localeCompare(nameMap[b.contractor_id]||''))
+      .map(l => ({
+        'contractor_id':    l.contractor_id,
+        'Provider Name':    nameMap[l.contractor_id] || '(unknown)',
+        'State':            l.state || '',
+        'License #':        l.license_number || '',
+        'License Type':     l.license_type || '',
+        'Expiry Date (YYYY-MM-DD)': l.expiry_date || '',
+        'Status (active/pending/expired)': l.status || 'active',
+        'Notes':            l.notes || '',
+        'Collab Physician': l.collab_physician || '',
+        'Collab Expiry (YYYY-MM-DD)': l.collab_expiry || '',
+        'Permitted Actions':l.permitted_actions || '',
+        'Practice Type':    l.practice_type || '',
+      }))
+    // Add blank row as example if empty
+    if (!rows.length) rows.push({
+      'contractor_id': '(required - numeric ID)',
+      'Provider Name': '(for reference only)',
+      'State': 'TX', 'License #': '', 'License Type': 'NP',
+      'Expiry Date (YYYY-MM-DD)': '2027-01-01',
+      'Status (active/pending/expired)': 'active',
+      'Notes': '', 'Collab Physician': '', 'Collab Expiry (YYYY-MM-DD)': '',
+      'Permitted Actions': '', 'Practice Type': ''
+    })
+    filename = `LionMD_License_Import_Template_Admin_${new Date().toISOString().slice(0,10)}.xlsx`
+  } else {
+    // Provider: fetch their own licenses
+    let existingLicenses = []
+    try {
+      existingLicenses = await api('/api/provider/licenses')
+    } catch(e) {}
+    rows = existingLicenses.length
+      ? existingLicenses.map(l => ({
+          'State':            l.state || '',
+          'License #':        l.license_number || '',
+          'License Type':     l.license_type || '',
+          'Expiry Date (YYYY-MM-DD)': l.expiry_date || '',
+          'Status (active/pending/expired)': l.status || 'active',
+          'Notes':            l.notes || '',
+          'Collab Physician': l.collab_physician || '',
+          'Collab Expiry (YYYY-MM-DD)': l.collab_expiry || '',
+          'Permitted Actions':l.permitted_actions || '',
+          'Practice Type':    l.practice_type || '',
+        }))
+      : [{ 'State':'TX','License #':'','License Type':'NP',
+           'Expiry Date (YYYY-MM-DD)':'2027-01-01',
+           'Status (active/pending/expired)':'active',
+           'Notes':'','Collab Physician':'','Collab Expiry (YYYY-MM-DD)':'',
+           'Permitted Actions':'','Practice Type':'' }]
+    filename = `LionMD_My_Licenses_Template_${new Date().toISOString().slice(0,10)}.xlsx`
+  }
+
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.json_to_sheet(rows)
+  // Set column widths
+  ws['!cols'] = mode === 'admin'
+    ? [{wch:14},{wch:22},{wch:8},{wch:18},{wch:16},{wch:28},{wch:28},{wch:30},{wch:22},{wch:28},{wch:22},{wch:16}]
+    : [{wch:8},{wch:18},{wch:16},{wch:28},{wch:28},{wch:30},{wch:22},{wch:28},{wch:22},{wch:16}]
+
+  // Add Instructions sheet
+  const instructions = [
+    { 'Instructions': '── LionMD License Import Template ──' },
+    { 'Instructions': 'Fill in each row. One row = one license per state.' },
+    { 'Instructions': 'State: 2-letter code (e.g. TX, CA, NY)' },
+    { 'Instructions': 'Status: must be "active", "pending", or "expired"' },
+    { 'Instructions': 'Dates: use YYYY-MM-DD format (e.g. 2027-06-30)' },
+    { 'Instructions': mode === 'admin' ? 'contractor_id: required numeric ID — do not change' : 'Do NOT add a contractor_id column — import is locked to your account' },
+    { 'Instructions': 'Existing licenses (same State) will be UPDATED. New states will be INSERTED.' },
+    { 'Instructions': 'Delete rows you do NOT want to change.' },
+  ]
+  const wsInstr = XLSX.utils.json_to_sheet(instructions)
+  wsInstr['!cols'] = [{wch:70}]
+  XLSX.utils.book_append_sheet(wb, ws, 'Licenses')
+  XLSX.utils.book_append_sheet(wb, wsInstr, 'Instructions')
+  XLSX.writeFile(wb, filename)
+  showToast('Template downloaded — fill it in and use Import to upload', 'success')
+}
+
+// ── Open import modal ─────────────────────────────────────────────
+function licOpenImport(mode) {
+  // Remove any existing modal
+  const existing = document.getElementById('licImportModal')
+  if (existing) existing.remove()
+
+  const modal = document.createElement('div')
+  modal.id = 'licImportModal'
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4'
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <div>
+          <h3 class="font-bold text-gray-800 text-base">Import Licenses from Excel</h3>
+          <p class="text-xs text-gray-400 mt-0.5">Upload a filled template. Existing licenses (matched by State) will be updated.</p>
+        </div>
+        <button onclick="document.getElementById('licImportModal').remove()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+      <div class="px-6 py-5 flex-1 overflow-y-auto">
+        <!-- Step 1: file picker -->
+        <div id="licImportStep1">
+          <label class="flex flex-col items-center justify-center border-2 border-dashed border-gray-200 rounded-xl p-8 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition" for="licImportFileInput">
+            <i class="fas fa-file-excel text-4xl text-gray-300 mb-3"></i>
+            <p class="text-sm font-semibold text-gray-600">Click to select your filled template</p>
+            <p class="text-xs text-gray-400 mt-1">.xlsx files only</p>
+          </label>
+          <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden" onchange="licParseImportFile(this.files[0], '${mode}')">
+          <p class="text-xs text-gray-400 mt-3 text-center">
+            Don't have a template? 
+            <button onclick="licDownloadTemplate('${mode}')" class="text-indigo-600 underline">Download one first</button>
+          </p>
+        </div>
+        <!-- Step 2: preview (populated by licParseImportFile) -->
+        <div id="licImportStep2" class="hidden"></div>
+      </div>
+    </div>`
+  document.body.appendChild(modal)
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+}
+
+// ── Parse the uploaded file and show preview ─────────────────────
+async function licParseImportFile(file, mode) {
+  if (!file) return
+  const step2 = document.getElementById('licImportStep2')
+  const step1 = document.getElementById('licImportStep1')
+
+  step1.innerHTML = `<div class="flex justify-center py-4"><div class="spinner"></div></div>`
+  step2.classList.add('hidden')
+
+  try {
+    const buffer = await file.arrayBuffer()
+    const wb = XLSX.read(buffer, { type: 'array' })
+    // Use 'Licenses' sheet if present, else first sheet
+    const sheetName = wb.SheetNames.includes('Licenses') ? 'Licenses' : wb.SheetNames[0]
+    const ws = wb.Sheets[sheetName]
+    const rawRows = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' })
+
+    if (!rawRows.length) { showToast('No data rows found in file', 'warning'); return }
+
+    // Normalize column names (case-insensitive, trim)
+    const norm = (row) => {
+      const out = {}
+      for (const [k, v] of Object.entries(row)) out[k.trim()] = v
+      return out
+    }
+    const rows = rawRows.map(norm)
+
+    // Map friendly column names to internal keys
+    const mapRow = (r) => ({
+      contractor_id:    r['contractor_id'] || r['Contractor ID'] || '',
+      state:            (r['State'] || r['state'] || '').trim().toUpperCase(),
+      license_number:   r['License #'] || r['license_number'] || r['License Number'] || '',
+      license_type:     r['License Type'] || r['license_type'] || '',
+      expiry_date:      r['Expiry Date (YYYY-MM-DD)'] || r['Expiry Date'] || r['expiry_date'] || '',
+      status:           (r['Status (active/pending/expired)'] || r['Status'] || r['status'] || 'active').toLowerCase(),
+      notes:            r['Notes'] || r['notes'] || '',
+      collab_physician: r['Collab Physician'] || r['collab_physician'] || '',
+      collab_expiry:    r['Collab Expiry (YYYY-MM-DD)'] || r['Collab Expiry'] || r['collab_expiry'] || '',
+      permitted_actions:r['Permitted Actions'] || r['permitted_actions'] || '',
+      practice_type:    r['Practice Type'] || r['practice_type'] || '',
+    })
+
+    const mapped = rows.map(mapRow).filter(r => r.state && r.state.length === 2)
+    const skipped = rows.length - mapped.length
+
+    if (!mapped.length) { showToast('No valid rows found — check State column (2-letter code required)', 'warning'); return }
+
+    // Build preview table
+    const previewHtml = `
+      <div class="mb-3 flex items-center justify-between">
+        <p class="text-sm font-semibold text-gray-700">${mapped.length} row${mapped.length!==1?'s':''} ready to import${skipped ? ` <span class="text-orange-500">(${skipped} skipped — missing State)</span>` : ''}</p>
+        <span class="text-xs text-gray-400">${file.name}</span>
+      </div>
+      <div class="overflow-x-auto rounded-xl border border-gray-100 mb-4">
+        <table class="w-full text-xs">
+          <thead class="bg-gray-50">
+            <tr>
+              ${mode === 'admin' ? '<th class="px-2 py-2 text-left font-semibold text-gray-500">CID</th>' : ''}
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">State</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">License #</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">Type</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">Expiry</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">Status</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            ${mapped.map(r => `
+              <tr class="hover:bg-gray-50">
+                ${mode === 'admin' ? `<td class="px-2 py-1.5 text-gray-400">${r.contractor_id||'—'}</td>` : ''}
+                <td class="px-2 py-1.5 font-semibold text-gray-800">${r.state}</td>
+                <td class="px-2 py-1.5 text-gray-600">${r.license_number||'—'}</td>
+                <td class="px-2 py-1.5 text-gray-500">${r.license_type||'—'}</td>
+                <td class="px-2 py-1.5 text-gray-500">${r.expiry_date||'—'}</td>
+                <td class="px-2 py-1.5">
+                  <span class="px-1.5 py-0.5 rounded-full text-xs font-semibold ${r.status==='active'?'bg-green-100 text-green-700':r.status==='expired'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">
+                    ${r.status}
+                  </span>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${mode === 'admin' && mapped.some(r => !r.contractor_id) ? `
+        <div class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-700">
+          <i class="fas fa-exclamation-triangle mr-1"></i>
+          Some rows are missing <strong>contractor_id</strong> — those rows will be skipped. Use the admin template to get pre-filled IDs.
+        </div>` : ''}
+      <div class="flex gap-3 justify-end">
+        <button onclick="document.getElementById('licImportModal').remove()" class="px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
+        <button id="licImportSubmitBtn" onclick="licSubmitImport(${JSON.stringify(mapped)}, '${mode}')"
+          class="btn-primary px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
+          <i class="fas fa-upload"></i> Import ${mapped.length} License${mapped.length!==1?'s':''}
+        </button>
+      </div>`
+
+    step1.classList.add('hidden')
+    step2.classList.remove('hidden')
+    step2.innerHTML = previewHtml
+
+  } catch(e) {
+    showToast('Error reading file: ' + e.message, 'error')
+    step1.innerHTML = `<label class="flex flex-col items-center justify-center border-2 border-dashed border-gray-200 rounded-xl p-8 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition" for="licImportFileInput">
+      <i class="fas fa-file-excel text-4xl text-gray-300 mb-3"></i>
+      <p class="text-sm font-semibold text-gray-600">Click to select your filled template</p>
+      <p class="text-xs text-gray-400 mt-1">.xlsx files only</p>
+    </label>
+    <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden" onchange="licParseImportFile(this.files[0], '${mode}')">`
+  }
+}
+
+// ── Submit the import to the backend ─────────────────────────────
+async function licSubmitImport(rows, mode) {
+  const btn = document.getElementById('licImportSubmitBtn')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner-sm mr-2"></div> Importing…' }
+
+  const endpoint = mode === 'admin' ? '/api/admin/licenses/import' : '/api/provider/licenses/import'
+  try {
+    const result = await api(endpoint, { method: 'POST', body: JSON.stringify({ rows }) })
+    document.getElementById('licImportModal')?.remove()
+
+    const parts = []
+    if (result.inserted) parts.push(`${result.inserted} added`)
+    if (result.updated)  parts.push(`${result.updated} updated`)
+    if (result.skipped)  parts.push(`${result.skipped} skipped`)
+    showToast(`Import complete — ${parts.join(', ')}`, 'success')
+
+    // Refresh the view
+    if (mode === 'admin') {
+      await renderLicDashboard()
+    } else {
+      await renderProviderLicenses()
+    }
+  } catch(e) {
+    showToast('Import failed: ' + e.message, 'error')
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-upload"></i> Retry' }
+  }
+}
+
 // ── Export: By Provider (one row per license, grouped by provider) ─
 function licExportByProvider() {
   const licenses = licState.licenses || []
@@ -14730,6 +15018,14 @@ function licDrawDashboard() {
       <p class="text-sm text-gray-400 mt-0.5">Full provider state matrix &mdash; click any cell to view or edit</p>
     </div>
     <div class="flex items-center gap-2 flex-wrap">
+      <button onclick="licDownloadTemplate('admin')" 
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-sm text-blue-700 hover:bg-blue-100 transition shadow-sm">
+        <i class="fas fa-file-download text-xs"></i> Template
+      </button>
+      <button onclick="licOpenImport('admin')"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-sm text-indigo-700 hover:bg-indigo-100 transition shadow-sm">
+        <i class="fas fa-file-upload text-xs"></i> Import
+      </button>
       <button onclick="licExportByProvider()"
         class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-green-200 bg-green-50 text-sm text-green-700 hover:bg-green-100 transition shadow-sm">
         <i class="fas fa-file-csv text-xs"></i> By Provider
