@@ -2884,6 +2884,48 @@ app.get('/api/admin/test-slack', requireAdmin, async (c) => {
   }
 })
 
+// ── GET /api/admin/backfill-blocks-slack ─────────────────────────
+// One-time endpoint: sends all existing provider_blocks to Slack as a digest
+app.get('/api/admin/backfill-blocks-slack', requireAdmin, async (c) => {
+  const url = c.env.SLACK_WEBHOOK_URL
+  if (!url) return c.json({ ok: false, error: 'SLACK_WEBHOOK_URL not configured' })
+
+  const rows = await c.env.DB.prepare(`
+    SELECT pb.id, pb.block_date, pb.block_type, pb.max_consults, pb.reason,
+           co.name AS provider_name
+    FROM provider_blocks pb
+    JOIN contractors co ON co.id = pb.contractor_id
+    ORDER BY pb.block_date ASC
+  `).all()
+
+  const blocks = rows.results as any[]
+  if (!blocks.length) return c.json({ ok: true, sent: 0, message: 'No block-out records found' })
+
+  // Group by provider for a cleaner digest
+  const byProvider: Record<string, any[]> = {}
+  for (const b of blocks) {
+    if (!byProvider[b.provider_name]) byProvider[b.provider_name] = []
+    byProvider[b.provider_name].push(b)
+  }
+
+  const lines: string[] = []
+  for (const [name, entries] of Object.entries(byProvider)) {
+    lines.push(`*${name}*`)
+    for (const b of entries) {
+      const typeLabel = b.block_type === 'limited'
+        ? `🟡 Limited (${b.max_consults} max)`
+        : '🔴 Fully unavailable'
+      const reason = b.reason ? ` — _${b.reason}_` : ''
+      lines.push(`  • ${b.block_date}  ${typeLabel}${reason}`)
+    }
+  }
+
+  const text = `📋 *Block-out Backfill — ${blocks.length} submission${blocks.length !== 1 ? 's' : ''} on record*\n\n${lines.join('\n')}`
+  await sendSlack(url, text)
+
+  return c.json({ ok: true, sent: blocks.length })
+})
+
 // ── GET /api/admin/users ─────────────────────────────────────────
 app.get('/api/admin/users', requireAdmin, async (c) => {
   await ensureAuthSchema(c.env.DB)
