@@ -5,6 +5,29 @@ type Bindings = {
   DB: D1Database
   RESEND_API_KEY: string
   TOKEN_SECRET: string
+  SLACK_WEBHOOK_URL: string
+}
+
+// ──────────────────────────────────────────────
+// Slack Notification Helper
+// ──────────────────────────────────────────────
+async function sendSlack(webhookUrl: string, text: string, fields?: { title: string; value: string }[]): Promise<void> {
+  if (!webhookUrl) return
+  const blocks: any[] = [
+    { type: 'section', text: { type: 'mrkdwn', text } }
+  ]
+  if (fields && fields.length > 0) {
+    blocks.push({
+      type: 'section',
+      fields: fields.map(f => ({ type: 'mrkdwn', text: `*${f.title}*\n${f.value}` }))
+    })
+  }
+  blocks.push({ type: 'divider' })
+  await fetch(webhookUrl, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ blocks })
+  }).catch(() => {})
 }
 
 // ──────────────────────────────────────────────
@@ -3468,6 +3491,26 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
   const r = await c.env.DB.prepare(
     `INSERT INTO provider_licenses (contractor_id, state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type) VALUES (?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(pu.contractor_id, state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'').run()
+
+  // Slack notification
+  if (c.env.SLACK_WEBHOOK_URL) {
+    const ct = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(pu.contractor_id).first() as any
+    if (ct) {
+      sendSlack(
+        c.env.SLACK_WEBHOOK_URL,
+        `🪪 *New License Added* by *${ct.name}*`,
+        [
+          { title: 'State', value: state || '—' },
+          { title: 'License #', value: license_number || '_(pending)_' },
+          { title: 'Type', value: license_type || '—' },
+          { title: 'Status', value: status || 'active' },
+          { title: 'Expiry', value: expiry_date || '—' },
+          { title: 'Collab MD', value: collab_physician || '—' },
+        ]
+      )
+    }
+  }
+
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
@@ -3488,6 +3531,26 @@ app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
       `UPDATE provider_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?, collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
     ).bind(state, license_number||'', license_type||'', expiry_date||'', status||'active', notes||'', collab_physician||'', collab_expiry||'', permitted_actions||'', practice_type||'', id).run()
   }
+
+  // Slack notification — look up provider name via the license record
+  if (c.env.SLACK_WEBHOOK_URL) {
+    const lic = await c.env.DB.prepare(`SELECT l.state as lic_state, c.name FROM provider_licenses l JOIN contractors c ON c.id=l.contractor_id WHERE l.id=?`).bind(id).first() as any
+    if (lic) {
+      sendSlack(
+        c.env.SLACK_WEBHOOK_URL,
+        `✏️ *License Updated* by *${lic.name}*`,
+        [
+          { title: 'State', value: state || lic.lic_state || '—' },
+          { title: 'License #', value: license_number || '_(pending)_' },
+          { title: 'Type', value: license_type || '—' },
+          { title: 'Status', value: status || 'active' },
+          { title: 'Expiry', value: expiry_date || '—' },
+          { title: 'Collab MD', value: collab_physician || '—' },
+        ]
+      )
+    }
+  }
+
   return c.json({ ok: true })
 })
 
@@ -4669,6 +4732,23 @@ app.post('/api/availability/blocks', async (c) => {
   `).bind(contractorId, block_date, resolvedType, resolvedMax, reason || '', createdBy).run()
 
   const blockId = r.meta.last_row_id
+
+  // Slack notification (only when provider submits, not admin)
+  if (createdBy === 'provider' && c.env.SLACK_WEBHOOK_URL) {
+    const ctSlack = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(contractorId).first() as any
+    if (ctSlack) {
+      const typeLabel = resolvedType === 'limited' ? `🟡 Limited (~${resolvedMax} consults)` : '🔴 Fully unavailable'
+      sendSlack(
+        c.env.SLACK_WEBHOOK_URL,
+        `📅 *Block-out Submitted* by *${ctSlack.name}*`,
+        [
+          { title: 'Date', value: block_date },
+          { title: 'Type', value: typeLabel },
+          { title: 'Reason', value: reason || '_(none provided)_' },
+        ]
+      )
+    }
+  }
 
   // Notify all admins by email (only when provider submits, not admin)
   if (createdBy === 'provider' && c.env.RESEND_API_KEY) {
