@@ -3792,6 +3792,29 @@ app.post('/api/admin/licenses/import', requireLicenseEditor, async (c) => {
     }
   }
 
+  // Send a single Slack digest for the whole import
+  if (c.env.SLACK_WEBHOOK_URL && (inserted + updated) > 0) {
+    // Gather provider names for the affected contractor IDs
+    const cidSet = [...new Set(rows.filter((r: any) => r.contractor_id).map((r: any) => String(parseInt(r.contractor_id))))]
+    const providerNames: Record<string, string> = {}
+    for (const cid of cidSet) {
+      const co = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(cid).first() as any
+      if (co) providerNames[cid] = co.name
+    }
+    const importerUser = c.get('user') as any
+    const lines = rows
+      .filter((r: any) => r.state && parseInt(r.contractor_id))
+      .map((r: any) => {
+        const pname = providerNames[String(parseInt(r.contractor_id))] || `ID ${r.contractor_id}`
+        return `• ${pname} — ${r.state} ${r.license_type || ''} #${r.license_number || '—'} (${r.status || 'active'})`
+      })
+    await sendSlack(
+      c.env.SLACK_WEBHOOK_URL,
+      `📥 *License Import* by *${importerUser?.email || 'admin'}* — ${inserted} added, ${updated} updated`,
+      lines.slice(0, 10).map(l => ({ title: '', value: l }))
+    )
+  }
+
   return c.json({ ok: true, inserted, updated, skipped, errors })
 })
 
@@ -3854,6 +3877,20 @@ app.post('/api/provider/licenses/import', requireProvider, async (c) => {
       errors.push(`Row ${state}: ${e.message}`)
       skipped++
     }
+  }
+
+  // Send a single Slack digest for the whole import
+  if (c.env.SLACK_WEBHOOK_URL && (inserted + updated) > 0) {
+    const ct = await c.env.DB.prepare(`SELECT name FROM contractors WHERE id=?`).bind(cid).first() as any
+    const providerName = ct?.name || `Contractor ${cid}`
+    const lines = rows
+      .filter((r: any) => r.state)
+      .map((r: any) => `• ${r.state} ${r.license_type || ''} #${r.license_number || '—'} (${r.status || 'active'})`)
+    await sendSlack(
+      c.env.SLACK_WEBHOOK_URL,
+      `📥 *License Import* by provider *${providerName}* — ${inserted} added, ${updated} updated`,
+      lines.slice(0, 10).map(l => ({ title: '', value: l }))
+    )
   }
 
   return c.json({ ok: true, inserted, updated, skipped, errors })
