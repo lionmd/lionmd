@@ -16707,6 +16707,8 @@ async function avSubmitBlock() {
   const block_type   = $('avBlockType')?.value || 'unavailable'
   const max_consults = block_type === 'limited' ? (parseInt($('avBlockLimit')?.value) || 0) : 0
   const reason       = $('avBlockReason')?.value?.trim() || ''
+  const btn = document.querySelector('[onclick="avSubmitBlock()"]')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Submitting…' }
   try {
     await api('/api/availability/blocks', { method: 'POST', body: JSON.stringify({ block_date, block_type, max_consults, reason }) })
     showToast('Block-out submitted! Your team has been notified.', 'success')
@@ -16716,7 +16718,11 @@ async function avSubmitBlock() {
     // Reload
     avState.blocks = await api('/api/availability/blocks')
     avDrawProviderPage()
-  } catch(e) { showToast('Error: ' + e.message, 'error') }
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error')
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Block-out' }
+  }
 }
 
 async function avDeleteBlock(id) {

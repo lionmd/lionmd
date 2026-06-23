@@ -2867,6 +2867,23 @@ app.get('/api/auth/invite/:token', async (c) => {
   return c.json({ id: user.id, name: user.name, email: user.email, role: user.role, must_set_password: user.must_set_password })
 })
 
+// ── GET /api/admin/test-slack ─────────────────────────────────────
+app.get('/api/admin/test-slack', requireAdmin, async (c) => {
+  const url = c.env.SLACK_WEBHOOK_URL
+  if (!url) return c.json({ ok: false, error: 'SLACK_WEBHOOK_URL secret not found in env' })
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ text: '🧪 LionMD Slack test — connection confirmed from Cloudflare Worker' })
+    })
+    const body = await res.text()
+    return c.json({ ok: res.ok, status: res.status, body })
+  } catch (e: any) {
+    return c.json({ ok: false, error: e.message })
+  }
+})
+
 // ── GET /api/admin/users ─────────────────────────────────────────
 app.get('/api/admin/users', requireAdmin, async (c) => {
   await ensureAuthSchema(c.env.DB)
