@@ -14545,6 +14545,149 @@ const licState = {
   pinnedStates: [],     // matrix: manually pinned state columns (empty = show all)
 }
 
+// ── Export: By Provider (one row per license, grouped by provider) ─
+function licExportByProvider() {
+  const licenses = licState.licenses || []
+  const contractors = licState.contractors || []
+  if (!licenses.length) { showToast('No license data loaded', 'warning'); return }
+
+  // Build contractor id → name map
+  const nameMap = {}
+  for (const c of contractors) nameMap[c.id] = c.name
+
+  // Sort by provider name then state
+  const sorted = [...licenses].sort((a, b) => {
+    const na = (nameMap[a.contractor_id] || '').toLowerCase()
+    const nb = (nameMap[b.contractor_id] || '').toLowerCase()
+    return na !== nb ? na.localeCompare(nb) : (a.state || '').localeCompare(b.state || '')
+  })
+
+  const rows = sorted.map(l => ({
+    'Provider':            nameMap[l.contractor_id] || l.contractor_id,
+    'State':               l.state || '',
+    'License Type':        l.license_type || '',
+    'License #':           l.license_number || '',
+    'Status':              l.status || '',
+    'Expiry Date':         l.expiry_date || '',
+    'Collab Physician':    l.collab_physician || '',
+    'Collab Expiry':       l.collab_expiry || '',
+    'Permitted Actions':   l.permitted_actions || '',
+    'Practice Type':       l.practice_type || '',
+    'Notes':               l.notes || '',
+  }))
+
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.json_to_sheet(rows)
+
+  // Column widths
+  ws['!cols'] = [
+    { wch: 22 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 },
+    { wch: 14 }, { wch: 24 }, { wch: 14 }, { wch: 22 }, { wch: 16 }, { wch: 30 }
+  ]
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Licenses by Provider')
+  const date = new Date().toISOString().slice(0, 10)
+  XLSX.writeFile(wb, `LionMD_Licenses_ByProvider_${date}.xlsx`)
+  showToast('Exported: Licenses by Provider', 'success')
+}
+
+// ── Export: Full Dashboard (multi-sheet Excel) ─────────────────────
+function licExportFullDashboard() {
+  const licenses = licState.licenses || []
+  const contractors = licState.contractors || []
+  if (!licenses.length) { showToast('No license data loaded', 'warning'); return }
+
+  const nameMap = {}
+  const roleMap = {}
+  for (const c of contractors) { nameMap[c.id] = c.name; roleMap[c.id] = c.role_group || '' }
+
+  const now = new Date()
+  const inDays = (d, days) => { if (!d) return false; const x = new Date(d); return x > now && x < new Date(now.getTime() + days * 86400000) }
+  const isPast = d => d && new Date(d) < now
+
+  const wb = XLSX.utils.book_new()
+  const date = new Date().toISOString().slice(0, 10)
+
+  // ── Sheet 1: All Licenses ─────────────────────────────────────────
+  const allRows = [...licenses]
+    .sort((a, b) => (nameMap[a.contractor_id] || '').localeCompare(nameMap[b.contractor_id] || ''))
+    .map(l => ({
+      'Provider':          nameMap[l.contractor_id] || '',
+      'Role Group':        roleMap[l.contractor_id] || '',
+      'State':             l.state || '',
+      'License Type':      l.license_type || '',
+      'License #':         l.license_number || '',
+      'Status':            l.status || '',
+      'Expiry Date':       l.expiry_date || '',
+      'Days to Expiry':    l.expiry_date ? Math.ceil((new Date(l.expiry_date) - now) / 86400000) : '',
+      'Collab Physician':  l.collab_physician || '',
+      'Collab Expiry':     l.collab_expiry || '',
+      'Permitted Actions': l.permitted_actions || '',
+      'Practice Type':     l.practice_type || '',
+      'Notes':             l.notes || '',
+    }))
+  const ws1 = XLSX.utils.json_to_sheet(allRows)
+  ws1['!cols'] = [
+    {wch:22},{wch:14},{wch:8},{wch:18},{wch:18},{wch:12},
+    {wch:14},{wch:14},{wch:24},{wch:14},{wch:22},{wch:16},{wch:30}
+  ]
+  XLSX.utils.book_append_sheet(wb, ws1, 'All Licenses')
+
+  // ── Sheet 2: Expiring ≤60 days ────────────────────────────────────
+  const expiringRows = allRows.filter(r => typeof r['Days to Expiry'] === 'number' && r['Days to Expiry'] >= 0 && r['Days to Expiry'] <= 60)
+    .sort((a, b) => a['Days to Expiry'] - b['Days to Expiry'])
+  if (expiringRows.length) {
+    const ws2 = XLSX.utils.json_to_sheet(expiringRows)
+    ws2['!cols'] = ws1['!cols']
+    XLSX.utils.book_append_sheet(wb, ws2, 'Expiring ≤60 Days')
+  }
+
+  // ── Sheet 3: Expired ─────────────────────────────────────────────
+  const expiredRows = allRows.filter(r => typeof r['Days to Expiry'] === 'number' && r['Days to Expiry'] < 0)
+    .sort((a, b) => a['Days to Expiry'] - b['Days to Expiry'])
+  if (expiredRows.length) {
+    const ws3 = XLSX.utils.json_to_sheet(expiredRows)
+    ws3['!cols'] = ws1['!cols']
+    XLSX.utils.book_append_sheet(wb, ws3, 'Expired')
+  }
+
+  // ── Sheet 4: State Matrix (providers as rows, states as cols) ─────
+  const states = [...new Set(licenses.map(l => l.state).filter(Boolean))].sort()
+  const providerIds = contractors.map(c => c.id)
+  const matrixRows = providerIds.map(cid => {
+    const row = { 'Provider': nameMap[cid] || '', 'Role': roleMap[cid] || '' }
+    for (const st of states) {
+      const lic = licenses.find(l => l.contractor_id === cid && l.state === st)
+      row[st] = lic ? (lic.status === 'active' ? '✓ Active' : lic.status === 'pending' ? '⏳ Pending' : lic.status === 'expired' ? '✗ Expired' : lic.status) : ''
+    }
+    return row
+  })
+  const ws4 = XLSX.utils.json_to_sheet(matrixRows)
+  ws4['!cols'] = [{ wch: 22 }, { wch: 14 }, ...states.map(() => ({ wch: 12 }))]
+  XLSX.utils.book_append_sheet(wb, ws4, 'State Matrix')
+
+  // ── Sheet 5: Collab Agreements ────────────────────────────────────
+  const collabRows = licenses
+    .filter(l => l.collab_physician && l.collab_physician.trim())
+    .map(l => ({
+      'Provider':         nameMap[l.contractor_id] || '',
+      'State':            l.state || '',
+      'License #':        l.license_number || '',
+      'Collab Physician': l.collab_physician || '',
+      'Collab Expiry':    l.collab_expiry || '',
+      'Collab Status':    !l.collab_expiry ? 'No expiry set' : isPast(l.collab_expiry) ? 'EXPIRED' : inDays(l.collab_expiry, 60) ? 'Expiring Soon' : 'Active',
+    }))
+    .sort((a, b) => (a['Provider'] || '').localeCompare(b['Provider'] || ''))
+  if (collabRows.length) {
+    const ws5 = XLSX.utils.json_to_sheet(collabRows)
+    ws5['!cols'] = [{wch:22},{wch:8},{wch:18},{wch:24},{wch:14},{wch:16}]
+    XLSX.utils.book_append_sheet(wb, ws5, 'Collab Agreements')
+  }
+
+  XLSX.writeFile(wb, `LionMD_Licensing_Dashboard_${date}.xlsx`)
+  showToast('Exported: Full Licensing Dashboard', 'success')
+}
+
 // ── Entry points ──────────────────────────────────────────────────
 async function renderLicDashboard() {
   const mc = $('mainContent')
@@ -14586,7 +14729,15 @@ function licDrawDashboard() {
       <h1 class="text-xl font-bold text-gray-800"><i class="fas fa-map-marker-alt mr-2 text-blue-600"></i>Licensing Dashboard</h1>
       <p class="text-sm text-gray-400 mt-0.5">Full provider state matrix &mdash; click any cell to view or edit</p>
     </div>
-    <div class="flex items-center gap-2">
+    <div class="flex items-center gap-2 flex-wrap">
+      <button onclick="licExportByProvider()"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-green-200 bg-green-50 text-sm text-green-700 hover:bg-green-100 transition shadow-sm">
+        <i class="fas fa-file-csv text-xs"></i> By Provider
+      </button>
+      <button onclick="licExportFullDashboard()"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 text-sm text-emerald-700 hover:bg-emerald-100 transition shadow-sm">
+        <i class="fas fa-file-excel text-xs"></i> Full Export
+      </button>
       <a href="/licensing/public" target="_blank"
         class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-600 hover:border-blue-400 hover:text-blue-600 transition shadow-sm">
         <i class="fas fa-external-link-alt text-xs"></i> Public View
