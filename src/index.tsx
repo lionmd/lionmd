@@ -3760,21 +3760,32 @@ app.post('/api/admin/licenses/import', requireLicenseEditor, async (c) => {
     const practice_type    = (row.practice_type    || '').trim()
 
     try {
-      // Check if a record already exists for this contractor + state
-      const existing = await c.env.DB.prepare(
-        `SELECT id FROM provider_licenses WHERE contractor_id=? AND state=?`
-      ).bind(cid, state).first() as any
+      // Match on (contractor_id, state, license_type) when type is known; fallback to (contractor_id, state)
+      const existing = await (license_type
+        ? c.env.DB.prepare(`SELECT * FROM provider_licenses WHERE contractor_id=? AND state=? AND license_type=?`).bind(cid, state, license_type).first()
+        : c.env.DB.prepare(`SELECT * FROM provider_licenses WHERE contractor_id=? AND state=?`).bind(cid, state).first()
+      ) as any
 
       if (existing) {
+        // Only overwrite fields that have a non-empty value in the import — blank = keep existing
         await c.env.DB.prepare(
           `UPDATE provider_licenses
            SET license_number=?, license_type=?, expiry_date=?, status=?, notes=?,
                collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?,
                updated_at=CURRENT_TIMESTAMP
            WHERE id=?`
-        ).bind(license_number, license_type, expiry_date, status, notes,
-               collab_physician, collab_expiry, permitted_actions, practice_type,
-               existing.id).run()
+        ).bind(
+          license_number   || existing.license_number,
+          license_type     || existing.license_type,
+          expiry_date      || existing.expiry_date,
+          status           || existing.status,
+          notes            !== '' ? notes            : existing.notes,
+          collab_physician !== '' ? collab_physician : existing.collab_physician,
+          collab_expiry    || existing.collab_expiry,
+          permitted_actions!== '' ? permitted_actions: existing.permitted_actions,
+          practice_type    !== '' ? practice_type    : existing.practice_type,
+          existing.id
+        ).run()
         updated++
       } else {
         await c.env.DB.prepare(
@@ -3848,20 +3859,32 @@ app.post('/api/provider/licenses/import', requireProvider, async (c) => {
     const practice_type    = (row.practice_type    || '').trim()
 
     try {
-      const existing = await c.env.DB.prepare(
-        `SELECT id FROM provider_licenses WHERE contractor_id=? AND state=?`
-      ).bind(cid, state).first() as any
+      // Match on (contractor_id, state, license_type) when type is known; fallback to (contractor_id, state)
+      const existing = await (license_type
+        ? c.env.DB.prepare(`SELECT * FROM provider_licenses WHERE contractor_id=? AND state=? AND license_type=?`).bind(cid, state, license_type).first()
+        : c.env.DB.prepare(`SELECT * FROM provider_licenses WHERE contractor_id=? AND state=?`).bind(cid, state).first()
+      ) as any
 
       if (existing) {
+        // Only overwrite fields that have a non-empty value — blank = keep existing
         await c.env.DB.prepare(
           `UPDATE provider_licenses
            SET license_number=?, license_type=?, expiry_date=?, status=?, notes=?,
                collab_physician=?, collab_expiry=?, permitted_actions=?, practice_type=?,
                updated_at=CURRENT_TIMESTAMP
            WHERE id=?`
-        ).bind(license_number, license_type, expiry_date, status, notes,
-               collab_physician, collab_expiry, permitted_actions, practice_type,
-               existing.id).run()
+        ).bind(
+          license_number   || existing.license_number,
+          license_type     || existing.license_type,
+          expiry_date      || existing.expiry_date,
+          status           || existing.status,
+          notes            !== '' ? notes            : existing.notes,
+          collab_physician !== '' ? collab_physician : existing.collab_physician,
+          collab_expiry    || existing.collab_expiry,
+          permitted_actions!== '' ? permitted_actions: existing.permitted_actions,
+          practice_type    !== '' ? practice_type    : existing.practice_type,
+          existing.id
+        ).run()
         updated++
       } else {
         await c.env.DB.prepare(
