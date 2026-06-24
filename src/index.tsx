@@ -3133,7 +3133,168 @@ app.post('/api/admin/send-invite-email', requireAdmin, async (c) => {
 
 async function ensureCandidateSchema(db: D1Database) {
   await db.prepare(`ALTER TABLE portal_users ADD COLUMN candidate_id INTEGER`).run().catch(() => {})
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS candidate_licenses (
+      id               INTEGER PRIMARY KEY AUTOINCREMENT,
+      candidate_id     INTEGER NOT NULL,
+      state            TEXT NOT NULL,
+      license_number   TEXT DEFAULT '',
+      license_type     TEXT DEFAULT '',
+      expiry_date      TEXT DEFAULT '',
+      status           TEXT DEFAULT 'active',
+      notes            TEXT DEFAULT '',
+      permitted_actions TEXT DEFAULT '',
+      practice_type    TEXT DEFAULT '',
+      license_file_name TEXT DEFAULT '',
+      license_file_data TEXT DEFAULT '',
+      license_file_mime TEXT DEFAULT '',
+      created_at       DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_at       DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run().catch(() => {})
 }
+
+// ── GET /api/candidate/licenses ───────────────────────────────────
+app.get('/api/candidate/licenses', requireCandidate, async (c) => {
+  await ensureCandidateSchema(c.env.DB)
+  const u = c.get('user') as any
+  const pu = await c.env.DB.prepare(`SELECT candidate_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.candidate_id) return c.json({ error: 'No candidate profile linked' }, 404)
+  const rows = await c.env.DB.prepare(
+    `SELECT id, state, license_number, license_type, expiry_date, status, notes,
+            permitted_actions, practice_type, license_file_name, license_file_mime, updated_at
+     FROM candidate_licenses WHERE candidate_id=? ORDER BY state ASC`
+  ).bind(pu.candidate_id).all()
+  return c.json(rows.results)
+})
+
+// ── POST /api/candidate/licenses ──────────────────────────────────
+app.post('/api/candidate/licenses', requireCandidate, async (c) => {
+  await ensureCandidateSchema(c.env.DB)
+  const u = c.get('user') as any
+  const pu = await c.env.DB.prepare(`SELECT candidate_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.candidate_id) return c.json({ error: 'No candidate profile linked' }, 404)
+  const body = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes,
+          permitted_actions, practice_type,
+          license_file_name, license_file_data, license_file_mime } = body
+  if (!state) return c.json({ error: 'State is required' }, 400)
+  const r = await c.env.DB.prepare(
+    `INSERT INTO candidate_licenses
+     (candidate_id, state, license_number, license_type, expiry_date, status, notes,
+      permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+  ).bind(pu.candidate_id, state.toUpperCase(), license_number||'', license_type||'',
+         expiry_date||'', status||'active', notes||'',
+         permitted_actions||'', practice_type||'',
+         license_file_name||'', license_file_data||'', license_file_mime||'').run()
+  return c.json({ ok: true, id: r.meta.last_row_id })
+})
+
+// ── PUT /api/candidate/licenses/:id ──────────────────────────────
+app.put('/api/candidate/licenses/:id', requireCandidate, async (c) => {
+  await ensureCandidateSchema(c.env.DB)
+  const u = c.get('user') as any
+  const pu = await c.env.DB.prepare(`SELECT candidate_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.candidate_id) return c.json({ error: 'No candidate profile linked' }, 404)
+  const id = c.req.param('id')
+  const body = await c.req.json() as any
+  const { state, license_number, license_type, expiry_date, status, notes,
+          permitted_actions, practice_type,
+          license_file_name, license_file_data, license_file_mime } = body
+  const hasFile = license_file_data && license_file_data.length > 0
+  if (hasFile) {
+    await c.env.DB.prepare(
+      `UPDATE candidate_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?,
+       permitted_actions=?, practice_type=?, license_file_name=?, license_file_data=?, license_file_mime=?,
+       updated_at=CURRENT_TIMESTAMP WHERE id=? AND candidate_id=?`
+    ).bind(state?.toUpperCase()||'', license_number||'', license_type||'', expiry_date||'', status||'active',
+           notes||'', permitted_actions||'', practice_type||'',
+           license_file_name||'', license_file_data||'', license_file_mime||'',
+           id, pu.candidate_id).run()
+  } else {
+    await c.env.DB.prepare(
+      `UPDATE candidate_licenses SET state=?, license_number=?, license_type=?, expiry_date=?, status=?, notes=?,
+       permitted_actions=?, practice_type=?, updated_at=CURRENT_TIMESTAMP WHERE id=? AND candidate_id=?`
+    ).bind(state?.toUpperCase()||'', license_number||'', license_type||'', expiry_date||'', status||'active',
+           notes||'', permitted_actions||'', practice_type||'', id, pu.candidate_id).run()
+  }
+  return c.json({ ok: true })
+})
+
+// ── DELETE /api/candidate/licenses/:id ───────────────────────────
+app.delete('/api/candidate/licenses/:id', requireCandidate, async (c) => {
+  await ensureCandidateSchema(c.env.DB)
+  const u = c.get('user') as any
+  const pu = await c.env.DB.prepare(`SELECT candidate_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.candidate_id) return c.json({ error: 'No candidate profile linked' }, 404)
+  const id = c.req.param('id')
+  await c.env.DB.prepare(`DELETE FROM candidate_licenses WHERE id=? AND candidate_id=?`).bind(id, pu.candidate_id).run()
+  return c.json({ ok: true })
+})
+
+// ── GET /api/candidate/licenses/:id/file ─────────────────────────
+app.get('/api/candidate/licenses/:id/file', requireCandidate, async (c) => {
+  await ensureCandidateSchema(c.env.DB)
+  const u = c.get('user') as any
+  const pu = await c.env.DB.prepare(`SELECT candidate_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.candidate_id) return c.json({ error: 'No candidate profile linked' }, 404)
+  const row = await c.env.DB.prepare(
+    `SELECT license_file_name, license_file_data, license_file_mime FROM candidate_licenses WHERE id=? AND candidate_id=?`
+  ).bind(c.req.param('id'), pu.candidate_id).first() as any
+  if (!row?.license_file_data) return c.json({ error: 'No file attached' }, 404)
+  const binary = Uint8Array.from(atob(row.license_file_data), ch => ch.charCodeAt(0))
+  return new Response(binary, {
+    headers: {
+      'Content-Type': row.license_file_mime || 'application/octet-stream',
+      'Content-Disposition': `inline; filename="${row.license_file_name || 'license'}"`,
+    }
+  })
+})
+
+// ── POST /api/candidate/licenses/import ──────────────────────────
+app.post('/api/candidate/licenses/import', requireCandidate, async (c) => {
+  await ensureCandidateSchema(c.env.DB)
+  const u = c.get('user') as any
+  const pu = await c.env.DB.prepare(`SELECT candidate_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.candidate_id) return c.json({ error: 'No candidate profile linked' }, 404)
+  const candidateId = pu.candidate_id
+  const body = await c.req.json() as any
+  const licenses = body.licenses || []
+  if (!Array.isArray(licenses) || licenses.length === 0) return c.json({ error: 'No licenses provided' }, 400)
+
+  let inserted = 0, updated = 0
+  for (const lic of licenses) {
+    const state = (lic.state || '').trim().toUpperCase()
+    const licType = (lic.license_type || '').trim()
+    if (!state || !licType) continue
+
+    const existing = await c.env.DB.prepare(
+      `SELECT id, license_number, expiry_date, status, practice_type, permitted_actions, notes FROM candidate_licenses WHERE candidate_id=? AND state=? AND license_type=?`
+    ).bind(candidateId, state, licType).first() as any
+
+    if (existing) {
+      // Preserve existing values if new value is blank
+      const licNum   = lic.license_number?.trim()   || existing.license_number   || ''
+      const expDate  = lic.expiry_date?.trim()       || existing.expiry_date      || ''
+      const status   = lic.status?.trim()            || existing.status           || 'active'
+      const practType = lic.practice_type?.trim()    || existing.practice_type    || ''
+      const permActs  = lic.permitted_actions?.trim()|| existing.permitted_actions|| ''
+      const notes    = lic.notes?.trim()             || existing.notes            || ''
+      await c.env.DB.prepare(
+        `UPDATE candidate_licenses SET license_number=?, expiry_date=?, status=?, practice_type=?, permitted_actions=?, notes=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`
+      ).bind(licNum, expDate, status, practType, permActs, notes, existing.id).run()
+      updated++
+    } else {
+      await c.env.DB.prepare(
+        `INSERT INTO candidate_licenses (candidate_id, state, license_type, license_number, expiry_date, status, practice_type, permitted_actions, notes) VALUES (?,?,?,?,?,?,?,?,?)`
+      ).bind(candidateId, state, licType, lic.license_number?.trim()||'', lic.expiry_date?.trim()||'', lic.status?.trim()||'active', lic.practice_type?.trim()||'', lic.permitted_actions?.trim()||'', lic.notes?.trim()||'').run()
+      inserted++
+    }
+  }
+
+  return c.json({ ok: true, inserted, updated, total: inserted + updated })
+})
 
 // ── requireCandidate: admin OR candidate role ────────────────────
 async function requireCandidate(c: any, next: any) {
@@ -4749,6 +4910,27 @@ app.post('/api/onboarding/candidates/:id/convert', async (c) => {
     await c.env.DB.prepare(
       `UPDATE portal_users SET is_active=1, contractor_id=? WHERE email=? AND is_active=0`
     ).bind(contractorId, candidate.email).run().catch(() => {})
+  }
+
+  // Migrate candidate_licenses → provider_licenses (skip if already exists for that state+type)
+  await ensureCandidateSchema(c.env.DB)
+  const candLicenses = await c.env.DB.prepare(
+    `SELECT * FROM candidate_licenses WHERE candidate_id=?`
+  ).bind(id).all()
+  for (const cl of (candLicenses.results as any[])) {
+    const existing = await c.env.DB.prepare(
+      `SELECT id FROM provider_licenses WHERE contractor_id=? AND state=? AND license_type=?`
+    ).bind(contractorId, cl.state, cl.license_type).first()
+    if (!existing) {
+      await c.env.DB.prepare(
+        `INSERT INTO provider_licenses
+         (contractor_id, state, license_number, license_type, expiry_date, status, notes,
+          permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime)
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+      ).bind(contractorId, cl.state, cl.license_number, cl.license_type, cl.expiry_date,
+             cl.status, cl.notes, cl.permitted_actions||'', cl.practice_type||'',
+             cl.license_file_name||'', cl.license_file_data||'', cl.license_file_mime||'').run().catch(() => {})
+    }
   }
 
   return c.json({ ok: true, contractor_id: contractorId })

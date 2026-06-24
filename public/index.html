@@ -2097,6 +2097,7 @@ function buildNav() {
   ]
   const candidateNav = [
     { id: 'candidate_status',    icon: 'fa-clipboard-list', label: 'My Application' },
+    { id: 'candidate_licenses',  icon: 'fa-certificate',    label: 'My Licenses' },
     { id: 'candidate_documents', icon: 'fa-file-alt',       label: 'My Documents' },
   ]
   const managerNav = [
@@ -2153,7 +2154,8 @@ const PAGE_PATHS = {
   mgr_consults:           '/manager/consults',
   mgr_availability:       '/manager/availability',
   candidate_status:       '/candidate/status',
-  candidate_documents: '/candidate/documents',
+  candidate_licenses:     '/candidate/licenses',
+  candidate_documents:    '/candidate/documents',
   lic_dashboard:       '/licensing',
   lic_edit:            '/licensing/edit',
   // onboarding sub-tabs
@@ -2188,10 +2190,10 @@ function navigate(page) {
   const navEl = $(`nav_${page}`)
   if (navEl) navEl.classList.add('active')
 
-  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', partner_view:'Partner View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', partner_view:'Partner View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_licenses:'My Licenses', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
   $('pageTitle').textContent = titles[page] || page
 
-  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, partner_view: renderPartnerView, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, partner_view: renderPartnerView, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_licenses: renderCandidateLicenses, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
   availability: renderAvailabilityDashboard, provider_availability: renderProviderAvailability,
   lic_dashboard: renderLicDashboard, lic_edit: renderLicEdit }
   if (pages[page]) pages[page]()
@@ -12542,6 +12544,552 @@ async function renderCandidateDocuments() {
     </div>`
   } catch(e) {
     mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Candidate Licenses tab ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const candLicState = { licenses: [] }
+
+const US_STATES = [
+  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+  'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+  'NM','NY','NC','ND','OH','OK','OR','PA','RI','SC','SD','TN','TX','UT','VT',
+  'VA','WA','WV','WI','WY','DC'
+]
+
+const LIC_TYPES_CAND = [
+  'MD','DO','NP','PA','CRNA','CNM','CNS','RN','LPN','LCSW','LMFT','LPC',
+  'PharmD','DPM','DC','OD','PT','OT','SLP','Other'
+]
+
+async function renderCandidateLicenses() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/candidate/licenses')
+    candLicState.licenses = data.licenses || []
+    candLicDraw(mc)
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function candLicDraw(mc) {
+  const lics = candLicState.licenses
+  mc.innerHTML = `
+  <div class="max-w-4xl">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+          <i class="fas fa-certificate text-blue-500"></i> My State Licenses
+        </h2>
+        <p class="text-xs text-gray-400 mt-0.5">Add all active state licenses. Collab agreements are handled separately.</p>
+      </div>
+      <div class="flex gap-2">
+        <button id="candLicTemplateBtn" class="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1">
+          <i class="fas fa-download"></i> Template
+        </button>
+        <button id="candLicImportBtn" class="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1">
+          <i class="fas fa-file-excel"></i> Import
+        </button>
+        <button id="candLicAddBtn" class="btn-primary text-xs px-3 py-1.5 flex items-center gap-1">
+          <i class="fas fa-plus"></i> Add License
+        </button>
+      </div>
+    </div>
+
+    ${lics.length === 0 ? `
+    <div class="card p-10 text-center text-gray-300">
+      <i class="fas fa-certificate text-5xl mb-3 block"></i>
+      <p class="text-sm font-medium text-gray-400">No licenses added yet</p>
+      <p class="text-xs text-gray-300 mt-1">Click "Add License" to get started, or use Import for bulk entry.</p>
+    </div>` : `
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">State</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">License #</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Expiry</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Document</th>
+            <th class="px-4 py-2.5"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          ${lics.map(l => {
+            const expDate = l.expiry_date ? new Date(l.expiry_date) : null
+            const today = new Date()
+            const daysLeft = expDate ? Math.ceil((expDate - today) / 86400000) : null
+            let expiryBadge = ''
+            if (daysLeft !== null) {
+              if (daysLeft < 0) expiryBadge = `<span class="ml-1 text-xs text-red-500 font-medium">(Expired)</span>`
+              else if (daysLeft <= 30) expiryBadge = `<span class="ml-1 text-xs text-orange-500 font-medium">(${daysLeft}d)</span>`
+              else if (daysLeft <= 60) expiryBadge = `<span class="ml-1 text-xs text-yellow-500 font-medium">(${daysLeft}d)</span>`
+            }
+            return `<tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-4 py-3 font-semibold text-gray-800">${escHtml(l.state)}</td>
+              <td class="px-4 py-3 text-gray-600">${escHtml(l.license_type||'—')}</td>
+              <td class="px-4 py-3 text-gray-600 font-mono text-xs">${escHtml(l.license_number||'—')}</td>
+              <td class="px-4 py-3 text-gray-600">${l.expiry_date ? l.expiry_date + expiryBadge : '—'}</td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${l.status==='active'?'bg-green-100 text-green-700':l.status==='expired'?'bg-red-100 text-red-700':'bg-gray-100 text-gray-500'}">
+                  ${escHtml(l.status||'active')}
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                ${l.license_file_name ? `<button class="text-blue-500 hover:text-blue-700 text-xs underline candlic-view-file" data-id="${l.id}" data-name="${escHtml(l.license_file_name)}">${escHtml(l.license_file_name)}</button>` : `<span class="text-gray-300 text-xs">No file</span>`}
+              </td>
+              <td class="px-4 py-3 text-right flex items-center gap-2 justify-end">
+                <button class="text-blue-400 hover:text-blue-600 candlic-edit-btn" data-id="${l.id}" title="Edit"><i class="fas fa-pencil-alt text-xs"></i></button>
+                <button class="text-red-400 hover:text-red-600 candlic-del-btn" data-id="${l.id}" title="Delete"><i class="fas fa-trash text-xs"></i></button>
+              </td>
+            </tr>`
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`}
+  </div>`
+
+  // Wire buttons
+  document.getElementById('candLicAddBtn')?.addEventListener('click', () => candLicOpenModal(null))
+  document.getElementById('candLicTemplateBtn')?.addEventListener('click', candLicDownloadTemplate)
+  document.getElementById('candLicImportBtn')?.addEventListener('click', candLicOpenImport)
+
+  document.querySelectorAll('.candlic-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const lic = candLicState.licenses.find(l => l.id == btn.dataset.id)
+      if (lic) candLicOpenModal(lic)
+    })
+  })
+  document.querySelectorAll('.candlic-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => candLicDelete(btn.dataset.id))
+  })
+  document.querySelectorAll('.candlic-view-file').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.open(`/api/candidate/licenses/${btn.dataset.id}/file`, '_blank')
+    })
+  })
+}
+
+function candLicOpenModal(lic) {
+  const isEdit = !!lic
+  const overlay = document.createElement('div')
+  overlay.className = 'fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50'
+  overlay.id = 'candLicModal'
+  overlay.innerHTML = `
+  <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl mx-4 max-h-[90vh] overflow-y-auto">
+    <div class="flex items-center justify-between p-5 border-b border-gray-100">
+      <h3 class="font-bold text-gray-800 text-base flex items-center gap-2">
+        <i class="fas fa-certificate text-blue-500"></i>
+        ${isEdit ? 'Edit License' : 'Add New License'}
+      </h3>
+      <button id="candLicModalClose" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <form id="candLicForm" class="p-5 space-y-4" autocomplete="off">
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State <span class="text-red-500">*</span></label>
+          <select name="state" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">Select state…</option>
+            ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Type <span class="text-red-500">*</span></label>
+          <select name="license_type" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">Select type…</option>
+            ${LIC_TYPES_CAND.map(t => `<option value="${t}" ${lic?.license_type===t?'selected':''}>${t}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Number</label>
+          <input type="text" name="license_number" value="${escHtml(lic?.license_number||'')}" placeholder="e.g. MD-12345"
+            class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Expiry Date</label>
+          <input type="date" name="expiry_date" value="${escHtml(lic?.expiry_date||'')}"
+            class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select name="status" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="active" ${(!lic||lic.status==='active')?'selected':''}>Active</option>
+            <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+            <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+            <option value="inactive" ${lic?.status==='inactive'?'selected':''}>Inactive</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+          <input type="text" name="practice_type" value="${escHtml(lic?.practice_type||'')}" placeholder="e.g. Full, Restricted"
+            class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions</label>
+        <input type="text" name="permitted_actions" value="${escHtml(lic?.permitted_actions||'')}" placeholder="e.g. Prescribe, Diagnose"
+          class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+        <textarea name="notes" rows="2" placeholder="Any additional notes…"
+          class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none">${escHtml(lic?.notes||'')}</textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Document ${isEdit && lic.license_file_name ? `<span class="text-gray-400 font-normal">(current: ${escHtml(lic.license_file_name)})</span>` : ''}</label>
+        <div class="border-2 border-dashed border-gray-200 rounded-lg p-4 text-center hover:border-blue-300 transition-colors cursor-pointer" id="candLicDropZone">
+          <input type="file" id="candLicFileInput" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" class="hidden">
+          <i class="fas fa-cloud-upload-alt text-gray-300 text-2xl mb-1 block"></i>
+          <p class="text-xs text-gray-400">Click to upload or drag & drop</p>
+          <p class="text-xs text-gray-300">PDF, JPG, PNG — max 10 MB</p>
+          <p id="candLicFileName" class="text-xs text-blue-500 mt-1 hidden"></p>
+        </div>
+      </div>
+      <div id="candLicModalErr" class="text-red-500 text-xs hidden"></div>
+      <div class="flex gap-3 pt-2">
+        <button type="submit" id="candLicSaveBtn" class="btn-primary flex-1 py-2 text-sm flex items-center justify-center gap-2">
+          <i class="fas fa-save"></i> ${isEdit ? 'Save Changes' : 'Add License'}
+        </button>
+        <button type="button" id="candLicCancelBtn" class="btn-secondary flex-1 py-2 text-sm">Cancel</button>
+      </div>
+    </form>
+  </div>`
+
+  document.body.appendChild(overlay)
+
+  // File picker
+  const dropZone = document.getElementById('candLicDropZone')
+  const fileInput = document.getElementById('candLicFileInput')
+  const fileNameEl = document.getElementById('candLicFileName')
+  let selectedFile = null
+
+  dropZone.addEventListener('click', () => fileInput.click())
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('border-blue-400') })
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('border-blue-400'))
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault()
+    dropZone.classList.remove('border-blue-400')
+    if (e.dataTransfer.files[0]) {
+      selectedFile = e.dataTransfer.files[0]
+      fileNameEl.textContent = selectedFile.name
+      fileNameEl.classList.remove('hidden')
+    }
+  })
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) {
+      selectedFile = fileInput.files[0]
+      fileNameEl.textContent = selectedFile.name
+      fileNameEl.classList.remove('hidden')
+    }
+  })
+
+  // Close
+  document.getElementById('candLicModalClose').addEventListener('click', () => overlay.remove())
+  document.getElementById('candLicCancelBtn').addEventListener('click', () => overlay.remove())
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+
+  // Submit
+  document.getElementById('candLicForm').addEventListener('submit', async e => {
+    e.preventDefault()
+    const errEl = document.getElementById('candLicModalErr')
+    const saveBtn = document.getElementById('candLicSaveBtn')
+    errEl.classList.add('hidden')
+    const fd = new FormData(e.target)
+    const payload = {
+      state: fd.get('state'),
+      license_type: fd.get('license_type'),
+      license_number: fd.get('license_number') || '',
+      expiry_date: fd.get('expiry_date') || '',
+      status: fd.get('status') || 'active',
+      practice_type: fd.get('practice_type') || '',
+      permitted_actions: fd.get('permitted_actions') || '',
+      notes: fd.get('notes') || '',
+    }
+
+    if (!payload.state) { errEl.textContent = 'State is required.'; errEl.classList.remove('hidden'); return }
+    if (!payload.license_type) { errEl.textContent = 'License type is required.'; errEl.classList.remove('hidden'); return }
+
+    // File → base64
+    if (selectedFile) {
+      if (selectedFile.size > 10 * 1024 * 1024) {
+        errEl.textContent = 'File is too large (max 10 MB).'
+        errEl.classList.remove('hidden')
+        return
+      }
+      const b64 = await new Promise(res => {
+        const reader = new FileReader()
+        reader.onload = ev => res(ev.target.result.split(',')[1])
+        reader.readAsDataURL(selectedFile)
+      })
+      payload.license_file_name = selectedFile.name
+      payload.license_file_data = b64
+      payload.license_file_mime = selectedFile.type || 'application/octet-stream'
+    }
+
+    saveBtn.disabled = true
+    saveBtn.innerHTML = `<div class="spinner-sm"></div> Saving…`
+    try {
+      if (isEdit) {
+        await api(`/api/candidate/licenses/${lic.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+      } else {
+        await api('/api/candidate/licenses', { method: 'POST', body: JSON.stringify(payload) })
+      }
+      overlay.remove()
+      // Refresh
+      const refreshData = await api('/api/candidate/licenses')
+      candLicState.licenses = refreshData.licenses || []
+      candLicDraw($('mainContent'))
+    } catch(err) {
+      errEl.textContent = err.message || 'Save failed.'
+      errEl.classList.remove('hidden')
+      saveBtn.disabled = false
+      saveBtn.innerHTML = `<i class="fas fa-save"></i> ${isEdit ? 'Save Changes' : 'Add License'}`
+    }
+  })
+}
+
+async function candLicDelete(id) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  try {
+    await api(`/api/candidate/licenses/${id}`, { method: 'DELETE' })
+    const refreshData = await api('/api/candidate/licenses')
+    candLicState.licenses = refreshData.licenses || []
+    candLicDraw($('mainContent'))
+  } catch(e) {
+    alert('Delete failed: ' + e.message)
+  }
+}
+
+function candLicDownloadTemplate() {
+  const wb = XLSX.utils.book_new()
+  // Instructions sheet
+  const instrRows = [
+    ['Candidate License Import Template — LionMD'],
+    [''],
+    ['INSTRUCTIONS:'],
+    ['1. Fill in the "Licenses" sheet with your license information.'],
+    ['2. State: Use 2-letter abbreviation (e.g. CA, NY, TX). Required.'],
+    ['3. License Type: Use one of: MD, DO, NP, PA, CRNA, CNM, CNS, RN, LPN, LCSW, LMFT, LPC, PharmD, DPM, DC, OD, PT, OT, SLP, Other. Required.'],
+    ['4. License Number: Your license number for that state.'],
+    ['5. Expiry Date: Format YYYY-MM-DD (e.g. 2026-12-31).'],
+    ['6. Status: active, pending, expired, or inactive.'],
+    ['7. Practice Type: e.g. Full, Restricted, Supervised.'],
+    ['8. Permitted Actions: e.g. Prescribe, Diagnose, Order Labs.'],
+    ['9. Notes: Any additional notes.'],
+    [''],
+    ['DO NOT include Collab Agreements — those are handled separately.'],
+    ['DO NOT rename the "Licenses" sheet.'],
+  ]
+  const instrSheet = XLSX.utils.aoa_to_sheet(instrRows)
+  instrSheet['!cols'] = [{wch:80}]
+  XLSX.utils.book_append_sheet(wb, instrSheet, 'Instructions')
+
+  // Licenses sheet
+  const headers = ['state','license_type','license_number','expiry_date','status','practice_type','permitted_actions','notes']
+  const rows = [headers]
+  // Pre-fill with existing licenses
+  candLicState.licenses.forEach(l => {
+    rows.push([l.state,l.license_type,l.license_number,l.expiry_date,l.status||'active',l.practice_type||'',l.permitted_actions||'',l.notes||''])
+  })
+  if (rows.length === 1) {
+    // Add a sample row
+    rows.push(['CA','MD','MD-12345','2026-12-31','active','Full','Prescribe, Diagnose',''])
+  }
+  const licSheet = XLSX.utils.aoa_to_sheet(rows)
+  licSheet['!cols'] = [{wch:8},{wch:14},{wch:18},{wch:14},{wch:10},{wch:14},{wch:24},{wch:30}]
+  XLSX.utils.book_append_sheet(wb, licSheet, 'Licenses')
+
+  XLSX.writeFile(wb, 'candidate_licenses_template.xlsx')
+}
+
+function candLicOpenImport() {
+  const overlay = document.createElement('div')
+  overlay.className = 'fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50'
+  overlay.id = 'candLicImportModal'
+  overlay.innerHTML = `
+  <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4">
+    <div class="flex items-center justify-between p-5 border-b border-gray-100">
+      <h3 class="font-bold text-gray-800 text-base flex items-center gap-2">
+        <i class="fas fa-file-excel text-green-500"></i> Import Licenses from Excel
+      </h3>
+      <button id="candLicImportClose" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-5 space-y-4">
+      <p class="text-xs text-gray-500">Upload the filled template XLSX. Existing licenses are matched by State + License Type and updated; new entries are added.</p>
+      <div class="border-2 border-dashed border-gray-200 rounded-lg p-6 text-center hover:border-green-300 transition-colors cursor-pointer" id="candLicImportDrop">
+        <input type="file" id="candLicImportFile" accept=".xlsx,.xls,.csv" class="hidden">
+        <i class="fas fa-file-upload text-gray-300 text-3xl mb-2 block"></i>
+        <p class="text-sm text-gray-500">Click to choose file or drag & drop</p>
+        <p class="text-xs text-gray-300">.xlsx, .xls, .csv</p>
+        <p id="candLicImportFileName" class="text-xs text-green-600 mt-1 hidden"></p>
+      </div>
+      <div id="candLicImportPreview" class="hidden"></div>
+      <div id="candLicImportErr" class="text-red-500 text-xs hidden"></div>
+      <div class="flex gap-3">
+        <button id="candLicImportSubmitBtn" class="btn-primary flex-1 py-2 text-sm hidden flex items-center justify-center gap-2">
+          <i class="fas fa-upload"></i> Import Licenses
+        </button>
+        <button id="candLicImportCancelBtn" class="btn-secondary flex-1 py-2 text-sm">Cancel</button>
+      </div>
+    </div>
+  </div>`
+
+  document.body.appendChild(overlay)
+
+  const dropEl = document.getElementById('candLicImportDrop')
+  const fileEl = document.getElementById('candLicImportFile')
+  const fileNameEl = document.getElementById('candLicImportFileName')
+
+  dropEl.addEventListener('click', () => fileEl.click())
+  dropEl.addEventListener('dragover', e => { e.preventDefault(); dropEl.classList.add('border-green-400') })
+  dropEl.addEventListener('dragleave', () => dropEl.classList.remove('border-green-400'))
+  dropEl.addEventListener('drop', e => {
+    e.preventDefault()
+    dropEl.classList.remove('border-green-400')
+    if (e.dataTransfer.files[0]) {
+      fileNameEl.textContent = e.dataTransfer.files[0].name
+      fileNameEl.classList.remove('hidden')
+      candLicParseImport(e.dataTransfer.files[0])
+    }
+  })
+  fileEl.addEventListener('change', () => {
+    if (fileEl.files[0]) {
+      fileNameEl.textContent = fileEl.files[0].name
+      fileNameEl.classList.remove('hidden')
+      candLicParseImport(fileEl.files[0])
+    }
+  })
+
+  document.getElementById('candLicImportClose').addEventListener('click', () => overlay.remove())
+  document.getElementById('candLicImportCancelBtn').addEventListener('click', () => overlay.remove())
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+}
+
+function candLicParseImport(file) {
+  const errEl = document.getElementById('candLicImportErr')
+  const previewEl = document.getElementById('candLicImportPreview')
+  const submitBtn = document.getElementById('candLicImportSubmitBtn')
+  errEl.classList.add('hidden')
+  previewEl.classList.add('hidden')
+  submitBtn.classList.add('hidden')
+
+  const reader = new FileReader()
+  reader.onload = e => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array' })
+      // Find "Licenses" sheet or use first
+      const sheetName = wb.SheetNames.includes('Licenses') ? 'Licenses' : wb.SheetNames[0]
+      const ws = wb.Sheets[sheetName]
+      const raw = XLSX.utils.sheet_to_json(ws, { defval: '' })
+
+      if (!raw.length) throw new Error('No data rows found in sheet.')
+
+      const requiredCols = ['state','license_type']
+      const first = raw[0]
+      for (const col of requiredCols) {
+        if (!(col in first)) throw new Error(`Missing required column: "${col}"`)
+      }
+
+      // Filter out collab agreements
+      const rows = raw.filter(r => {
+        const lt = (r.license_type||'').toString().trim().toUpperCase()
+        return lt !== 'COLLAB' && lt !== 'COLLABORATIVE AGREEMENT' && lt !== 'CA'
+      })
+
+      if (!rows.length) throw new Error('No valid license rows found (collab agreements are excluded).')
+
+      const mapped = rows.map(r => ({
+        state: (r.state||'').toString().trim().toUpperCase(),
+        license_type: (r.license_type||'').toString().trim(),
+        license_number: (r.license_number||'').toString().trim(),
+        expiry_date: (r.expiry_date||'').toString().trim(),
+        status: (r.status||'active').toString().trim() || 'active',
+        practice_type: (r.practice_type||'').toString().trim(),
+        permitted_actions: (r.permitted_actions||'').toString().trim(),
+        notes: (r.notes||'').toString().trim(),
+      })).filter(r => r.state && r.license_type)
+
+      if (!mapped.length) throw new Error('No valid rows after filtering. Ensure State and License Type are filled.')
+
+      // Show preview
+      previewEl.innerHTML = `
+      <div class="border border-gray-100 rounded-lg overflow-hidden">
+        <div class="bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100">
+          Preview — ${mapped.length} license${mapped.length!==1?'s':''} to import
+        </div>
+        <div class="overflow-x-auto max-h-52">
+          <table class="w-full text-xs">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="text-left px-3 py-1.5 text-gray-400">State</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">Type</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">License #</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">Expiry</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">Status</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-50">
+              ${mapped.map(r => `<tr>
+                <td class="px-3 py-1.5 font-semibold">${escHtml(r.state)}</td>
+                <td class="px-3 py-1.5">${escHtml(r.license_type)}</td>
+                <td class="px-3 py-1.5 font-mono">${escHtml(r.license_number||'—')}</td>
+                <td class="px-3 py-1.5">${escHtml(r.expiry_date||'—')}</td>
+                <td class="px-3 py-1.5">${escHtml(r.status)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`
+      previewEl.classList.remove('hidden')
+      submitBtn.classList.remove('hidden')
+
+      // Wire submit
+      const newBtn = submitBtn.cloneNode(true)
+      submitBtn.parentNode.replaceChild(newBtn, submitBtn)
+      newBtn.classList.remove('hidden')
+      newBtn.addEventListener('click', () => candLicSubmitImport(mapped))
+    } catch(err) {
+      errEl.textContent = err.message
+      errEl.classList.remove('hidden')
+    }
+  }
+  reader.readAsArrayBuffer(file)
+}
+
+async function candLicSubmitImport(rows) {
+  const errEl = document.getElementById('candLicImportErr')
+  const submitBtn = document.getElementById('candLicImportSubmitBtn') || document.querySelector('#candLicImportModal .btn-primary')
+  errEl?.classList.add('hidden')
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = `<div class="spinner-sm"></div> Importing…` }
+  try {
+    const result = await api('/api/candidate/licenses/import', {
+      method: 'POST',
+      body: JSON.stringify({ licenses: rows })
+    })
+    document.getElementById('candLicImportModal')?.remove()
+    // Refresh list
+    const refreshData = await api('/api/candidate/licenses')
+    candLicState.licenses = refreshData.licenses || []
+    candLicDraw($('mainContent'))
+    // Show success toast
+    const toast = document.createElement('div')
+    toast.className = 'fixed bottom-6 right-6 bg-green-600 text-white text-sm px-5 py-3 rounded-xl shadow-lg z-50 flex items-center gap-2'
+    toast.innerHTML = `<i class="fas fa-check-circle"></i> Imported ${result.inserted||0} new, updated ${result.updated||0} licenses.`
+    document.body.appendChild(toast)
+    setTimeout(() => toast.remove(), 4000)
+  } catch(err) {
+    if (errEl) { errEl.textContent = err.message || 'Import failed.'; errEl.classList.remove('hidden') }
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<i class="fas fa-upload"></i> Import Licenses` }
   }
 }
 
