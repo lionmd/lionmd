@@ -2285,6 +2285,34 @@ app.post('/api/apply', async (c) => {
     `).bind(candidateId, 'resume', body.cv_name, body.cv_data,
             body.cv_size || 0, body.cv_mime || 'application/pdf').run()
   }
+  // Save candidate licenses if provided
+  if (Array.isArray(body.licenses) && body.licenses.length > 0) {
+    await ensureCandidateSchema(c.env.DB)
+    // Create a portal_user row for the candidate so candidate_licenses FK works
+    // (candidate_id in candidate_licenses refers to onboarding_candidates.id directly)
+    for (const lic of body.licenses as any[]) {
+      const state = (lic.state || '').trim().toUpperCase()
+      if (!state) continue
+      await c.env.DB.prepare(`
+        INSERT INTO candidate_licenses
+          (candidate_id, state, license_type, license_number, expiry_date, status,
+           permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)
+      `).bind(
+        candidateId,
+        state,
+        (lic.license_type || '').trim(),
+        (lic.license_number || '').trim(),
+        (lic.expiry_date || '').trim(),
+        (lic.status || 'active').trim(),
+        (lic.permitted_actions || '').trim(),
+        (lic.practice_type || '').trim(),
+        (lic.license_file_name || '').trim(),
+        (lic.license_file_data || ''),
+        (lic.license_file_mime || '').trim()
+      ).run().catch(() => {})
+    }
+  }
   return c.json({ ok: true, id: candidateId })
 })
 

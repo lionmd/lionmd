@@ -1109,18 +1109,19 @@
   <!-- ── STEP 3: State Licenses ── -->
   <div class="apply-step" id="applyStep3">
     <div class="apply-card">
-      <div class="apply-section-title"><i class="fas fa-map-marker-alt mr-2 text-emerald-400"></i>State Licenses</div>
-      <p class="text-sm text-gray-500 mb-4">Select every state where you hold an active medical license.</p>
-
-      <!-- State search + chip display -->
-      <div class="mb-3">
-        <input type="text" id="stateSearch" placeholder="Search state…" oninput="applyFilterStates(this.value)"
-          style="max-width:260px;">
+      <div class="flex items-center justify-between mb-3">
+        <div class="apply-section-title mb-0"><i class="fas fa-certificate mr-2 text-emerald-400"></i>State Licenses</div>
+        <button class="apply-nav-btn primary" style="padding:8px 16px;font-size:13px;" onclick="applyLicOpenModal(null)">
+          <i class="fas fa-plus mr-1"></i> Add License
+        </button>
       </div>
-      <div id="stateChipsSelected" class="flex flex-wrap gap-2 mb-4 min-h-[32px]"></div>
-
-      <!-- Full US state grid -->
-      <div id="stateGrid" class="grid grid-cols-2 sm:grid-cols-3 gap-1.5 max-h-64 overflow-y-auto pr-1">
+      <p class="text-sm text-gray-500 mb-4">Add each state where you hold an active medical license. Collab agreements are not required here.</p>
+      <div id="applyLicList">
+        <div class="text-center py-8 text-gray-300">
+          <i class="fas fa-certificate text-4xl mb-2 block"></i>
+          <p class="text-sm text-gray-400">No licenses added yet — click <strong>Add License</strong> to get started.</p>
+          <p class="text-xs text-gray-300 mt-1">You can also skip this step and add licenses after onboarding.</p>
+        </div>
       </div>
     </div>
     <div class="flex justify-between mt-5">
@@ -1610,11 +1611,13 @@ let applyState = {
   photoB64: '', photoMime: '', photoName: '',
   cvB64: '', cvMime: '', cvName: '', cvSize: 0,
   selectedStates: new Set(),
+  licenses: [],          // { _id, state, license_type, license_number, expiry_date, status, permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime }
+  _licFileState: {},     // temp file for modal
 }
 
 function showApplyForm() {
   // Reset state
-  applyState = { currentStep: 1, photoB64:'', photoMime:'', photoName:'', cvB64:'', cvMime:'', cvName:'', cvSize:0, selectedStates: new Set() }
+  applyState = { currentStep: 1, photoB64:'', photoMime:'', photoName:'', cvB64:'', cvMime:'', cvName:'', cvSize:0, selectedStates: new Set(), licenses: [], _licFileState: {} }
   // Release any scroll lock, hide login screen, show apply screen
   document.body.style.overflow = ''
   $('loginScreen').classList.add('hidden')
@@ -1630,15 +1633,13 @@ function showApplyForm() {
     const conn = $('applyConn'+i)
     if (conn) conn.className = 'apply-connector'
   }
-  // Render state grid
-  applyRenderStateGrid('')
   // Clear fields
   ;['applyName','applyEmail','applyPhone','applyCompany','applySSN','applyEIN','applyNPI','applyNotes'].forEach(id => { const el=$(id); if(el) el.value='' })
   const rg = $('applyRoleGroup'); if(rg) rg.value = ''
   $('photoPlaceholder').classList.remove('hidden'); $('photoPreviewWrap').classList.add('hidden')
   $('cvPlaceholder').classList.remove('hidden'); $('cvFileInfo').classList.add('hidden')
   $('applyError').classList.add('hidden')
-  $('stateChipsSelected').innerHTML = ''
+  applyLicDraw()
   window.scrollTo(0,0)
 }
 
@@ -1716,7 +1717,7 @@ function applyBuildSummary() {
     ['fa-id-badge',     'Provider Type',  ($('applyRoleGroup')?.value||'')],
     ['fa-stethoscope',  'Specialty',      ($('applySpecialty')?.value||'').trim() || '—'],
     ['fa-lock',         'SSN last 4',     ($('applySSN')?.value||'').trim() ? '•••• '+($('applySSN')?.value||'') : '—'],
-    ['fa-map-marker-alt','Licensed States', applyState.selectedStates.size ? [...applyState.selectedStates].sort().join(', ') : '—'],
+    ['fa-certificate',   'Licenses',       applyState.licenses.length ? applyState.licenses.map(l => l.state + (l.license_type ? ' ('+l.license_type+')' : '')).join(', ') : 'None added'],
     ['fa-file-alt',     'CV / Resume',    applyState.cvName || '—'],
     ['fa-camera',       'Photo',          applyState.photoName || 'Not provided'],
   ]
@@ -1729,7 +1730,270 @@ function applyBuildSummary() {
   `).join('')
 }
 
-// ── State license selector ───────────────────────────────────────
+// ── Onboarding license manager (Step 3) ─────────────────────────
+
+function applyLicDraw() {
+  const el = $('applyLicList')
+  if (!el) return
+  const lics = applyState.licenses
+  if (!lics.length) {
+    el.innerHTML = `
+      <div class="text-center py-8 text-gray-300">
+        <i class="fas fa-certificate text-4xl mb-2 block"></i>
+        <p class="text-sm text-gray-400">No licenses added yet — click <strong>Add License</strong> to get started.</p>
+        <p class="text-xs text-gray-300 mt-1">You can also skip this step and add licenses after onboarding.</p>
+      </div>`
+    return
+  }
+  el.innerHTML = `<div class="space-y-2">` + lics.map((lic, idx) => {
+    const expDate = lic.expiry_date ? new Date(lic.expiry_date) : null
+    const today = new Date()
+    const daysLeft = expDate ? Math.ceil((expDate - today) / 86400000) : null
+    let expiryNote = ''
+    if (daysLeft !== null) {
+      if (daysLeft < 0) expiryNote = `<span class="text-xs text-red-500 ml-1">(Expired)</span>`
+      else if (daysLeft <= 60) expiryNote = `<span class="text-xs text-orange-500 ml-1">(${daysLeft}d left)</span>`
+    }
+    const statusColor = lic.status === 'active' ? 'bg-green-100 text-green-700' : lic.status === 'expired' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
+    return `
+    <div class="flex items-start gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50">
+      <div class="w-9 h-9 rounded-lg bg-white border border-gray-200 flex items-center justify-center flex-shrink-0">
+        <i class="fas fa-certificate text-green-500 text-sm"></i>
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-bold text-gray-800 text-sm">${escHtml(lic.state)}</span>
+          ${lic.license_type ? `<span class="text-xs text-gray-500">${escHtml(lic.license_type)}</span>` : ''}
+          <span class="px-1.5 py-0.5 rounded-full text-xs font-medium ${statusColor}">${escHtml(lic.status||'active')}</span>
+        </div>
+        <div class="flex flex-wrap gap-3 mt-1 text-xs text-gray-400">
+          ${lic.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(lic.license_number)}</span>` : '<span class="text-orange-400 italic">No license # yet</span>'}
+          ${lic.expiry_date ? `<span><i class="fas fa-calendar mr-0.5"></i>${lic.expiry_date}${expiryNote}</span>` : ''}
+          ${lic.permitted_actions ? `<span><i class="fas fa-stethoscope mr-0.5"></i>${escHtml(lic.permitted_actions)}</span>` : ''}
+        </div>
+        ${lic.license_file_name ? `<div class="mt-1 text-xs text-blue-500"><i class="fas fa-paperclip mr-1"></i>${escHtml(lic.license_file_name)}</div>` : ''}
+      </div>
+      <div class="flex gap-1 flex-shrink-0">
+        <button type="button" onclick="applyLicOpenModal(${idx})" class="w-7 h-7 rounded-lg hover:bg-white border border-transparent hover:border-gray-200 text-gray-400 hover:text-blue-500 flex items-center justify-center" title="Edit">
+          <i class="fas fa-pencil-alt text-xs"></i>
+        </button>
+        <button type="button" onclick="applyLicDelete(${idx})" class="w-7 h-7 rounded-lg hover:bg-white border border-transparent hover:border-gray-200 text-gray-400 hover:text-red-500 flex items-center justify-center" title="Remove">
+          <i class="fas fa-trash text-xs"></i>
+        </button>
+      </div>
+    </div>`
+  }).join('') + `</div>`
+}
+
+function applyLicDelete(idx) {
+  applyState.licenses.splice(idx, 1)
+  applyLicDraw()
+}
+
+function applyLicOpenModal(idx) {
+  const isEdit = idx !== null && idx >= 0
+  const lic = isEdit ? applyState.licenses[idx] : null
+  applyState._licFileState = {}
+
+  let modal = $('applyLicModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'applyLicModal'
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4'
+    modal.style.background = 'rgba(0,0,0,0.45)'
+    document.body.appendChild(modal)
+  }
+
+  modal.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[92vh] overflow-y-auto">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <h3 class="font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-certificate text-green-500"></i>
+        ${isEdit ? 'Edit License' : 'Add State License'}
+      </h3>
+      <button type="button" id="applyLicModalClose" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+    <div class="p-5 space-y-4">
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State <span class="text-red-400">*</span></label>
+          <select id="aLicState" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">Select…</option>
+            ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select id="aLicStatus" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="active"  ${(!lic||lic.status==='active') ?'selected':''}>Active</option>
+            <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+            <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+        <input id="aLicType" type="text" placeholder="e.g. MD, DO, NP, ARNP, PA"
+          value="${escHtml(lic?.license_type||'')}"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Number</label>
+        <input id="aLicNum" type="text" placeholder="e.g. AP123456"
+          value="${escHtml(lic?.license_number||'')}"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Expiration Date</label>
+        <input id="aLicExpiry" type="date" value="${lic?.expiry_date||''}"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+      </div>
+
+      <!-- Practice Authority -->
+      <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
+        <div class="text-xs font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5">
+          <i class="fas fa-stethoscope"></i> Practice Authority
+          <span class="font-normal text-blue-500 normal-case tracking-normal">— What are you authorized to do in this state?</span>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions</label>
+          <select id="aLicPermitted" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="" ${!lic?.permitted_actions?'selected':''}>— Select —</option>
+            <option value="Can See Patients + Prescribe"          ${lic?.permitted_actions==='Can See Patients + Prescribe'?'selected':''}>✅ Can See Patients + Prescribe (Full CRx)</option>
+            <option value="Can See Patients (No CRx)"             ${lic?.permitted_actions==='Can See Patients (No CRx)'?'selected':''}>🟡 Can See Patients (No CRx)</option>
+            <option value="Can See Patients + Prescribe (Collab)" ${lic?.permitted_actions==='Can See Patients + Prescribe (Collab)'?'selected':''}>🤝 Can See Patients + Prescribe (Collab MD)</option>
+            <option value="Can See Patients (No CRx, Collab)"     ${lic?.permitted_actions==='Can See Patients (No CRx, Collab)'?'selected':''}>🤝 Can See Patients (No CRx, Collab MD)</option>
+            <option value="Pending License"                        ${lic?.permitted_actions==='Pending License'?'selected':''}>⏳ Pending License</option>
+            <option value="Not Licensed"                           ${lic?.permitted_actions==='Not Licensed'?'selected':''}>❌ Not Licensed in This State</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+          <select id="aLicPracticeType" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value=""            ${!lic?.practice_type?'selected':''}>— Select —</option>
+            <option value="independent" ${lic?.practice_type==='independent'?'selected':''}>Independent (Full Practice Authority)</option>
+            <option value="collab_md"   ${lic?.practice_type==='collab_md'?'selected':''}>Requires Collaborating MD</option>
+            <option value="md_self"     ${lic?.practice_type==='md_self'?'selected':''}>Physician (Self-supervised)</option>
+            <option value="unclear"     ${lic?.practice_type==='unclear'?'selected':''}>Unclear / Needs Review</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- File upload -->
+      <div class="border-t border-gray-100 pt-3">
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+          <i class="fas fa-paperclip mr-1 text-gray-400"></i>License Copy (PDF or image)
+        </label>
+        ${lic?.license_file_name ? `
+        <div id="aLicFileExisting" class="flex items-center gap-2 mb-2 p-2 bg-green-50 border border-green-200 rounded-lg">
+          <i class="fas fa-file-pdf text-green-500 text-sm"></i>
+          <span class="text-xs text-green-700 font-medium flex-1 truncate">${escHtml(lic.license_file_name)}</span>
+          <button type="button" id="aLicFileRemoveBtn" class="text-xs text-red-400 hover:text-red-600"><i class="fas fa-times"></i></button>
+        </div>` : ''}
+        <div id="aLicFileNew" class="${lic?.license_file_name ? 'hidden' : ''}">
+          <label class="flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border-2 border-dashed border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors">
+            <i class="fas fa-upload text-gray-400 text-sm"></i>
+            <span id="aLicFileLabel" class="text-xs text-gray-500">Upload license copy…</span>
+            <input type="file" id="aLicFileInput" accept=".pdf,.jpg,.jpeg,.png,.webp" class="hidden">
+          </label>
+        </div>
+      </div>
+
+      <div id="aLicError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+
+      <div class="flex gap-3 pt-1">
+        <button type="button" id="aLicCancelBtn" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+        <button type="button" id="aLicSaveBtn" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+          ${isEdit ? 'Save Changes' : 'Add License'}
+        </button>
+      </div>
+    </div>
+  </div>`
+
+  modal.classList.remove('hidden')
+
+  // Wire close
+  document.getElementById('applyLicModalClose').addEventListener('click', () => modal.classList.add('hidden'))
+  document.getElementById('aLicCancelBtn').addEventListener('click', () => modal.classList.add('hidden'))
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.add('hidden') })
+
+  // Wire file input
+  const fileInput = document.getElementById('aLicFileInput')
+  const fileLabel = document.getElementById('aLicFileLabel')
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0]
+    if (!file) return
+    if (fileLabel) fileLabel.textContent = file.name
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const full = ev.target.result
+      applyState._licFileState = {
+        license_file_name: file.name,
+        license_file_data: full.split(',')[1],
+        license_file_mime: file.type || 'application/octet-stream'
+      }
+    }
+    reader.readAsDataURL(file)
+  })
+
+  // Wire remove existing file
+  const removeBtn = document.getElementById('aLicFileRemoveBtn')
+  if (removeBtn) {
+    removeBtn.addEventListener('click', () => {
+      applyState._licFileState = { _removeFile: true }
+      const existing = document.getElementById('aLicFileExisting')
+      if (existing) existing.remove()
+      const newFile = document.getElementById('aLicFileNew')
+      if (newFile) newFile.classList.remove('hidden')
+    })
+  }
+
+  // Wire save
+  document.getElementById('aLicSaveBtn').addEventListener('click', () => applyLicSave(idx))
+}
+
+function applyLicSave(idx) {
+  const isEdit = idx !== null && idx >= 0
+  const state   = ($('aLicState')?.value||'').trim()
+  const status  = ($('aLicStatus')?.value||'active')
+  const type    = ($('aLicType')?.value||'').trim()
+  const num     = ($('aLicNum')?.value||'').trim()
+  const expiry  = ($('aLicExpiry')?.value||'')
+  const permitted_actions = ($('aLicPermitted')?.value||'').trim()
+  const practice_type     = ($('aLicPracticeType')?.value||'').trim()
+  const errEl = $('aLicError')
+
+  if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  errEl.classList.add('hidden')
+
+  const existing = isEdit ? applyState.licenses[idx] : {}
+  const fs = applyState._licFileState
+
+  const entry = {
+    _id: isEdit ? existing._id : Date.now(),
+    state, status, license_type: type, license_number: num, expiry_date: expiry,
+    permitted_actions, practice_type,
+    // file: use new upload, or keep existing unless removed
+    license_file_name: fs.license_file_name || (!fs._removeFile ? (existing.license_file_name||'') : ''),
+    license_file_data: fs.license_file_data || (!fs._removeFile ? (existing.license_file_data||'') : ''),
+    license_file_mime: fs.license_file_mime || (!fs._removeFile ? (existing.license_file_mime||'') : ''),
+  }
+
+  if (isEdit) applyState.licenses[idx] = entry
+  else applyState.licenses.push(entry)
+
+  applyState._licFileState = {}
+  $('applyLicModal').classList.add('hidden')
+  applyLicDraw()
+}
+
+// ── State license selector (legacy — kept for compatibility) ──────
 function applyRenderStateGrid(filter) {
   const grid = $('stateGrid')
   if (!grid) return
@@ -1839,7 +2103,8 @@ async function applySubmit() {
     role_group:      $('applyRoleGroup')?.value || '',
     specialty:       ($('applySpecialty')?.value||'').trim(),
     ein_ssn,
-    states_licensed: [...applyState.selectedStates].sort().join(', '),
+    states_licensed: applyState.licenses.map(l => l.state).filter(Boolean).join(', '),
+    licenses:        applyState.licenses,
     notes,
     photo_data:      applyState.photoB64,
     photo_mime:      applyState.photoMime,
