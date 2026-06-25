@@ -3919,10 +3919,17 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
   }
   if (date_from) { where += ' AND c.decision_date >= ?'; params.push(date_from) }
   if (date_to)   { where += ' AND c.decision_date <= ?'; params.push(date_to) }
+  const reveal = c.req.query('reveal') === '1'
   if (search) {
-    // HIPAA: patient_name excluded from provider search — search by case ID and org only
-    where += ' AND (c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
-    params.push(`%${search}%`, `%${search}%`)
+    if (reveal) {
+      // Names are revealed — include patient_name in search
+      where += ' AND (c.case_id_short LIKE ? OR c.organization_name LIKE ? OR c.patient_name LIKE ?)'
+      params.push(`%${search}%`, `%${search}%`, `%${search}%`)
+    } else {
+      // HIPAA: patient_name excluded from provider search — search by case ID and org only
+      where += ' AND (c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
+      params.push(`%${search}%`, `%${search}%`)
+    }
   }
 
   const countResult = await c.env.DB.prepare(
@@ -3941,9 +3948,7 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
      LIMIT ? OFFSET ?`
   ).bind(...params, limit, offset).all()
 
-  // HIPAA: mask patient names to initials unless the provider has explicitly acknowledged
-  // the HIPAA notice for this request (reveal=1 query param, set only after modal confirmation).
-  const reveal = c.req.query('reveal') === '1'
+  // HIPAA: mask patient names to initials unless reveal=1 was sent (set above, after explicit modal acknowledgement)
   const masked = (rows.results as any[]).map((r: any) => {
     if (reveal) return r  // full name — provider acknowledged HIPAA warning
     const words = (r.patient_name || '').trim().split(/\s+/).filter(Boolean)

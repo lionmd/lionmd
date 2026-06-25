@@ -14315,7 +14315,7 @@ function ppDrawConsults() {
           <option value="">All Periods</option>
           ${periods.map(p => `<option value="${p.period_key}" ${p.period_key===period?'selected':''}>${escHtml(p.period_label||p.period_key)}</option>`).join('')}
         </select>
-        <input id="ppCSearch" type="text" placeholder="Search case ID or org…"
+        <input id="ppCSearch" type="text" placeholder="${showNames ? 'Search case ID, org, or patient name…' : 'Search case ID or org…'}"
           value="${escHtml(search)}"
           oninput="ppConsultState.search=this.value; ppConsultState.page=1; clearTimeout(ppConsultState._t); ppConsultState._t=setTimeout(ppLoadConsults,350)"
           class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm w-52 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
