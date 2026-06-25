@@ -14139,9 +14139,47 @@ function ppDrawPayroll(data) {
 }
 
 // ── My Consults tab ────────────────────────────────────────────────
-const ppConsultState = { period: '', search: '', page: 1, total: 0, data: [], periods: [] }
+const ppConsultState = { period: '', search: '', page: 1, total: 0, data: [], periods: [], showNames: false }
+
+// HIPAA name-masking helpers for provider consults
+function ppMaskName(name) {
+  if (ppConsultState.showNames) return name || ''
+  const words = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '—'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+function ppToggleNames() {
+  if (ppConsultState.showNames) {
+    ppConsultState.showNames = false
+    ppUpdateToggleBtn()
+    ppLoadConsults()   // reload without reveal=1
+    return
+  }
+  $('ppHipaaModal').classList.remove('hidden')
+}
+
+function ppConfirmShowNames() {
+  $('ppHipaaModal').classList.add('hidden')
+  ppConsultState.showNames = true
+  ppUpdateToggleBtn()
+  ppLoadConsults()   // reload with reveal=1
+}
+
+function ppUpdateToggleBtn() {
+  const btn = $('ppNamesToggleBtn')
+  if (!btn) return
+  if (ppConsultState.showNames) {
+    btn.innerHTML = '<i class="fas fa-eye-slash mr-1.5"></i>Hide Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 bg-amber-50 border border-amber-300 text-amber-700 hover:bg-amber-100 text-sm font-medium rounded-xl transition whitespace-nowrap'
+  } else {
+    btn.innerHTML = '<i class="fas fa-eye mr-1.5"></i>Show Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap'
+  }
+}
 
 async function renderProviderConsults() {
+  ppConsultState.showNames = false   // reset on each navigation — must re-acknowledge per session view
   const mc = $('mainContent')
   mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
   try {
@@ -14159,8 +14197,9 @@ async function renderProviderConsults() {
 
 async function ppLoadConsults() {
   const qs = new URLSearchParams({ page: ppConsultState.page, limit: 50 })
-  if (ppConsultState.period) qs.set('period_key', ppConsultState.period)
-  if (ppConsultState.search) qs.set('search', ppConsultState.search)
+  if (ppConsultState.period)    qs.set('period_key', ppConsultState.period)
+  if (ppConsultState.search)    qs.set('search', ppConsultState.search)
+  if (ppConsultState.showNames) qs.set('reveal', '1')   // HIPAA: only sent after explicit acknowledgement
   const data = await api('/api/provider/consults?' + qs.toString())
   ppConsultState.data  = data.data  || []
   ppConsultState.total = data.total || 0
@@ -14169,7 +14208,7 @@ async function ppLoadConsults() {
 
 function ppDrawConsults() {
   const mc = $('mainContent')
-  const { data: rows, total, periods, period, search } = ppConsultState
+  const { data: rows, total, periods, period, search, showNames } = ppConsultState
   const pageCount = Math.ceil(total / 50)
 
   const vtLabel = vt => {
@@ -14209,8 +14248,20 @@ function ppDrawConsults() {
         value="${escHtml(search)}"
         oninput="ppConsultState.search=this.value; ppConsultState.page=1; clearTimeout(ppConsultState._t); ppConsultState._t=setTimeout(ppLoadConsults,350)"
         class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm w-56 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+      <!-- Show/Hide Names toggle -->
+      <button id="ppNamesToggleBtn" onclick="ppToggleNames()"
+        class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap">
+        <i class="fas fa-eye mr-1.5"></i>Show Names
+      </button>
       <span class="text-sm text-gray-400 ml-auto">${total.toLocaleString()} case${total !== 1 ? 's' : ''}</span>
     </div>
+
+    <!-- HIPAA active banner (shown when names are revealed) -->
+    ${showNames ? `
+    <div class="flex items-center gap-2 mb-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+      <i class="fas fa-shield-alt text-amber-500"></i>
+      <span><strong>HIPAA Notice:</strong> Patient names are currently visible. Ensure no unauthorized individuals can view your screen. Names will be hidden when you navigate away.</span>
+    </div>` : ''}
 
     <!-- Table -->
     <div class="card overflow-hidden">
@@ -14219,7 +14270,10 @@ function ppDrawConsults() {
           <thead>
             <tr class="border-b border-gray-100 text-left bg-gray-50">
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
-              <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Patient <span class="normal-case font-normal text-gray-400 ml-1">(initials only)</span></th>
+              <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">
+                Patient
+                <span class="normal-case font-normal text-gray-400 ml-1">${showNames ? '(full name)' : '(initials only)'}</span>
+              </th>
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Organization</th>
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Type</th>
               <th class="px-4 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Decision</th>
@@ -14237,7 +14291,7 @@ function ppDrawConsults() {
               <tr class="border-b border-gray-50 hover:bg-gray-50 transition-colors">
                 <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">${r.decision_date ? new Date(r.decision_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'}</td>
                 <td class="px-4 py-3">
-                  <p class="font-medium text-gray-800 font-mono tracking-wider text-gray-500">${escHtml(r.patient_name || '—')}</p>
+                  <p class="font-medium ${showNames ? 'text-gray-800' : 'font-mono tracking-wider text-gray-400'}">${escHtml(ppMaskName(r.patient_name) || '—')}</p>
                   ${r.case_id_short ? `<p class="text-xs text-gray-400">${escHtml(r.case_id_short)}</p>` : ''}
                 </td>
                 <td class="px-4 py-3 text-gray-600 max-w-[160px] truncate">${escHtml(r.organization_name || '—')}</td>
@@ -14266,7 +14320,45 @@ function ppDrawConsults() {
         </button>
       </div>` : ''}
     </div>
+
+    <!-- HIPAA Warning Modal (Provider Consults) -->
+    <div id="ppHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-shield-alt text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-gray-900">HIPAA Privacy Notice</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Protected Health Information</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-2">
+          <p class="font-semibold">You are about to reveal patient names on screen.</p>
+          <ul class="list-disc list-inside space-y-1 text-xs">
+            <li>Ensure no unauthorized individuals can view your screen</li>
+            <li>Do not take screenshots or record this screen while names are visible</li>
+            <li>Names will be hidden again when you navigate away from this page</li>
+            <li>Access to this information is logged and auditable</li>
+          </ul>
+        </div>
+        <p class="text-xs text-gray-500 mb-5">By clicking <strong>I Acknowledge</strong> you confirm you are authorized to view this information and accept responsibility for its protection under HIPAA.</p>
+        <div class="flex gap-3">
+          <button onclick="$('ppHipaaModal').classList.add('hidden')"
+            class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button onclick="ppConfirmShowNames()"
+            class="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-xl transition">
+            <i class="fas fa-eye mr-1.5"></i>I Acknowledge — Show Names
+          </button>
+        </div>
+      </div>
+    </div>
   </div>`
+
+  // Sync toggle button state after re-render
+  ppUpdateToggleBtn()
 }
 
 // ── Documents & CV tab ────────────────────────────────────────────

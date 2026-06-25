@@ -3911,8 +3911,11 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
      LIMIT ? OFFSET ?`
   ).bind(...params, limit, offset).all()
 
-  // HIPAA: never expose full patient name to provider portal — reduce to initials server-side
+  // HIPAA: mask patient names to initials unless the provider has explicitly acknowledged
+  // the HIPAA notice for this request (reveal=1 query param, set only after modal confirmation).
+  const reveal = c.req.query('reveal') === '1'
   const masked = (rows.results as any[]).map((r: any) => {
+    if (reveal) return r  // full name — provider acknowledged HIPAA warning
     const words = (r.patient_name || '').trim().split(/\s+/).filter(Boolean)
     return { ...r, patient_name: words.length ? words.map((w: string) => w[0].toUpperCase() + '.').join('') : '' }
   })
