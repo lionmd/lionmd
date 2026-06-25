@@ -3871,7 +3871,7 @@ app.get('/api/provider/payroll', requireProvider, async (c) => {
 })
 
 // ── GET /api/provider/consults ────────────────────────────────────
-// Provider fetches their own consult records (paginated, filterable by period)
+// Provider fetches their own consult records (paginated, filterable, sortable)
 app.get('/api/provider/consults', requireProvider, async (c) => {
   await ensureProviderSchema(c.env.DB)
   const u = c.get('user')
@@ -3879,16 +3879,46 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
   if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
   const cid = pu.contractor_id
 
-  const period_key = c.req.query('period_key')
-  const page       = parseInt(c.req.query('page')  || '1')
-  const limit      = parseInt(c.req.query('limit') || '50')
-  const search     = c.req.query('search')
-  const offset     = (page - 1) * limit
+  const period_key      = c.req.query('period_key')
+  const page            = parseInt(c.req.query('page')  || '1')
+  const limit           = parseInt(c.req.query('limit') || '50')
+  const search          = c.req.query('search')
+  const decision_status = c.req.query('decision_status')  // 'Approved' | 'Denied' | 'Pending'
+  const visit_type      = c.req.query('visit_type')       // 'ASYNC_TEXT_EMAIL' | '_SYNC' | 'NO_SHOW' etc.
+  const date_from       = c.req.query('date_from')        // 'YYYY-MM-DD'
+  const date_to         = c.req.query('date_to')          // 'YYYY-MM-DD'
+  const offset          = (page - 1) * limit
+
+  // Sorting — whitelist allowed columns to prevent SQL injection
+  const SORT_COLS: Record<string, string> = {
+    decision_date:    'c.decision_date',
+    patient_name:     'c.patient_name',
+    organization_name:'c.organization_name',
+    visit_type:       'c.visit_type',
+    contractor_fee:   'c.contractor_fee',
+    case_id_short:    'c.case_id_short',
+    decision_status:  'c.decision_status',
+  }
+  const rawSortBy  = c.req.query('sort_by')  || 'decision_date'
+  const rawSortDir = c.req.query('sort_dir') || 'desc'
+  const sortCol = SORT_COLS[rawSortBy] ?? 'c.decision_date'
+  const sortDir = rawSortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC'
+  const orderBy = `${sortCol} ${sortDir}, c.id ${sortDir}`
 
   let where = `WHERE c.contractor_id = ? AND c.decision_status != 'No Decision'`
   const params: any[] = [cid]
 
   if (period_key) { where += ' AND s.period_key=?'; params.push(period_key) }
+  if (decision_status) { where += ' AND c.decision_status=?'; params.push(decision_status) }
+  if (visit_type === '_SYNC') {
+    where += ` AND c.visit_type IN ('SYNC_PHONE','SYNC_VIDEO','SYNC_IN_PERSON')`
+  } else if (visit_type === '_OTHER') {
+    where += ` AND (c.visit_type IS NULL OR c.visit_type NOT IN ('ASYNC_TEXT_EMAIL','SYNC_PHONE','SYNC_VIDEO','SYNC_IN_PERSON','NO_SHOW') OR c.visit_type = '')`
+  } else if (visit_type) {
+    where += ' AND c.visit_type=?'; params.push(visit_type)
+  }
+  if (date_from) { where += ' AND c.decision_date >= ?'; params.push(date_from) }
+  if (date_to)   { where += ' AND c.decision_date <= ?'; params.push(date_to) }
   if (search) {
     // HIPAA: patient_name excluded from provider search — search by case ID and org only
     where += ' AND (c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
@@ -3907,7 +3937,7 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
      FROM consults c
      LEFT JOIN upload_sessions s ON c.session_id = s.id
      ${where}
-     ORDER BY c.decision_date DESC, c.id DESC
+     ORDER BY ${orderBy}
      LIMIT ? OFFSET ?`
   ).bind(...params, limit, offset).all()
 
