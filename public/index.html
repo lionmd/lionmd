@@ -1115,12 +1115,12 @@
           <i class="fas fa-plus mr-1"></i> Add License
         </button>
       </div>
-      <p class="text-sm text-gray-500 mb-4">Add each state where you hold an active medical license. Collab agreements are not required here.</p>
+      <p class="text-sm text-gray-500 mb-4">Add each state where you hold an active medical license. At least one license is required to complete your application.</p>
       <div id="applyLicList">
         <div class="text-center py-8 text-gray-300">
           <i class="fas fa-certificate text-4xl mb-2 block"></i>
           <p class="text-sm text-gray-400">No licenses added yet — click <strong>Add License</strong> to get started.</p>
-          <p class="text-xs text-gray-300 mt-1">You can also skip this step and add licenses after onboarding.</p>
+
         </div>
       </div>
     </div>
@@ -1693,6 +1693,9 @@ function applyValidateStep(step) {
     const ssn = ($('applySSN')?.value||'').trim()
     if (!ssn || ssn.length !== 4) return 'Please enter the last 4 digits of your SSN.'
   }
+  if (step === 3) {
+    if (!applyState.licenses.length) return 'Please add at least one state license before continuing.'
+  }
   if (step === 4) {
     if (!applyState.cvB64) return 'Please upload your CV / Resume.'
   }
@@ -1741,7 +1744,7 @@ function applyLicDraw() {
       <div class="text-center py-8 text-gray-300">
         <i class="fas fa-certificate text-4xl mb-2 block"></i>
         <p class="text-sm text-gray-400">No licenses added yet — click <strong>Add License</strong> to get started.</p>
-        <p class="text-xs text-gray-300 mt-1">You can also skip this step and add licenses after onboarding.</p>
+
       </div>`
     return
   }
