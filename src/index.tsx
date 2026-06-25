@@ -3556,14 +3556,14 @@ app.get('/api/provider/profile', requireProvider, async (c) => {
     // Pull onboarding candidate record for any extra fields (photo fallback, specialty, states)
     c.env.DB.prepare(`SELECT id, full_name, specialty, states_licensed, photo_data, photo_mime FROM onboarding_candidates WHERE converted_contractor_id=? LIMIT 1`).bind(pu.contractor_id).first() as Promise<any>,
     // Find all NP/PA licenses that list this contractor as collab physician (by last name)
+    // NOTE: provider_name, role_group, specialty are intentionally excluded — providers must not see other providers' names.
     c.env.DB.prepare(`
       SELECT pl.id, pl.contractor_id, pl.state, pl.license_number, pl.collab_physician, pl.collab_expiry,
-             pl.expiry_date, pl.status, pl.permitted_actions,
-             ct.name as provider_name, ct.role_group, ct.specialty
+             pl.expiry_date, pl.status, pl.permitted_actions
       FROM provider_licenses pl
       JOIN contractors ct ON ct.id = pl.contractor_id
       WHERE pl.collab_physician != '' AND pl.collab_physician IS NOT NULL AND ct.id != ?
-      ORDER BY ct.name, pl.state
+      ORDER BY pl.state
     `).bind(pu.contractor_id).all(),
   ])
 
@@ -4230,16 +4230,22 @@ app.get('/api/license-editor/physicians', requireLicenseEditor, async (c) => {
   return c.json(result)
 })
 
-// ── GET /api/physicians  — same but accessible to providers (requireProvider) ──
+// ── GET /api/physicians  — accessible to providers (requireProvider) ──
+// Returns last_name ONLY — providers must not see full physician names.
+// The dropdown value and display both use last_name so no full name is exposed.
 app.get('/api/physicians', requireProvider, async (c) => {
   const rows = await c.env.DB.prepare(
     `SELECT id, name, last_name FROM contractors WHERE role_group='Physician' AND is_active=1 ORDER BY name`
   ).all()
-  const result = (rows.results as any[]).map((r: any) => ({
-    id: r.id,
-    name: r.name,
-    last_name: r.last_name && r.last_name.trim() ? r.last_name.trim() : r.name.split(' ').pop() || r.name,
-  }))
+  const result = (rows.results as any[]).map((r: any) => {
+    const lastNameOnly = r.last_name && r.last_name.trim() ? r.last_name.trim() : r.name.split(' ').pop() || r.name
+    return {
+      id: r.id,
+      // Expose last name only — full name is admin-only
+      name: lastNameOnly,
+      last_name: lastNameOnly,
+    }
+  })
   return c.json(result)
 })
 
