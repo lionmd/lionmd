@@ -3527,6 +3527,11 @@ async function ensureProviderSchema(db: D1Database) {
   await db.prepare(`ALTER TABLE contractors ADD COLUMN npi TEXT DEFAULT ''`).run().catch(() => {})
   await db.prepare(`ALTER TABLE contractors ADD COLUMN specialty TEXT DEFAULT ''`).run().catch(() => {})
   await db.prepare(`ALTER TABLE contractors ADD COLUMN states_licensed TEXT DEFAULT ''`).run().catch(() => {})
+  // Extended provider profile fields (added for completeness requirement)
+  await db.prepare(`ALTER TABLE contractors ADD COLUMN dob TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE contractors ADD COLUMN languages TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE contractors ADD COLUMN bmi_min REAL DEFAULT NULL`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE contractors ADD COLUMN bmi_max REAL DEFAULT NULL`).run().catch(() => {})
 }
 
 // ── requireProvider: auth middleware — admin OR provider role ─────
@@ -3591,11 +3596,25 @@ app.put('/api/provider/profile', requireProvider, async (c) => {
   const u = c.get('user')
   const pu = await c.env.DB.prepare(`SELECT * FROM portal_users WHERE id=?`).bind(u.id).first() as any
   if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
-  const { phone, bio, address, email, npi, specialty, states_licensed } = await c.req.json() as any
+  const { phone, bio, address, email, npi, specialty, states_licensed,
+          first_name, last_name, dob, languages, bmi_min, bmi_max } = await c.req.json() as any
 
   // 1. Write all editable fields to the contractors row (what admin sees)
-  const sets: string[] = ['phone=?', 'bio=?', 'address=?', 'npi=?', 'specialty=?', 'states_licensed=?']
-  const vals: any[] = [phone || '', bio || '', address || '', npi || '', specialty || '', states_licensed || '']
+  const sets: string[] = [
+    'phone=?', 'bio=?', 'address=?', 'npi=?', 'specialty=?', 'states_licensed=?',
+    'first_name=?', 'last_name=?', 'dob=?', 'languages=?', 'bmi_min=?', 'bmi_max=?',
+  ]
+  const vals: any[] = [
+    phone || '', bio || '', address || '', npi || '', specialty || '', states_licensed || '',
+    first_name || '', last_name || '', dob || '', languages || '',
+    bmi_min !== undefined && bmi_min !== '' ? parseFloat(bmi_min) : null,
+    bmi_max !== undefined && bmi_max !== '' ? parseFloat(bmi_max) : null,
+  ]
+  // Rebuild display name if first/last provided
+  if (first_name || last_name) {
+    const full = [first_name || '', last_name || ''].filter(Boolean).join(' ')
+    if (full) { sets.push('name=?'); vals.push(full) }
+  }
   if (email) { sets.push('email=?'); vals.push(email) }
   vals.push(pu.contractor_id)
   await c.env.DB.prepare(`UPDATE contractors SET ${sets.join(', ')} WHERE id=?`).bind(...vals).run()
