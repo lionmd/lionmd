@@ -13775,9 +13775,9 @@ function ppOpenEditProfile() {
             <label class="block text-xs font-semibold text-gray-600 mb-1">Specialty / Clinical Focus</label>
             <input id="ppEditSpecialty" type="text" placeholder="e.g. Family Medicine, Psychiatry" value="${escHtml(ct.specialty || ob?.specialty || '')}" class="w-full text-sm"/>
           </div>
-          <div class="col-span-2">
-            <label class="block text-xs font-semibold text-gray-600 mb-1">States Licensed <span class="font-normal text-gray-400">(comma-separated) — or <button type="button" onclick="$('ppEditModal').classList.add('hidden'); navigate('provider_licenses')" class="text-blue-500 hover:underline">manage via Licenses →</button></span></label>
-            <input id="ppEditStates" type="text" placeholder="e.g. FL, TX, NY" value="${escHtml(ct.states_licensed || ob?.states_licensed || '')}" class="w-full text-sm"/>
+          <div class="col-span-2 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-500">
+            <i class="fas fa-map-marker-alt mr-1 text-gray-400"></i>
+            <strong class="text-gray-600">States Licensed</strong> are managed via your <button type="button" onclick="$('ppEditModal').classList.add('hidden'); navigate('provider_licenses')" class="text-blue-500 hover:underline font-semibold">State Licenses</button> page. Add or update state licenses there.
           </div>
           <div class="col-span-2">
             <label class="block text-xs font-semibold text-gray-600 mb-1">Bio / Professional Summary</label>
@@ -13825,7 +13825,6 @@ async function ppSaveProfile() {
   const bio            = ($('ppEditBio').value||'').trim()
   const npi            = ($('ppEditNpi')?.value||'').trim()
   const specialty      = ($('ppEditSpecialty')?.value||'').trim()
-  const states_licensed = ($('ppEditStates')?.value||'').trim()
   const first_name     = ($('ppEditFirstName')?.value||'').trim()
   const last_name      = ($('ppEditLastName')?.value||'').trim()
   const dob            = ($('ppEditDob')?.value||'').trim()
@@ -13846,7 +13845,7 @@ async function ppSaveProfile() {
   }
   try {
     await api('/api/provider/profile', { method: 'PUT', body: JSON.stringify({
-      phone, address, bio, npi, specialty, states_licensed,
+      phone, address, bio, npi, specialty,
       first_name, last_name, dob, languages,
       bmi_min: bmi_min !== '' ? bmi_min : null,
       bmi_max: bmi_max !== '' ? bmi_max : null,
