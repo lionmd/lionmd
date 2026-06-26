@@ -13776,7 +13776,7 @@ function ppOpenEditProfile() {
             <input id="ppEditSpecialty" type="text" placeholder="e.g. Family Medicine, Psychiatry" value="${escHtml(ct.specialty || ob?.specialty || '')}" class="w-full text-sm"/>
           </div>
           <div class="col-span-2">
-            <label class="block text-xs font-semibold text-gray-600 mb-1">States Licensed <span class="font-normal text-gray-400">(comma-separated)</span></label>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">States Licensed <span class="font-normal text-gray-400">(comma-separated) — or <button type="button" onclick="$('ppEditModal').classList.add('hidden'); navigate('provider_licenses')" class="text-blue-500 hover:underline">manage via Licenses →</button></span></label>
             <input id="ppEditStates" type="text" placeholder="e.g. FL, TX, NY" value="${escHtml(ct.states_licensed || ob?.states_licensed || '')}" class="w-full text-sm"/>
           </div>
           <div class="col-span-2">
