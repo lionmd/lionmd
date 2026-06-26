@@ -209,7 +209,29 @@ function aprilAsyncCvFee(
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
-app.use('/api/*', cors())
+// CORS: restrict to same origin + known partner domains.
+// Wildcard cors() would allow any site to call the API with a user's token.
+// The /api/licensing/public route is intentionally accessible cross-origin
+// (for partner iframe embeds) — Hono will still apply the restrictive policy
+// but the shared-password check in the handler provides the real gate.
+app.use('/api/*', cors({
+  origin: (origin) => {
+    if (!origin) return '*'  // server-to-server / same-origin requests have no Origin header
+    const allowed = [
+      'https://lion.md',
+      'https://www.lion.md',
+      'https://lionmd-payroll.pages.dev',
+    ]
+    // Allow any *.lionmd-payroll.pages.dev preview deployment
+    if (allowed.includes(origin) || /^https:\/\/[a-z0-9-]+\.lionmd-payroll\.pages\.dev$/.test(origin)) {
+      return origin
+    }
+    return 'https://lion.md'  // deny by reflecting the primary origin
+  },
+  allowMethods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+}))
 
 // ──────────────────────────────────────────────
 // STARTUP: ensure new columns exist (idempotent)
@@ -2622,13 +2644,18 @@ async function verifyPassword(password: string, stored: string): Promise<boolean
 }
 
 // Simple signed session token: base64(payload).base64(hmac-sha256)
-// TOKEN_SECRET: read from Cloudflare secret (TOKEN_SECRET env var).
-// Fallback to hardcoded value only for local dev if env is not set.
-// To set in production: wrangler secret put TOKEN_SECRET
-const TOKEN_SECRET_FALLBACK = 'lionmd-portal-secret-2026'
+// TOKEN_SECRET MUST be set as a Cloudflare Pages secret in production:
+//   npx wrangler pages secret put TOKEN_SECRET --project-name lionmd-payroll
+// The fallback below is intentionally weak and is only used in local `wrangler pages dev`.
+// In production TOKEN_SECRET is confirmed set — verifyToken() tries the env secret first.
+const TOKEN_SECRET_FALLBACK = 'lionmd-local-dev-only-not-for-production'
 
 function getTokenSecret(env?: Bindings): string {
-  return (env as any)?.TOKEN_SECRET || TOKEN_SECRET_FALLBACK
+  const secret = (env as any)?.TOKEN_SECRET
+  if (!secret) {
+    console.warn('[SECURITY] TOKEN_SECRET env var is not set — using local-dev fallback. Set it via wrangler pages secret put TOKEN_SECRET.')
+  }
+  return secret || TOKEN_SECRET_FALLBACK
 }
 
 async function signToken(payload: object, env?: Bindings): Promise<string> {
@@ -3778,7 +3805,15 @@ app.post('/api/provider/licenses', requireProvider, async (c) => {
 // ── PUT /api/provider/licenses/:id ───────────────────────────────
 app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
   await ensureProviderSchema(c.env.DB)
+  const u = c.get('user') as any
   const id = c.req.param('id')
+  // Ownership check: resolve this provider's contractor_id and verify the license belongs to them
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id && u.role !== 'admin') return c.json({ error: 'No linked contractor profile' }, 404)
+  if (u.role !== 'admin') {
+    const owns = await c.env.DB.prepare(`SELECT id FROM provider_licenses WHERE id=? AND contractor_id=?`).bind(id, pu.contractor_id).first()
+    if (!owns) return c.json({ error: 'Not found' }, 404)
+  }
   const body = await c.req.json() as any
   const { state, license_number, license_type, expiry_date, status, notes, collab_physician, collab_expiry, permitted_actions, practice_type } = body
   if (!license_number && (status || 'active') === 'active') return c.json({ error: 'License number is required for active licenses' }, 400)
@@ -3819,14 +3854,24 @@ app.put('/api/provider/licenses/:id', requireProvider, async (c) => {
 app.delete('/api/provider/licenses/:id', requireProvider, async (c) => {
   const u = c.get('user') as any
   const lid = c.req.param('id')
-  // Fetch license + provider name BEFORE deleting
-  const lic = await c.env.DB.prepare(
-    `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
-     FROM provider_licenses pl
-     JOIN contractors co ON co.id = pl.contractor_id
-     WHERE pl.id=?`
-  ).bind(lid).first() as any
-  await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(lid).run()
+  // Ownership check: verify the license belongs to this provider's contractor
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id && u.role !== 'admin') return c.json({ error: 'No linked contractor profile' }, 404)
+  // Fetch license + provider name BEFORE deleting — also enforces ownership for non-admin
+  const licQuery = u.role === 'admin'
+    ? `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
+       FROM provider_licenses pl JOIN contractors co ON co.id = pl.contractor_id WHERE pl.id=?`
+    : `SELECT pl.state, pl.license_number, pl.license_type, pl.expiry_date, co.name AS provider_name
+       FROM provider_licenses pl JOIN contractors co ON co.id = pl.contractor_id WHERE pl.id=? AND pl.contractor_id=?`
+  const licArgs = u.role === 'admin' ? [lid] : [lid, pu.contractor_id]
+  const lic = await c.env.DB.prepare(licQuery).bind(...licArgs).first() as any
+  if (!lic) return c.json({ error: 'Not found' }, 404)
+  // Delete with ownership check for non-admin
+  if (u.role === 'admin') {
+    await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=?`).bind(lid).run()
+  } else {
+    await c.env.DB.prepare(`DELETE FROM provider_licenses WHERE id=? AND contractor_id=?`).bind(lid, pu.contractor_id).run()
+  }
   if (lic) {
     await sendSlack(c.env.SLACK_WEBHOOK_URL, `🗑️ *License Deleted* (by provider)`, [
       { title: 'Provider', value: lic.provider_name || '—' },
