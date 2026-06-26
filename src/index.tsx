@@ -549,10 +549,10 @@ app.post('/api/contractors', async (c) => {
 
 app.put('/api/contractors/:id', async (c) => {
   const id = c.req.param('id')
-  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes } = await c.req.json()
+  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes, dob, languages, bmi_min, bmi_max } = await c.req.json()
   await c.env.DB.prepare(
-    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=? WHERE id=?`
-  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', id).run()
+    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=?, dob=?, languages=?, bmi_min=?, bmi_max=? WHERE id=?`
+  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', dob || '', languages || '', bmi_min !== undefined && bmi_min !== '' && bmi_min !== null ? parseFloat(bmi_min) : null, bmi_max !== undefined && bmi_max !== '' && bmi_max !== null ? parseFloat(bmi_max) : null, id).run()
   return c.json({ ok: true })
 })
 
