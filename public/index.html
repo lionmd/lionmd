@@ -17592,16 +17592,15 @@ async function renderPartnerView() {
   const mc = $('mainContent')
   mc.innerHTML = `<div class="flex justify-center py-16"><div class="spinner"></div></div>`
 
-  // Load current password + live licensing data in parallel
+  // Load current password first, then use it to fetch the licensing preview
   let currentPw = 'LionProviders2026!'
   let licData = null
   try {
-    const [pwRes, dataRes] = await Promise.all([
-      api('/api/admin/config/shared_view_password'),
-      fetch('/api/licensing/public').then(r => r.ok ? r.json() : null)
-    ])
+    const pwRes = await api('/api/admin/config/shared_view_password')
     currentPw = pwRes?.value || currentPw
-    licData = dataRes
+    // Use the resolved password to fetch the live preview (server now requires it)
+    const dataRes = await fetch('/api/licensing/public?pw=' + encodeURIComponent(currentPw))
+    if (dataRes.ok) licData = await dataRes.json()
   } catch(_) {}
 
   const sharedUrl = window.location.origin + '/licensing/public'
@@ -17958,10 +17957,61 @@ function buildPublicLicensingHTML(data, isAdminView) {
 
 async function renderPublicLicensing() {
   // ── Password gate ─────────────────────────────────────────────────
-  const PUB_KEY = 'lmd_pub_auth'
-  // Password is stored in D1 app_config; fall back to hardcoded default if unavailable
-  const FALLBACK_PW = 'LionProviders2026!'
-  if (sessionStorage.getItem(PUB_KEY) !== '1') {
+  // The password is validated SERVER-SIDE by /api/licensing/public.
+  // We never fetch or compare the password on the client.
+  // The entered password is stored in sessionStorage and sent as a
+  // query param on every data request — the server returns 401 if wrong.
+  const PUB_KEY = 'lmd_pub_pw'  // stores the verified password, not a boolean flag
+
+  // Helper: attempt to load data with the given password
+  async function tryFetchLicensingData(pw) {
+    const res = await fetch('/api/licensing/public?pw=' + encodeURIComponent(pw))
+    return res  // caller checks .status
+  }
+
+  // If we have a cached password from this session, try it immediately
+  const cachedPw = sessionStorage.getItem(PUB_KEY)
+
+  // Show the full-page shell first (used whether gated or not)
+  function showShell() {
+    document.body.innerHTML = `
+    <div id="pubRoot" class="min-h-screen bg-gray-50 font-sans">
+      <header class="bg-white border-b border-gray-200 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow">
+              <i class="fas fa-shield-alt text-white text-base"></i>
+            </div>
+            <div>
+              <h1 class="text-lg font-bold text-gray-800 leading-none">LionMDs Provider Licensing</h1>
+              <p class="text-xs text-gray-400 mt-0.5">Provider licensing status &mdash; read-only view</p>
+            </div>
+          </div>
+          <span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
+            <i class="fas fa-lock text-blue-500"></i> Password Protected
+          </span>
+        </div>
+      </header>
+      <div id="pubBody" class="max-w-7xl mx-auto px-4 py-8">
+        <div class="flex items-center justify-center h-40"><div class="spinner"></div></div>
+      </div>
+      <footer class="mt-12 border-t border-gray-200 py-5 text-center text-xs text-gray-400">
+        LionMDs &mdash; Provider Licensing Status &mdash; Data refreshed in real time &mdash;
+        <span id="pubTimestamp"></span>
+      </footer>
+    </div>`
+    if (!document.querySelector('script[src*="tailwindcss"]')) {
+      const tw = document.createElement('script'); tw.src = 'https://cdn.tailwindcss.com'; document.head.appendChild(tw)
+    }
+    if (!document.querySelector('link[href*="fontawesome"]')) {
+      const fa = document.createElement('link'); fa.rel = 'stylesheet'
+      fa.href = 'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'
+      document.head.appendChild(fa)
+    }
+    document.title = 'LionMDs — Provider Licensing'
+  }
+
+  function showGate(errorMsg) {
     document.body.innerHTML = `
     <div class="min-h-screen bg-gray-50 flex items-center justify-center font-sans">
       <div class="bg-white rounded-2xl shadow-lg border border-gray-200 w-full max-w-sm mx-4 p-8">
@@ -17974,8 +18024,8 @@ async function renderPublicLicensing() {
             <p class="text-xs text-gray-400 mt-0.5">Enter password to view</p>
           </div>
         </div>
-        <div id="pubGateError" class="hidden mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-          Incorrect password. Please try again.
+        <div id="pubGateError" class="${errorMsg ? '' : 'hidden'} mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          ${errorMsg || 'Incorrect password. Please try again.'}
         </div>
         <input id="pubGatePw" type="password" placeholder="Password"
           class="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3"
@@ -17987,95 +18037,77 @@ async function renderPublicLicensing() {
       </div>
     </div>`
     document.title = 'LionMDs — Licensing'
+    if (!document.querySelector('script[src*="tailwindcss"]')) {
+      const tw = document.createElement('script'); tw.src = 'https://cdn.tailwindcss.com'; document.head.appendChild(tw)
+    }
+    if (!document.querySelector('link[href*="fontawesome"]')) {
+      const fa = document.createElement('link'); fa.rel = 'stylesheet'
+      fa.href = 'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'
+      document.head.appendChild(fa)
+    }
+    // pubGateSubmit validates server-side — no password comparison in the browser
     window.pubGateSubmit = async function() {
+      const btn = document.querySelector('button[onclick="pubGateSubmit()"]')
       const val = document.getElementById('pubGatePw').value
-      // Fetch current password from backend (unauthenticated endpoint)
-      let correct = FALLBACK_PW
+      if (!val) return
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Checking…' }
       try {
-        const res = await fetch('/api/shared-view-password')
-        if (res.ok) { const d = await res.json(); correct = d.password || FALLBACK_PW }
-      } catch(_) {}
-      if (val === correct) {
-        sessionStorage.setItem(PUB_KEY, '1')
-        renderPublicLicensing()
-      } else {
+        const res = await tryFetchLicensingData(val)
+        if (res.status === 401) {
+          document.getElementById('pubGateError').classList.remove('hidden')
+          document.getElementById('pubGatePw').value = ''
+          document.getElementById('pubGatePw').focus()
+          if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-unlock mr-2"></i>View Licensing Dashboard' }
+          return
+        }
+        if (!res.ok) throw new Error('Server error — please try again')
+        // Server accepted the password — cache it and render
+        sessionStorage.setItem(PUB_KEY, val)
+        const data = await res.json()
+        showShell()
+        renderLicensingData(data)
+      } catch(err) {
+        document.getElementById('pubGateError').textContent = err.message || 'Could not connect. Please try again.'
         document.getElementById('pubGateError').classList.remove('hidden')
-        document.getElementById('pubGatePw').value = ''
-        document.getElementById('pubGatePw').focus()
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-unlock mr-2"></i>View Licensing Dashboard' }
       }
     }
     setTimeout(() => document.getElementById('pubGatePw')?.focus(), 100)
-    return
   }
 
-  // Hide all authenticated UI — show a standalone public shell
-  document.body.innerHTML = `
-  <div id="pubRoot" class="min-h-screen bg-gray-50 font-sans">
-    <!-- Header -->
-    <header class="bg-white border-b border-gray-200 shadow-sm">
-      <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-        <div class="flex items-center gap-3">
-          <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow">
-            <i class="fas fa-shield-alt text-white text-base"></i>
-          </div>
-          <div>
-            <h1 class="text-lg font-bold text-gray-800 leading-none">LionMDs Provider Licensing</h1>
-            <p class="text-xs text-gray-400 mt-0.5">Provider licensing status &mdash; read-only view</p>
-          </div>
-        </div>
-        <span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
-          <i class="fas fa-lock text-blue-500"></i> Password Protected
-        </span>
-      </div>
-    </header>
-
-    <!-- Loading state -->
-    <div id="pubBody" class="max-w-7xl mx-auto px-4 py-8">
-      <div class="flex items-center justify-center h-40">
-        <div class="spinner"></div>
-      </div>
-    </div>
-
-    <!-- Footer -->
-    <footer class="mt-12 border-t border-gray-200 py-5 text-center text-xs text-gray-400">
-      LionMDs &mdash; Provider Licensing Status &mdash; Data refreshed in real time &mdash;
-      <span id="pubTimestamp"></span>
-    </footer>
-  </div>`
-
-  // Inject Tailwind + FA if not already present (standalone page context)
-  if (!document.querySelector('script[src*="tailwindcss"]')) {
-    const tw = document.createElement('script'); tw.src = 'https://cdn.tailwindcss.com'; document.head.appendChild(tw)
-  }
-  if (!document.querySelector('link[href*="fontawesome"]')) {
-    const fa = document.createElement('link')
-    fa.rel = 'stylesheet'
-    fa.href = 'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'
-    document.head.appendChild(fa)
-  }
-  document.title = 'LionMDs — Provider Licensing'
-
-  const body = document.getElementById('pubBody')
-
-  try {
-    const data = await fetch('/api/licensing/public').then(r => {
-      if (!r.ok) throw new Error('Failed to load licensing data')
-      return r.json()
-    })
-
-    // Timestamp
+  function renderLicensingData(data) {
+    const body = document.getElementById('pubBody')
+    if (!body) return
     const ts = document.getElementById('pubTimestamp')
     if (ts) ts.textContent = 'Last loaded: ' + new Date().toLocaleString()
-
-    // Delegate all rendering to the shared helper
     body.innerHTML = buildPublicLicensingHTML(data, false)
+  }
 
-  } catch(err) {
-    body.innerHTML = `<div class="text-center text-red-500 py-16">
-      <i class="fas fa-exclamation-circle text-4xl mb-3"></i>
-      <p class="font-semibold">Could not load licensing data</p>
-      <p class="text-sm text-gray-500 mt-1">${err.message}</p>
-    </div>`
+  // ── Try cached password first, fall through to gate on 401 ────────
+  if (cachedPw) {
+    showShell()
+    try {
+      const res = await tryFetchLicensingData(cachedPw)
+      if (res.status === 401) {
+        // Cached password is no longer valid (password was changed)
+        sessionStorage.removeItem(PUB_KEY)
+        showGate('Password has changed. Please enter the new password.')
+        return
+      }
+      if (!res.ok) throw new Error('Failed to load licensing data')
+      const data = await res.json()
+      renderLicensingData(data)
+    } catch(err) {
+      const body = document.getElementById('pubBody')
+      if (body) body.innerHTML = `<div class="text-center text-red-500 py-16">
+        <i class="fas fa-exclamation-circle text-4xl mb-3"></i>
+        <p class="font-semibold">Could not load licensing data</p>
+        <p class="text-sm text-gray-500 mt-1">${err.message}</p>
+      </div>`
+    }
+  } else {
+    // No cached password — show the gate
+    showGate(null)
   }
 }
 

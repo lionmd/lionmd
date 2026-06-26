@@ -4380,10 +4380,32 @@ app.get('/api/shared-view-password', requireAdmin, async (c) => {
   return c.json({ password: row?.value || 'LionProviders2026!' })
 })
 
-// ── GET /api/licensing/public  — no auth, read-only for external viewers ──
+// ── GET /api/licensing/public  — password-protected, read-only for external viewers ──
+// Password must be supplied via:
+//   - Query param:  ?pw=<password>
+//   - Header:       Authorization: SharedView <password>
+// The correct password is stored in app_config key='shared_view_password'.
+// Falls back to the hardcoded default if the key has never been set.
+const SHARED_VIEW_DEFAULT_PW = 'LionProviders2026!'
 app.get('/api/licensing/public', async (c) => {
+  // Resolve the correct password from DB (fall back to default)
+  const configRow = await c.env.DB.prepare(
+    `SELECT value FROM app_config WHERE key='shared_view_password'`
+  ).first() as any
+  const correctPw: string = configRow?.value || SHARED_VIEW_DEFAULT_PW
+
+  // Accept password from query param OR Authorization header
+  const queryPw = c.req.query('pw') || ''
+  const authHeader = c.req.header('Authorization') || ''
+  const headerPw = authHeader.startsWith('SharedView ') ? authHeader.slice(11) : ''
+  const suppliedPw = queryPw || headerPw
+
+  if (!suppliedPw || suppliedPw !== correctPw) {
+    return c.json({ error: 'Invalid or missing password' }, 401)
+  }
+
   await ensureProviderSchema(c.env.DB)
-  // Public view: provider name, state, license number, permitted actions, practice type, collab info
+  // Read-only view: provider name, state, license number, permitted actions, practice type, collab info
   const [contractorsRes, licensesRes] = await Promise.all([
     c.env.DB.prepare(
       `SELECT id, name, role_group, specialty FROM contractors WHERE is_active=1 ORDER BY role_group, name`
