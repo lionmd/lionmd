@@ -259,12 +259,12 @@ app.get('/api/health', async (c) => {
 // ──────────────────────────────────────────────
 // PAYMENT RATES
 // ──────────────────────────────────────────────
-app.get('/api/rates', async (c) => {
+app.get('/api/rates', requireAdmin, async (c) => {
   const rates = await c.env.DB.prepare('SELECT * FROM payment_rates ORDER BY visit_type').all()
   return c.json(rates.results)
 })
 
-app.put('/api/rates/:id', async (c) => {
+app.put('/api/rates/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const { carevalidate_rate, contractor_rate, label } = await c.req.json()
   await c.env.DB.prepare(
@@ -276,7 +276,7 @@ app.put('/api/rates/:id', async (c) => {
 // ──────────────────────────────────────────────
 // CONTRACTOR TYPE RATES
 // ──────────────────────────────────────────────
-app.get('/api/contractor-type-rates', async (c) => {
+app.get('/api/contractor-type-rates', requireAdmin, async (c) => {
   // Ensure table exists
   await c.env.DB.prepare(`CREATE TABLE IF NOT EXISTS contractor_type_rates (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -291,7 +291,7 @@ app.get('/api/contractor-type-rates', async (c) => {
   return c.json(rows.results)
 })
 
-app.put('/api/contractor-type-rates', async (c) => {
+app.put('/api/contractor-type-rates', requireAdmin, async (c) => {
   const { contractor_type, visit_type, contractor_rate } = await c.req.json()
   await c.env.DB.prepare(
     `INSERT INTO contractor_type_rates (contractor_type, visit_type, contractor_rate, updated_at)
@@ -307,7 +307,7 @@ app.put('/api/contractor-type-rates', async (c) => {
 // Uses a JOIN to upload_sessions — no dynamic IN list, no spread risk.
 // Idempotent: only touches rows where carevalidate_fee != 20.
 // ──────────────────────────────────────────────
-app.post('/api/admin/fix-apr15-cv-fee', async (c) => {
+app.post('/api/admin/fix-apr15-cv-fee', requireAdmin, async (c) => {
   try {
     const db = c.env.DB
 
@@ -348,7 +348,7 @@ app.post('/api/admin/fix-apr15-cv-fee', async (c) => {
 
 // RECALCULATE PERIODS — recompute all consult fees using current rates
 // ──────────────────────────────────────────────
-app.post('/api/recalculate', async (c) => {
+app.post('/api/recalculate', requireAdmin, async (c) => {
   const body = await c.req.json().catch(() => ({}))
   const period_key = (body as any).period_key || null  // optional: limit to one period
 
@@ -488,7 +488,7 @@ app.post('/api/recalculate', async (c) => {
 // ──────────────────────────────────────────────
 // PERIOD SETTINGS — per-period flags (e.g. denied_paid)
 // ──────────────────────────────────────────────
-app.get('/api/period-settings/:period_key', async (c) => {
+app.get('/api/period-settings/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   await ensureSchema(c.env.DB)
   const row = await c.env.DB.prepare(
@@ -497,7 +497,7 @@ app.get('/api/period-settings/:period_key', async (c) => {
   return c.json({ period_key: pk, denied_paid: row?.denied_paid ?? 0 })
 })
 
-app.post('/api/period-settings/:period_key', async (c) => {
+app.post('/api/period-settings/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const body = await c.req.json() as any
   const denied_paid = body.denied_paid ? 1 : 0
@@ -512,7 +512,7 @@ app.post('/api/period-settings/:period_key', async (c) => {
 // ──────────────────────────────────────────────
 // CONTRACTORS
 // ──────────────────────────────────────────────
-app.get('/api/contractors', async (c) => {
+app.get('/api/contractors', requireAdmin, async (c) => {
   // ensure columns exist
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN contractor_type TEXT DEFAULT 'regular'`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN gusto_type TEXT DEFAULT 'Individual'`).run().catch(() => {})
@@ -539,7 +539,7 @@ app.get('/api/contractors', async (c) => {
   return c.json(rows.results)
 })
 
-app.post('/api/contractors', async (c) => {
+app.post('/api/contractors', requireAdmin, async (c) => {
   const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group } = await c.req.json()
   const result = await c.env.DB.prepare(
     `INSERT INTO contractors (name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
@@ -547,7 +547,7 @@ app.post('/api/contractors', async (c) => {
   return c.json({ id: result.meta.last_row_id, name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group })
 })
 
-app.put('/api/contractors/:id', async (c) => {
+app.put('/api/contractors/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes, dob, languages, bmi_min, bmi_max } = await c.req.json()
   await c.env.DB.prepare(
@@ -557,7 +557,7 @@ app.put('/api/contractors/:id', async (c) => {
 })
 
 // Dedicated endpoint to toggle earns_commission flag
-app.patch('/api/contractors/:id/earns-commission', async (c) => {
+app.patch('/api/contractors/:id/earns-commission', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const { earns_commission } = await c.req.json()
   await c.env.DB.prepare(
@@ -566,7 +566,7 @@ app.patch('/api/contractors/:id/earns-commission', async (c) => {
   return c.json({ ok: true, id, earns_commission: earns_commission ? 1 : 0 })
 })
 
-app.delete('/api/contractors/:id', async (c) => {
+app.delete('/api/contractors/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   await c.env.DB.prepare('UPDATE contractors SET is_active=0 WHERE id=?').bind(id).run()
   return c.json({ ok: true })
@@ -718,7 +718,7 @@ app.post('/api/doctors/quick-add', requireAdmin, async (c) => {
 })
 
 // PATCH /api/contractors/:id/toggle-active — flip is_active 0↔1
-app.patch('/api/contractors/:id/toggle-active', async (c) => {
+app.patch('/api/contractors/:id/toggle-active', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const { is_active } = await c.req.json() as { is_active: number }
   await c.env.DB.prepare('UPDATE contractors SET is_active=? WHERE id=?').bind(is_active ? 1 : 0, id).run()
@@ -732,7 +732,7 @@ app.patch('/api/contractors/:id/toggle-active', async (c) => {
 // - Re-runs fee calculation for affected consults (owner/type may differ)
 // - Deactivates the merged (duplicate) contractor records
 // ──────────────────────────────────────────────
-app.post('/api/contractors/merge', async (c) => {
+app.post('/api/contractors/merge', requireAdmin, async (c) => {
   const body = await c.req.json() as any
   const keepId: number = Number(body.keep_id)
   const mergeIds: number[] = (body.merge_ids || []).map(Number).filter((id: number) => id !== keepId)
@@ -840,7 +840,7 @@ app.post('/api/contractors/merge', async (c) => {
 })
 
 // GET /api/contractors/all — includes inactive, for merge UI
-app.get('/api/contractors/all', async (c) => {
+app.get('/api/contractors/all', requireAdmin, async (c) => {
   const rows = await c.env.DB.prepare('SELECT * FROM contractors ORDER BY name, is_active DESC').all()
   return c.json(rows.results)
 })
@@ -909,7 +909,7 @@ app.post('/api/admin/contractors/migrate', requireAdmin, async (c) => {
 })
 
 // GET /api/contractors/:id/history — full payroll history for a contractor across all periods
-app.get('/api/contractors/:id/history', async (c) => {
+app.get('/api/contractors/:id/history', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const contractor = await c.env.DB.prepare('SELECT * FROM contractors WHERE id=?').bind(id).first() as any
   if (!contractor) return c.json({ error: 'Not found' }, 404)
@@ -962,7 +962,7 @@ app.get('/api/contractors/:id/history', async (c) => {
 // SESSIONS
 // Returns grouped periods, each with list of files
 // ──────────────────────────────────────────────
-app.get('/api/sessions', async (c) => {
+app.get('/api/sessions', requireAdmin, async (c) => {
   await ensureSchema(c.env.DB)
   const rows = await c.env.DB.prepare(
     `SELECT * FROM upload_sessions ORDER BY period_year DESC, period_month DESC, id DESC`
@@ -1003,14 +1003,14 @@ app.get('/api/sessions', async (c) => {
   return c.json(Object.values(grouped))
 })
 
-app.get('/api/sessions/:id', async (c) => {
+app.get('/api/sessions/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const session = await c.env.DB.prepare('SELECT * FROM upload_sessions WHERE id=?').bind(id).first()
   if (!session) return c.json({ error: 'Not found' }, 404)
   return c.json(session)
 })
 
-app.delete('/api/sessions/:id', async (c) => {
+app.delete('/api/sessions/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   await c.env.DB.prepare('DELETE FROM consults WHERE session_id=?').bind(id).run()
   await c.env.DB.prepare('DELETE FROM upload_sessions WHERE id=?').bind(id).run()
@@ -1020,7 +1020,7 @@ app.delete('/api/sessions/:id', async (c) => {
 // ──────────────────────────────────────────────
 // DELETE entire period (all files for a period_key)
 // ──────────────────────────────────────────────
-app.delete('/api/periods/:period_key', async (c) => {
+app.delete('/api/periods/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const sessions = await c.env.DB.prepare(
     'SELECT id FROM upload_sessions WHERE period_key=?'
@@ -1136,7 +1136,7 @@ async function insertRows(
 // Returns: { session_id, period_key, new_cases_added, done }
 // NO deduplication — every row is inserted exactly as provided.
 // ──────────────────────────────────────────────
-app.post('/api/upload', async (c) => {
+app.post('/api/upload', requireAdmin, async (c) => {
   await ensureSchema(c.env.DB)
   const body = await c.req.json()
   const { filename, period_label, period_month, period_year, rows, source_label, is_last_chunk } = body
@@ -1178,7 +1178,7 @@ app.post('/api/upload', async (c) => {
 // Returns: { new_cases_added, done }
 // NO deduplication — every row is inserted exactly as provided.
 // ──────────────────────────────────────────────
-app.post('/api/upload/chunk', async (c) => {
+app.post('/api/upload/chunk', requireAdmin, async (c) => {
   const body = await c.req.json()
   const { session_id, rows, is_last_chunk } = body
 
@@ -1212,7 +1212,7 @@ app.post('/api/upload/chunk', async (c) => {
 // ──────────────────────────────────────────────
 // CONSULTS — accepts period_key OR session_id
 // ──────────────────────────────────────────────
-app.get('/api/consults', async (c) => {
+app.get('/api/consults', requireAdmin, async (c) => {
   const period_key      = c.req.query('period_key')
   const session_id      = c.req.query('session_id')
   const doctor_name     = c.req.query('doctor_name')
@@ -1300,7 +1300,7 @@ app.get('/api/consults', async (c) => {
 // page + limit params let the frontend fetch all rows in chunks.
 // Default chunk: 10 000 rows. Returns { total, page, limit, data[] }.
 // ──────────────────────────────────────────────
-app.get('/api/consults/export', async (c) => {
+app.get('/api/consults/export', requireAdmin, async (c) => {
   const period_key      = c.req.query('period_key')
   const session_id      = c.req.query('session_id')
   const doctor_name     = c.req.query('doctor_name')
@@ -1386,7 +1386,7 @@ app.get('/api/consults/export', async (c) => {
 })
 
 // Distinct doctor names for the filter dropdown (scoped to current period)
-app.get('/api/consults/doctors', async (c) => {
+app.get('/api/consults/doctors', requireAdmin, async (c) => {
   const period_key = c.req.query('period_key')
   let where = 'WHERE c.doctor_name IS NOT NULL AND c.doctor_name != \'\''
   const params: any[] = []
@@ -1402,7 +1402,7 @@ app.get('/api/consults/doctors', async (c) => {
 })
 
 // Distinct organizations for the filter dropdown (scoped to current period)
-app.get('/api/consults/organizations', async (c) => {
+app.get('/api/consults/organizations', requireAdmin, async (c) => {
   const period_key = c.req.query('period_key')
   let where = 'WHERE c.organization_name IS NOT NULL AND c.organization_name != \'\''
   const params: any[] = []
@@ -1417,7 +1417,7 @@ app.get('/api/consults/organizations', async (c) => {
   return c.json((rows.results as any[]).map(r => r.organization_name))
 })
 
-app.get('/api/consults/:id', async (c) => {
+app.get('/api/consults/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const row = await c.env.DB.prepare(
     `SELECT c.*, ct.ein_ssn, ct.company, s.period_key, s.source_label as file_label
@@ -1430,7 +1430,7 @@ app.get('/api/consults/:id', async (c) => {
   return c.json(row)
 })
 
-app.put('/api/consults/:id', async (c) => {
+app.put('/api/consults/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json()
 
@@ -1497,7 +1497,7 @@ app.put('/api/consults/:id', async (c) => {
 // ──────────────────────────────────────────────
 // DELETE /api/consults/:id  — remove a single consult, recompute session totals
 // ──────────────────────────────────────────────
-app.delete('/api/consults/:id', async (c) => {
+app.delete('/api/consults/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   // Grab session_id before deletion so we can recompute totals
   const existing = await c.env.DB.prepare('SELECT session_id FROM consults WHERE id=?').bind(id).first() as any
@@ -1586,12 +1586,12 @@ async function buildSummary(db: D1Database, where: string, params: any[], pk?: s
   }
 }
 
-app.get('/api/summary/period/:period_key', async (c) => {
+app.get('/api/summary/period/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   return c.json(await buildSummary(c.env.DB, 'WHERE s.period_key=?', [pk], pk))
 })
 
-app.get('/api/summary/:session_id', async (c) => {
+app.get('/api/summary/:session_id', requireAdmin, async (c) => {
   const sid = c.req.param('session_id')
   // Look up the period_key for this session so denied_paid logic applies correctly
   const sess = await c.env.DB.prepare('SELECT period_key FROM upload_sessions WHERE id=?').bind(sid).first() as any
@@ -1602,7 +1602,7 @@ app.get('/api/summary/:session_id', async (c) => {
 // ──────────────────────────────────────────────
 // PAYSTUB — accepts period_key
 // ──────────────────────────────────────────────
-app.get('/api/paystub/period/:period_key/:contractor_id', async (c) => {
+app.get('/api/paystub/period/:period_key/:contractor_id', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const cid = c.req.param('contractor_id')
 
@@ -1660,7 +1660,7 @@ app.get('/api/paystub/period/:period_key/:contractor_id', async (c) => {
 })
 
 // Keep old single-session paystub for backward compat
-app.get('/api/paystub/:session_id/:contractor_id', async (c) => {
+app.get('/api/paystub/:session_id/:contractor_id', requireAdmin, async (c) => {
   const sid = c.req.param('session_id')
   const cid = c.req.param('contractor_id')
   const contractor = await c.env.DB.prepare('SELECT * FROM contractors WHERE id=?').bind(cid).first()
@@ -1800,7 +1800,7 @@ async function calcCommission(db: D1Database, pk: string) {
   }
 }
 
-app.get('/api/commission/:period_key', async (c) => {
+app.get('/api/commission/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   return c.json(await calcCommission(c.env.DB, pk))
 })
@@ -1808,7 +1808,7 @@ app.get('/api/commission/:period_key', async (c) => {
 // ──────────────────────────────────────────────
 // GUSTO EXPORT — accepts period_key
 // ──────────────────────────────────────────────
-app.get('/api/export/gusto/period/:period_key', async (c) => {
+app.get('/api/export/gusto/period/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   // Ensure new columns exist
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN first_name TEXT DEFAULT ''`).run().catch(() => {})
@@ -1841,7 +1841,7 @@ app.get('/api/export/gusto/period/:period_key', async (c) => {
 })
 
 // Legacy single-session gusto
-app.get('/api/export/gusto/:session_id', async (c) => {
+app.get('/api/export/gusto/:session_id', requireAdmin, async (c) => {
   const sid = c.req.param('session_id')
   const rows = await c.env.DB.prepare(`
     SELECT ct.name as contractor_name, ct.company, ct.ein_ssn, ct.email, s.period_label,
@@ -1871,7 +1871,7 @@ app.get('/api/export/gusto/:session_id', async (c) => {
 // ──────────────────────────────────────────────
 // CV SUMMARY — period_key aware
 // ──────────────────────────────────────────────
-app.get('/api/cv-summary/period/:period_key', async (c) => {
+app.get('/api/cv-summary/period/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const sessions = await c.env.DB.prepare(
     'SELECT * FROM upload_sessions WHERE period_key=? ORDER BY id'
@@ -1927,7 +1927,7 @@ app.get('/api/cv-summary/period/:period_key', async (c) => {
   })
 })
 
-app.get('/api/cv-summary/:session_id', async (c) => {
+app.get('/api/cv-summary/:session_id', requireAdmin, async (c) => {
   const sid = c.req.param('session_id')
   const session = await c.env.DB.prepare('SELECT * FROM upload_sessions WHERE id=?').bind(sid).first()
   const sessDeniedFilter = isDeniedPaid((session as any)?.period_key) ? `AND decision_status != 'No Decision'` : `AND decision_status NOT IN ('Denied','No Decision')`
@@ -1941,7 +1941,7 @@ app.get('/api/cv-summary/:session_id', async (c) => {
 })
 
 // Diagnostic: per-contractor totals for a period (fast, single query)
-app.get('/api/debug/contractor-totals/:period_key', async (c) => {
+app.get('/api/debug/contractor-totals/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const rows = await c.env.DB.prepare(`
     SELECT
@@ -1962,7 +1962,7 @@ app.get('/api/debug/contractor-totals/:period_key', async (c) => {
 })
 
 // Find unmatched consults (null contractor_id) for a period
-app.get('/api/debug/unmatched/:period_key', async (c) => {
+app.get('/api/debug/unmatched/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const rows = await c.env.DB.prepare(`
     SELECT c.id, c.doctor_name, c.visit_type, c.is_orderly, c.carevalidate_fee, c.contractor_fee, c.organization_name
@@ -1977,7 +1977,7 @@ app.get('/api/debug/unmatched/:period_key', async (c) => {
 })
 
 // Find non-standard fee consults for a contractor in a period
-app.get('/api/debug/bad-fees/:period_key/:contractor_id', async (c) => {
+app.get('/api/debug/bad-fees/:period_key/:contractor_id', requireAdmin, async (c) => {
   const pk  = c.req.param('period_key')
   const cid = c.req.param('contractor_id')
   const rows = await c.env.DB.prepare(`
@@ -1997,7 +1997,7 @@ app.get('/api/debug/bad-fees/:period_key/:contractor_id', async (c) => {
 })
 
 // Find SYNC consults wrongly flagged as orderly for a contractor in a period
-app.get('/api/debug/orderly-sync/:period_key/:contractor_id', async (c) => {
+app.get('/api/debug/orderly-sync/:period_key/:contractor_id', requireAdmin, async (c) => {
   const pk  = c.req.param('period_key')
   const cid = c.req.param('contractor_id')
   const rows = await c.env.DB.prepare(`
@@ -2013,7 +2013,7 @@ app.get('/api/debug/orderly-sync/:period_key/:contractor_id', async (c) => {
 })
 
 // Find ALL SYNC rows from OrderlyMeds in a period (any is_orderly value)
-app.get('/api/debug/orderly-sync-all/:period_key', async (c) => {
+app.get('/api/debug/orderly-sync-all/:period_key', requireAdmin, async (c) => {
   const pk = c.req.param('period_key')
   const rows = await c.env.DB.prepare(`
     SELECT c.id, c.contractor_id, c.visit_type, c.is_orderly,
@@ -2184,7 +2184,7 @@ Date: __________________           Date: __________________`, 1).run().catch(() 
 
 // ── Candidates CRUD ──────────────────────────────────────────────
 
-app.get('/api/onboarding/candidates', async (c) => {
+app.get('/api/onboarding/candidates', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const status = c.req.query('status')
   const search = c.req.query('search')
@@ -2200,7 +2200,7 @@ app.get('/api/onboarding/candidates', async (c) => {
   return c.json(rows.results)
 })
 
-app.get('/api/onboarding/candidates/:id', async (c) => {
+app.get('/api/onboarding/candidates/:id', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   const candidate = await c.env.DB.prepare(`
@@ -2219,7 +2219,7 @@ app.get('/api/onboarding/candidates/:id', async (c) => {
   return c.json({ ...candidate, documents: docs.results, meetings: meetings.results })
 })
 
-app.post('/api/onboarding/candidates', async (c) => {
+app.post('/api/onboarding/candidates', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const body = await c.req.json() as any
   const r = await c.env.DB.prepare(`
@@ -2236,7 +2236,7 @@ app.post('/api/onboarding/candidates', async (c) => {
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
-app.put('/api/onboarding/candidates/:id', async (c) => {
+app.put('/api/onboarding/candidates/:id', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   const body = await c.req.json() as any
@@ -2316,7 +2316,7 @@ app.post('/api/apply', async (c) => {
   return c.json({ ok: true, id: candidateId })
 })
 
-app.delete('/api/onboarding/candidates/:id', async (c) => {
+app.delete('/api/onboarding/candidates/:id', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   await c.env.DB.prepare('DELETE FROM onboarding_documents WHERE candidate_id=?').bind(id).run()
@@ -2327,7 +2327,7 @@ app.delete('/api/onboarding/candidates/:id', async (c) => {
 
 // ── Documents ────────────────────────────────────────────────────
 
-app.get('/api/onboarding/candidates/:id/documents', async (c) => {
+app.get('/api/onboarding/candidates/:id/documents', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const rows = await c.env.DB.prepare(
     'SELECT id, doc_type, file_name, file_size, mime_type, uploaded_at FROM onboarding_documents WHERE candidate_id=? ORDER BY uploaded_at DESC'
@@ -2336,7 +2336,7 @@ app.get('/api/onboarding/candidates/:id/documents', async (c) => {
 })
 
 // Upload document (base64 encoded in JSON body)
-app.post('/api/onboarding/candidates/:id/documents', async (c) => {
+app.post('/api/onboarding/candidates/:id/documents', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   const body = await c.req.json() as any
@@ -2349,14 +2349,14 @@ app.post('/api/onboarding/candidates/:id/documents', async (c) => {
 })
 
 // Download document (returns base64 data)
-app.get('/api/onboarding/documents/:id', async (c) => {
+app.get('/api/onboarding/documents/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const doc = await c.env.DB.prepare('SELECT * FROM onboarding_documents WHERE id=?').bind(id).first() as any
   if (!doc) return c.json({ error: 'Not found' }, 404)
   return c.json(doc)
 })
 
-app.delete('/api/onboarding/documents/:id', async (c) => {
+app.delete('/api/onboarding/documents/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare('DELETE FROM onboarding_documents WHERE id=?').bind(c.req.param('id')).run()
   return c.json({ ok: true })
 })
@@ -2364,7 +2364,7 @@ app.delete('/api/onboarding/documents/:id', async (c) => {
 // ── Resume AI Analysis ───────────────────────────────────────────
 // Stores the resume text and generated summary/key-points on the candidate
 
-app.post('/api/onboarding/candidates/:id/analyze-resume', async (c) => {
+app.post('/api/onboarding/candidates/:id/analyze-resume', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   const body = await c.req.json() as any
@@ -2419,7 +2419,7 @@ app.post('/api/onboarding/candidates/:id/analyze-resume', async (c) => {
 
 // ── Meetings ─────────────────────────────────────────────────────
 
-app.get('/api/onboarding/candidates/:id/meetings', async (c) => {
+app.get('/api/onboarding/candidates/:id/meetings', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const rows = await c.env.DB.prepare(
     'SELECT * FROM onboarding_meetings WHERE candidate_id=? ORDER BY scheduled_at DESC'
@@ -2427,7 +2427,7 @@ app.get('/api/onboarding/candidates/:id/meetings', async (c) => {
   return c.json(rows.results)
 })
 
-app.post('/api/onboarding/candidates/:id/meetings', async (c) => {
+app.post('/api/onboarding/candidates/:id/meetings', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   const body = await c.req.json() as any
@@ -2440,7 +2440,7 @@ app.post('/api/onboarding/candidates/:id/meetings', async (c) => {
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
-app.put('/api/onboarding/meetings/:id', async (c) => {
+app.put('/api/onboarding/meetings/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
   const body = await c.req.json() as any
   await c.env.DB.prepare(`
@@ -2451,7 +2451,7 @@ app.put('/api/onboarding/meetings/:id', async (c) => {
   return c.json({ ok: true })
 })
 
-app.delete('/api/onboarding/meetings/:id', async (c) => {
+app.delete('/api/onboarding/meetings/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare('DELETE FROM onboarding_meetings WHERE id=?').bind(c.req.param('id')).run()
   return c.json({ ok: true })
 })
@@ -2483,20 +2483,20 @@ app.delete('/api/onboarding/availability/:id', async (c) => {
 
 // ── Contract Templates ───────────────────────────────────────────
 
-app.get('/api/onboarding/templates', async (c) => {
+app.get('/api/onboarding/templates', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const rows = await c.env.DB.prepare('SELECT id, name, is_default, created_at, updated_at FROM contract_templates ORDER BY is_default DESC, name').all()
   return c.json(rows.results)
 })
 
-app.get('/api/onboarding/templates/:id', async (c) => {
+app.get('/api/onboarding/templates/:id', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const t = await c.env.DB.prepare('SELECT * FROM contract_templates WHERE id=?').bind(c.req.param('id')).first()
   if (!t) return c.json({ error: 'Not found' }, 404)
   return c.json(t)
 })
 
-app.post('/api/onboarding/templates', async (c) => {
+app.post('/api/onboarding/templates', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const body = await c.req.json() as any
   if (body.is_default) await c.env.DB.prepare('UPDATE contract_templates SET is_default=0').run()
@@ -2506,7 +2506,7 @@ app.post('/api/onboarding/templates', async (c) => {
   return c.json({ ok: true, id: r.meta.last_row_id })
 })
 
-app.put('/api/onboarding/templates/:id', async (c) => {
+app.put('/api/onboarding/templates/:id', requireAdmin, async (c) => {
   const body = await c.req.json() as any
   if (body.is_default) await c.env.DB.prepare('UPDATE contract_templates SET is_default=0').run()
   await c.env.DB.prepare(
@@ -2515,13 +2515,13 @@ app.put('/api/onboarding/templates/:id', async (c) => {
   return c.json({ ok: true })
 })
 
-app.delete('/api/onboarding/templates/:id', async (c) => {
+app.delete('/api/onboarding/templates/:id', requireAdmin, async (c) => {
   await c.env.DB.prepare('DELETE FROM contract_templates WHERE id=?').bind(c.req.param('id')).run()
   return c.json({ ok: true })
 })
 
 // Fill template placeholders with candidate data and return the filled text
-app.post('/api/onboarding/templates/:id/fill', async (c) => {
+app.post('/api/onboarding/templates/:id/fill', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const body = await c.req.json() as any
   const tmpl = await c.env.DB.prepare('SELECT * FROM contract_templates WHERE id=?').bind(c.req.param('id')).first() as any
@@ -2544,7 +2544,7 @@ app.post('/api/onboarding/templates/:id/fill', async (c) => {
 
 // ── Stats / Pipeline overview ────────────────────────────────────
 
-app.get('/api/onboarding/stats', async (c) => {
+app.get('/api/onboarding/stats', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const byStatus = await c.env.DB.prepare(
     `SELECT status, COUNT(*) as count FROM onboarding_candidates GROUP BY status`
@@ -4375,7 +4375,7 @@ app.get('/api/licensing/dashboard', requireLicenseEditor, async (c) => {
 
 // ── GET /api/shared-view-password  — public endpoint for password gate ──
 // Returns the current shared view password so the gate can validate without hardcoding
-app.get('/api/shared-view-password', async (c) => {
+app.get('/api/shared-view-password', requireAdmin, async (c) => {
   const row = await c.env.DB.prepare(`SELECT value FROM app_config WHERE key='shared_view_password'`).first() as any
   return c.json({ password: row?.value || 'LionProviders2026!' })
 })
@@ -4895,7 +4895,7 @@ app.get('/api/auth/check-bootstrap', async (c) => {
 // ── Calendar ─────────────────────────────────────────────────────
 // Returns all upcoming meetings, checklist due items, and pending flags
 // aggregated across all candidates for the calendar view.
-app.get('/api/onboarding/calendar', async (c) => {
+app.get('/api/onboarding/calendar', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
 
   // 1. All scheduled meetings
@@ -4949,7 +4949,7 @@ app.get('/api/onboarding/calendar', async (c) => {
   })
 })
 
-app.post('/api/onboarding/candidates/:id/convert', async (c) => {
+app.post('/api/onboarding/candidates/:id/convert', requireAdmin, async (c) => {
   await ensureOnboardingSchema(c.env.DB)
   const id = c.req.param('id')
   const candidate = await c.env.DB.prepare('SELECT * FROM onboarding_candidates WHERE id=?').bind(id).first() as any
