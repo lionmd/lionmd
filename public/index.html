@@ -1363,12 +1363,13 @@ async function doLogin() {
       body: JSON.stringify({ email, password: pw })
     }).then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || 'Login failed'); return d })
 
-    // User has a pending invite — show the set-password card with their token
+    // User has a pending invite — direct them to use their email link.
+    // SECURITY: server no longer returns the invite_token in the login response
+    // (prevents account takeover by anyone who knows the email address).
+    // The token is only delivered via the invite email; user must click that link.
     if (data.must_set_password) {
-      $('loginCard').classList.add('hidden')
-      $('setupCard').classList.remove('hidden')
-      $('setupWelcomeMsg').textContent = 'Please set a password to continue.'
-      $('setupCard').dataset.token = data.invite_token || ''
+      errEl.textContent = 'Your account requires a password setup. Please check your email for an invite link and click it to set your password.'
+      errEl.classList.remove('hidden')
       return
     }
 
@@ -3821,9 +3822,9 @@ function renderConsultsTable(rows, total, page) {
         ${r.is_flagged ? '<i class="fas fa-flag text-yellow-500 ml-1 text-xs"></i>' : ''}
       </td>
       <td class="px-4 py-2.5 text-gray-500 text-xs">${r.decision_date ? r.decision_date.substring(0,10) : ''}</td>
-      <td class="px-4 py-2.5 text-gray-700 ${!consultsState.showNames ? 'font-mono tracking-wider text-gray-400' : ''}">${csMaskName(r.patient_name)}</td>
-      <td class="px-4 py-2.5 text-gray-500 text-xs max-w-[140px] truncate">${r.organization_name || ''}</td>
-      <td class="px-4 py-2.5 text-gray-700 font-medium">${r.doctor_name || '<span class="text-gray-300">—</span>'}</td>
+      <td class="px-4 py-2.5 text-gray-700 ${!consultsState.showNames ? 'font-mono tracking-wider text-gray-400' : ''}">${escHtml(csMaskName(r.patient_name))}</td>
+      <td class="px-4 py-2.5 text-gray-500 text-xs max-w-[140px] truncate">${escHtml(r.organization_name || '')}</td>
+      <td class="px-4 py-2.5 text-gray-700 font-medium">${r.doctor_name ? escHtml(r.doctor_name) : '<span class="text-gray-300">—</span>'}</td>
       <td class="px-4 py-2.5">${visitTypeBadge(r.visit_type, r.carevalidate_fee, r.is_orderly)}</td>
       <td class="px-4 py-2.5 text-right font-medium text-blue-600">${fmt(r.carevalidate_fee)}</td>
       <td class="px-4 py-2.5 text-right font-medium text-purple-600">${fmt(r.contractor_fee)}</td>
@@ -3833,7 +3834,7 @@ function renderConsultsTable(rows, total, page) {
           <button onclick="openEditConsult(${r.id})" class="text-gray-400 hover:text-blue-600 transition-colors p-1 rounded" title="Edit record">
             <i class="fas fa-pen text-xs"></i>
           </button>
-          <button onclick="confirmDeleteConsult(${r.id}, '${(r.case_id_short||r.case_id||'').replace(/'/g,'')}', '${(csMaskName(r.patient_name)||'').replace(/'/g,'')}')" class="text-gray-300 hover:text-red-500 transition-colors p-1 rounded" title="Delete record">
+          <button onclick="confirmDeleteConsult(${r.id}, '${(r.case_id_short||r.case_id||'').replace(/[^a-zA-Z0-9 .\-]/g,'')}', '${(csMaskName(r.patient_name)||'').replace(/'/g,'')}')" class="text-gray-300 hover:text-red-500 transition-colors p-1 rounded" title="Delete record">
             <i class="fas fa-trash text-xs"></i>
           </button>
         </div>
@@ -4044,9 +4045,9 @@ function renderPayroll() {
           <div class="card p-5 hover:shadow-md transition-all cursor-pointer" onclick="openPaystubModal('${escHtml(pk)}', ${d.contractor_id}, '${escHtml(d.doctor_name)}')">
             <div class="flex items-start justify-between mb-3">
               <div>
-                <div class="font-semibold text-gray-800">${d.doctor_name}</div>
+                <div class="font-semibold text-gray-800">${escHtml(d.doctor_name)}</div>
                 <div class="text-xs text-gray-400 flex items-center gap-2 mt-0.5">
-                  ${d.company || 'Lion MD'}
+                  ${escHtml(d.company || 'Lion MD')}
                   ${contractorTypeBadge(cType)}
                   ${d.ein_ssn ? '· ' + d.ein_ssn : ''}
                 </div>
@@ -4189,11 +4190,11 @@ async function openEditConsult(id) {
         <div class="grid grid-cols-2 gap-4">
           <div>
             <label class="block text-xs font-semibold text-gray-500 mb-1">Patient Name</label>
-            <input id="ec_patient" type="text" class="w-full" value="${(r.patient_name||'').replace(/"/g,'&quot;')}"/>
+            <input id="ec_patient" type="text" class="w-full" value="${escHtml(r.patient_name||'')}"/>
           </div>
           <div>
             <label class="block text-xs font-semibold text-gray-500 mb-1">Organization</label>
-            <input id="ec_org" type="text" class="w-full" value="${(r.organization_name||'').replace(/"/g,'&quot;')}" oninput="onEditOrgChange()"/>
+            <input id="ec_org" type="text" class="w-full" value="${escHtml(r.organization_name||'')}" oninput="onEditOrgChange()"/>
           </div>
         </div>
 
@@ -4240,7 +4241,7 @@ async function openEditConsult(id) {
         <!-- Row 6: Notes -->
         <div>
           <label class="block text-xs font-semibold text-gray-500 mb-1">Notes</label>
-          <textarea id="ec_notes" rows="2" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400" placeholder="Optional notes...">${r.notes||''}</textarea>
+          <textarea id="ec_notes" rows="2" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400" placeholder="Optional notes...">${escHtml(r.notes||'')}</textarea>
         </div>
 
         <!-- Orderly info banner shown when orderly is checked -->
@@ -4558,10 +4559,10 @@ function renderPaystubContent(data) {
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
         <div class="bg-gray-50 rounded-xl p-4">
           <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Contractor</div>
-          <div class="font-bold text-gray-800 text-lg">${contractor.name || ''}</div>
-          <div class="text-sm text-gray-600">${contractor.company || 'Lion MD'}</div>
+          <div class="font-bold text-gray-800 text-lg">${escHtml(contractor.name || '')}</div>
+          <div class="text-sm text-gray-600">${escHtml(contractor.company || 'Lion MD')}</div>
           ${contractor.ein_ssn ? `<div class="text-sm text-gray-500 mt-1">EIN/SSN: ${contractor.ein_ssn}</div>` : ''}
-          ${contractor.email   ? `<div class="text-xs text-gray-400">${contractor.email}</div>` : ''}
+          ${contractor.email   ? `<div class="text-xs text-gray-400">${escHtml(contractor.email)}</div>` : ''}
         </div>
         <div class="bg-blue-50 rounded-xl p-4">
           <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Total Mgmt Fee</div>
@@ -4634,7 +4635,7 @@ function renderPaystubContent(data) {
                   formulaHtml = `<div class="text-xs text-gray-500">(${fmt2(cv)} &minus; ${fmt2(pay)}) &times; 25%</div>`
                 }
                 return `<tr class="border-b border-gray-50 hover:bg-gray-50">
-                  <td class="px-3 py-2 font-medium text-gray-700">${row.contractor_name}</td>
+                  <td class="px-3 py-2 font-medium text-gray-700">${escHtml(row.contractor_name)}</td>
                   <td class="px-3 py-2 text-center">${contractorTypeBadge(row.contractor_type)}</td>
                   <td class="px-3 py-2 text-right text-blue-600">${fmt2(cv)}</td>
                   <td class="px-3 py-2 text-right text-purple-600">${fmt2(pay)}</td>
@@ -4683,10 +4684,10 @@ function renderPaystubContent(data) {
       <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
         <div class="bg-gray-50 rounded-xl p-4">
           <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Contractor</div>
-          <div class="font-bold text-gray-800 text-lg">${c.name || ''}</div>
-          <div class="text-sm text-gray-600">${c.company || 'Lion MD'}</div>
+          <div class="font-bold text-gray-800 text-lg">${escHtml(c.name || '')}</div>
+          <div class="text-sm text-gray-600">${escHtml(c.company || 'Lion MD')}</div>
           ${c.ein_ssn ? `<div class="text-sm text-gray-500 mt-1">EIN/SSN: ${c.ein_ssn}</div>` : ''}
-          ${c.email ? `<div class="text-xs text-gray-400">${c.email}</div>` : ''}
+          ${c.email ? `<div class="text-xs text-gray-400">${escHtml(c.email)}</div>` : ''}
         </div>
         <div class="bg-purple-50 rounded-xl p-4">
           <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Payment Summary</div>
@@ -4758,7 +4759,7 @@ function renderPaystubContent(data) {
                   <td class="px-3 py-2 font-mono text-blue-600">${r.case_id_short || r.case_id?.substring(0,8)}</td>
                   <td class="px-3 py-2 text-gray-500">${(r.decision_date||'').substring(0,10)}</td>
                   <td class="px-3 py-2 font-mono text-gray-500 tracking-wider">${(r.patient_name||'').trim().split(/\s+/).filter(Boolean).map(w=>w[0].toUpperCase()+'.').join('')||'—'}</td>
-                  <td class="px-3 py-2 text-gray-500 max-w-[120px] truncate">${r.organization_name}</td>
+                  <td class="px-3 py-2 text-gray-500 max-w-[120px] truncate">${escHtml(r.organization_name || '')}</td>
                   <td class="px-3 py-2">${visitTypeBadge(r.visit_type, r.carevalidate_fee, r.is_orderly)}</td>
                   <td class="px-3 py-2 text-right font-semibold text-purple-600">${fmt(r.contractor_fee)}</td>
                 </tr>`).join('')}
@@ -17592,12 +17593,13 @@ async function renderPartnerView() {
   const mc = $('mainContent')
   mc.innerHTML = `<div class="flex justify-center py-16"><div class="spinner"></div></div>`
 
-  // Load current password first, then use it to fetch the licensing preview
-  let currentPw = 'LionProviders2026!'
+  // Load current password first, then use it to fetch the licensing preview.
+  // SECURITY: do NOT hardcode the default password here — fetch it from the server only.
+  let currentPw = ''
   let licData = null
   try {
     const pwRes = await api('/api/admin/config/shared_view_password')
-    currentPw = pwRes?.value || currentPw
+    currentPw = pwRes?.value || ''
     // Use the resolved password to fetch the live preview (server now requires it)
     const dataRes = await fetch('/api/licensing/public?pw=' + encodeURIComponent(currentPw))
     if (dataRes.ok) licData = await dataRes.json()

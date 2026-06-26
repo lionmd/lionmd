@@ -209,11 +209,19 @@ function aprilAsyncCvFee(
 }
 
 const app = new Hono<{ Bindings: Bindings }>()
-// CORS: restrict to same origin + known partner domains.
-// Wildcard cors() would allow any site to call the API with a user's token.
-// The /api/licensing/public route is intentionally accessible cross-origin
-// (for partner iframe embeds) — Hono will still apply the restrictive policy
-// but the shared-password check in the handler provides the real gate.
+
+// ── Security headers — applied to every response ──────────────────
+app.use('*', async (c, next) => {
+  await next()
+  c.res.headers.set('X-Content-Type-Options', 'nosniff')
+  c.res.headers.set('X-Frame-Options', 'DENY')
+  c.res.headers.set('Referrer-Policy', 'strict-origin-when-cross-origin')
+  c.res.headers.set('Permissions-Policy', 'camera=(), microphone=(), geolocation=()')
+  c.res.headers.set('X-XSS-Protection', '1; mode=block')
+})
+
+// ── CORS: restrict to same origin + known partner domains ─────────
+// Wildcard cors() would allow any site to call the API cross-origin with a user's token.
 app.use('/api/*', cors({
   origin: (origin) => {
     if (!origin) return '*'  // server-to-server / same-origin requests have no Origin header
@@ -2712,6 +2720,10 @@ async function requireAuth(c: any, next: any) {
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
   const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
+  // SECURITY: re-check is_active on every request so deactivated users are rejected
+  // immediately rather than waiting for their 30-day token to expire.
+  const dbUser = await c.env.DB.prepare('SELECT is_active FROM portal_users WHERE id=?').bind(payload.id).first() as any
+  if (!dbUser || dbUser.is_active === 0) return c.json({ error: 'Account deactivated' }, 401)
   c.set('user', payload)
   return next()
 }
@@ -2722,6 +2734,9 @@ async function requireAdmin(c: any, next: any) {
   if (!token) return c.json({ error: 'Unauthorized' }, 401)
   const payload = await verifyToken(token, c.env)
   if (!payload || payload.role !== 'admin') return c.json({ error: 'Admin access required' }, 403)
+  // SECURITY: re-check is_active on every request so deactivated admins are rejected immediately.
+  const dbUser = await c.env.DB.prepare('SELECT is_active FROM portal_users WHERE id=?').bind(payload.id).first() as any
+  if (!dbUser || dbUser.is_active === 0) return c.json({ error: 'Account deactivated' }, 401)
   c.set('user', payload)
   return next()
 }
@@ -2760,8 +2775,11 @@ app.post('/api/auth/login', async (c) => {
   // If must_set_password flag is set OR no password hash exists yet, send to setup flow.
   // Note: must_set_password should only be 1 for users who have never completed setup.
   // It must NOT be reset to 1 for established providers (that caused repeated setup prompts).
+  // SECURITY: do NOT return invite_token here — an attacker who knows someone's email could
+  // call this endpoint and get a valid setup token, then take over the account.
+  // The invite_token is only delivered via the invite/reset email; the user must use that link.
   if (user.must_set_password === 1 || !user.password_hash) {
-    return c.json({ must_set_password: true, invite_token: user.invite_token, user_id: user.id })
+    return c.json({ must_set_password: true, user_id: user.id })
   }
 
   const ok = await verifyPassword(password, user.password_hash)
@@ -3359,6 +3377,9 @@ async function requireCandidate(c: any, next: any) {
   const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   if (payload.role !== 'admin' && payload.role !== 'candidate') return c.json({ error: 'Access denied' }, 403)
+  // SECURITY: re-check is_active so deactivated candidates are rejected immediately.
+  const dbUser = await c.env.DB.prepare('SELECT is_active FROM portal_users WHERE id=?').bind(payload.id).first() as any
+  if (!dbUser || dbUser.is_active === 0) return c.json({ error: 'Account deactivated' }, 401)
   c.set('user', payload)
   return next()
 }
@@ -3371,7 +3392,11 @@ app.get('/api/candidate/status', requireCandidate, async (c) => {
   const pu = await c.env.DB.prepare(`SELECT * FROM portal_users WHERE id=?`).bind(u.id).first() as any
   if (!pu?.candidate_id && u.role !== 'admin') return c.json({ error: 'No candidate profile linked' }, 404)
 
-  const candidateId = pu?.candidate_id ?? c.req.query('candidate_id')
+  // SECURITY: only admins may supply an arbitrary candidate_id via query param.
+  // Candidates are always scoped to their own linked record — never trust user input.
+  const candidateId = u.role === 'admin'
+    ? (pu?.candidate_id ?? c.req.query('candidate_id'))
+    : pu?.candidate_id
   if (!candidateId) return c.json({ error: 'No candidate profile linked' }, 404)
 
   const [candidate, docs, meetings] = await Promise.all([
@@ -3569,6 +3594,9 @@ async function requireProvider(c: any, next: any) {
   const payload = await verifyToken(token, c.env)
   if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
   if (payload.role !== 'admin' && payload.role !== 'provider') return c.json({ error: 'Access denied' }, 403)
+  // SECURITY: re-check is_active so deactivated providers are rejected immediately.
+  const dbUser = await c.env.DB.prepare('SELECT is_active FROM portal_users WHERE id=?').bind(payload.id).first() as any
+  if (!dbUser || dbUser.is_active === 0) return c.json({ error: 'Account deactivated' }, 401)
   c.set('user', payload)
   return next()
 }
@@ -4297,6 +4325,9 @@ async function requireLicenseEditor(c: any, next: any) {
   if (payload.role !== 'admin' && payload.role !== 'license_editor') {
     return c.json({ error: 'License editor access required' }, 403)
   }
+  // SECURITY: re-check is_active so deactivated license editors are rejected immediately.
+  const dbUser = await c.env.DB.prepare('SELECT is_active FROM portal_users WHERE id=?').bind(payload.id).first() as any
+  if (!dbUser || dbUser.is_active === 0) return c.json({ error: 'Account deactivated' }, 401)
   c.set('user', payload)
   await next()
 }
@@ -4594,6 +4625,9 @@ async function requireManager(c: any, next: any) {
   if (!payload || (payload.role !== 'admin' && payload.role !== 'manager')) {
     return c.json({ error: 'Manager access required' }, 403)
   }
+  // SECURITY: re-check is_active so deactivated managers are rejected immediately.
+  const dbUser = await c.env.DB.prepare('SELECT is_active FROM portal_users WHERE id=?').bind(payload.id).first() as any
+  if (!dbUser || dbUser.is_active === 0) return c.json({ error: 'Account deactivated' }, 401)
   c.set('user', payload)
   return next()
 }
