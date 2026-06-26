@@ -13750,10 +13750,6 @@ function ppOpenEditProfile() {
         <!-- Section: Contact -->
         <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-1">Contact</p>
         <div class="grid grid-cols-2 gap-3">
-          <div class="col-span-2">
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Email <span class="font-normal text-gray-400">(updates login email)</span></label>
-            <input id="ppEditEmail" type="email" placeholder="you@example.com" value="${escHtml(pu?.email || ct.email || '')}" class="w-full text-sm"/>
-          </div>
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1">Phone</label>
             <input id="ppEditPhone" type="tel" placeholder="(555) 123-4567" value="${escHtml(ct.phone||'')}" class="w-full text-sm"/>
@@ -13819,7 +13815,6 @@ function ppOpenEditProfile() {
 }
 
 async function ppSaveProfile() {
-  const email          = ($('ppEditEmail')?.value||'').trim()
   const phone          = ($('ppEditPhone').value||'').trim()
   const address        = ($('ppEditAddress').value||'').trim()
   const bio            = ($('ppEditBio').value||'').trim()
@@ -13833,11 +13828,6 @@ async function ppSaveProfile() {
   const bmi_max        = ($('ppEditBmiMax')?.value||'').trim()
   const errEl          = $('ppEditError')
   errEl.classList.add('hidden')
-  if (email && !/^[^@]+@[^@]+\.[^@]+$/.test(email)) {
-    errEl.textContent = 'Please enter a valid email address.'
-    errEl.classList.remove('hidden')
-    return
-  }
   if (bmi_min && bmi_max && parseFloat(bmi_min) >= parseFloat(bmi_max)) {
     errEl.textContent = 'Min BMI must be less than Max BMI.'
     errEl.classList.remove('hidden')
@@ -13848,8 +13838,7 @@ async function ppSaveProfile() {
       phone, address, bio, npi, specialty,
       first_name, last_name, dob, languages,
       bmi_min: bmi_min !== '' ? bmi_min : null,
-      bmi_max: bmi_max !== '' ? bmi_max : null,
-      email: email || undefined
+      bmi_max: bmi_max !== '' ? bmi_max : null
     }) })
     $('ppEditModal').classList.add('hidden')
     showToast('Profile updated! Admin can see your changes.', 'success')
