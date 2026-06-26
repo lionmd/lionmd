@@ -7395,18 +7395,95 @@ function obRenderContractorDetail(data) {
 
         <!-- Professional Details -->
         <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
-          <p class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Professional Details</p>
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-gray-400 uppercase tracking-wider">Professional Details</p>
+            <button onclick="openContractorModal(${JSON.stringify(ct).replace(/"/g,'&quot;')})" class="text-xs text-blue-500 hover:underline">Edit →</button>
+          </div>
           <div class="space-y-2.5">
+
+            <!-- Full Legal Name -->
+            ${(ct.first_name || ct.last_name) ? `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-user w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Legal Name</span>
+              <span class="text-gray-700 font-medium">${escHtml([ct.first_name, ct.last_name].filter(Boolean).join(' '))}</span>
+            </div>` : ''}
+
+            <!-- DOB -->
+            ${ct.dob ? `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-birthday-cake w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Date of Birth</span>
+              <span class="text-gray-700">${escHtml(ct.dob)}</span>
+            </div>` : `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-birthday-cake w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Date of Birth</span>
+              <span class="italic text-gray-300 text-xs">Not set</span>
+            </div>`}
+
+            <!-- Specialty -->
             ${specialty ? `
             <div class="flex items-center gap-3 text-sm">
               <i class="fas fa-stethoscope w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Specialty</span>
               <span class="text-gray-700">${escHtml(specialty)}</span>
             </div>` : ''}
-            ${ct.npi ? `
+
+            <!-- NPI -->
             <div class="flex items-center gap-3 text-sm">
               <i class="fas fa-id-badge w-4 text-gray-300 flex-shrink-0"></i>
-              <span class="text-gray-600">NPI: <span class="font-mono">${escHtml(ct.npi)}</span></span>
-            </div>` : ''}
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">NPI</span>
+              ${ct.npi ? `<span class="text-gray-600 font-mono">${escHtml(ct.npi)}</span>` : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
+            <!-- States Licensed -->
+            <div class="flex items-start gap-3 text-sm">
+              <i class="fas fa-map-marker-alt w-4 text-gray-300 flex-shrink-0 mt-0.5"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0 mt-0.5">Licensed</span>
+              <div class="flex flex-wrap gap-1">
+                ${licenses.filter(l => l.license_type !== 'DEA').length > 0
+                  ? licenses.filter(l => l.license_type !== 'DEA').map(l => {
+                      const cls = l.status === 'expired' ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+                      return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold ${cls}">${escHtml(l.state)}</span>`
+                    }).join('')
+                  : `<span class="italic text-gray-300 text-xs">No licenses on file</span>`
+                }
+              </div>
+            </div>
+
+            <!-- DEA Numbers -->
+            <div class="flex items-start gap-3 text-sm">
+              <i class="fas fa-prescription-bottle-alt w-4 text-gray-300 flex-shrink-0 mt-0.5"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0 mt-0.5">DEA</span>
+              <div class="flex flex-wrap gap-1.5">
+                ${licenses.filter(l => l.license_type === 'DEA').length > 0
+                  ? licenses.filter(l => l.license_type === 'DEA').map(d => `
+                      <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-blue-50 border border-blue-200 text-xs">
+                        <span class="font-bold text-blue-700">${escHtml(d.state)}</span>
+                        <span class="font-mono text-gray-600">${escHtml(d.license_number || '—')}</span>
+                        ${d.expiry_date ? `<span class="text-gray-400">exp. ${escHtml(d.expiry_date)}</span>` : ''}
+                      </span>`).join('')
+                  : `<span class="italic text-gray-300 text-xs">None on file</span>`
+                }
+              </div>
+            </div>
+
+            <!-- Languages -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-language w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Languages</span>
+              ${ct.languages ? `<span class="text-gray-700">${escHtml(ct.languages)}</span>` : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
+            <!-- BMI Range -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-weight w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">BMI Range</span>
+              ${(ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '') || (ct.bmi_max !== null && ct.bmi_max !== undefined && ct.bmi_max !== '')
+                ? `<span class="text-gray-700">Min <strong>${ct.bmi_min ?? '—'}</strong> &nbsp;·&nbsp; Max <strong>${ct.bmi_max ?? '—'}</strong></span>`
+                : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
 
           </div>
         </div>
