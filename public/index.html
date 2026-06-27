@@ -5217,6 +5217,9 @@ function renderContractors() {
           <button onclick="exportContractorsXlsx()" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors">
             <i class="fas fa-file-excel mr-2"></i>Export XLSX
           </button>
+          <button onclick="exportProviderSpreadsheet()" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-violet-300 text-violet-700 bg-violet-50 hover:bg-violet-100 transition-colors">
+            <i class="fas fa-table mr-2"></i>Provider Sheet
+          </button>
           <button onclick="runContractorMigration()" id="migrateBtn" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors">
             <i class="fas fa-sync-alt mr-2"></i>Sync Names &amp; Groups
           </button>
@@ -5337,6 +5340,10 @@ function renderContractors() {
               <input type="date" id="ctDob" class="w-full"/>
             </div>
             <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1.5">Start Date</label>
+              <input type="date" id="ctStartDate" class="w-full"/>
+            </div>
+            <div class="col-span-2">
               <label class="block text-xs font-semibold text-gray-600 mb-1.5">Languages Spoken</label>
               <input type="text" id="ctLanguages" class="w-full" placeholder="e.g. English, Spanish"/>
             </div>
@@ -5493,6 +5500,94 @@ function exportContractorsXlsx() {
   showToast(`Exported ${contractors.length} active${inactive.length ? ' + ' + inactive.length + ' inactive' : ''} contractors to Excel.`, 'success')
 }
 
+// ── Export Provider Spreadsheet — one row per provider with all key fields ───
+// Fields: Full Name, DOB, Email, NPI, States Licensed, DEA Number(s),
+//         Languages Spoken, Max BMI, Min BMI, Start Date
+async function exportProviderSpreadsheet() {
+  showLoading('Building provider spreadsheet…')
+  try {
+    const data = await api('/api/admin/contractors/export-all')
+    const contractors = data.contractors || []
+    const licenses    = data.licenses    || []
+    if (!contractors.length) { hideLoading(); showToast('No active providers found.', 'warning'); return }
+
+    // Index licenses by contractor_id
+    const licMap = {}
+    licenses.forEach(l => {
+      if (!licMap[l.contractor_id]) licMap[l.contractor_id] = []
+      licMap[l.contractor_id].push(l)
+    })
+
+    const rows = contractors.map(ct => {
+      const ctLics = licMap[ct.id] || []
+      const stateLics = ctLics.filter(l => l.license_type !== 'DEA')
+      const deaLics   = ctLics.filter(l => l.license_type === 'DEA')
+
+      // States Licensed: "CA (NP) · FL (NP) · NY (MD)"
+      const statesStr = stateLics
+        .map(l => l.state + (l.license_type ? ' (' + l.license_type + ')' : ''))
+        .join(' · ') || ''
+
+      // DEA Numbers: "FL: MD9179614 · TX: BX1234567"
+      const deaStr = deaLics
+        .map(l => (l.state ? l.state + ': ' : '') + (l.license_number || ''))
+        .join(' · ') || ''
+
+      const fullName = [ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.name || ''
+
+      return {
+        'Full Name':       fullName,
+        'DOB':             ct.dob        || '',
+        'Email':           ct.email      || '',
+        'NPI':             ct.npi        || '',
+        'States Licensed': statesStr,
+        'DEA Number(s)':   deaStr,
+        'Languages':       ct.languages  || '',
+        'Min BMI':         ct.bmi_min    !== null && ct.bmi_min  !== undefined ? ct.bmi_min  : '',
+        'Max BMI':         ct.bmi_max    !== null && ct.bmi_max  !== undefined ? ct.bmi_max  : '',
+        'Start Date':      ct.start_date || '',
+      }
+    })
+
+    const HEADERS = ['Full Name','DOB','Email','NPI','States Licensed','DEA Number(s)','Languages','Min BMI','Max BMI','Start Date']
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet(rows, { header: HEADERS, skipHeader: false })
+
+    // Column widths
+    ws['!cols'] = [
+      { wch: 28 },  // Full Name
+      { wch: 14 },  // DOB
+      { wch: 32 },  // Email
+      { wch: 14 },  // NPI
+      { wch: 40 },  // States Licensed
+      { wch: 36 },  // DEA Number(s)
+      { wch: 22 },  // Languages
+      { wch: 10 },  // Min BMI
+      { wch: 10 },  // Max BMI
+      { wch: 14 },  // Start Date
+    ]
+
+    // Bold the header row
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1')
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cellAddr = XLSX.utils.encode_cell({ r: 0, c: C })
+      if (ws[cellAddr]) {
+        ws[cellAddr].s = { font: { bold: true }, fill: { fgColor: { rgb: 'EDE9FE' } } }
+      }
+    }
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Providers')
+
+    const date = new Date().toISOString().slice(0, 10)
+    XLSX.writeFile(wb, `LionMD_Provider_Sheet_${date}.xlsx`)
+    showToast(`Exported ${rows.length} providers to spreadsheet.`, 'success')
+  } catch(e) {
+    showToast('Export failed: ' + e.message, 'error')
+  } finally {
+    hideLoading()
+  }
+}
+
 // ── Run bulk data migration: rename contractors + assign role_group ──────────
 async function runContractorMigration() {
   const btn = $('migrateBtn')
@@ -5636,6 +5731,7 @@ function openContractorModal(contractor = null) {
   $('ctPhone').value = contractor?.phone || ''
   $('ctExternalCpaNotes').value = contractor?.external_cpa_notes || ''
   $('ctDob').value = contractor?.dob || ''
+  $('ctStartDate').value = contractor?.start_date || ''
   $('ctLanguages').value = contractor?.languages || ''
   $('ctBmiMin').value = contractor?.bmi_min !== null && contractor?.bmi_min !== undefined ? contractor.bmi_min : ''
   $('ctBmiMax').value = contractor?.bmi_max !== null && contractor?.bmi_max !== undefined ? contractor.bmi_max : ''
@@ -5672,6 +5768,7 @@ async function saveContractor() {
     role_group: $('ctRoleGroup').value,
     external_cpa_notes: $('ctExternalCpaNotes').value.trim(),
     dob: $('ctDob').value.trim(),
+    start_date: $('ctStartDate').value.trim(),
     languages: $('ctLanguages').value.trim(),
     bmi_min: $('ctBmiMin').value !== '' ? $('ctBmiMin').value : null,
     bmi_max: $('ctBmiMax').value !== '' ? $('ctBmiMax').value : null,
@@ -7529,6 +7626,13 @@ function obRenderContractorDetail(data) {
                 : `<span class="italic text-gray-300 text-xs">Not set</span>`}
             </div>
 
+            <!-- Start Date -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-calendar-check w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Start Date</span>
+              ${ct.start_date ? `<span class="text-gray-700">${escHtml(ct.start_date)}</span>` : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
           </div>
         </div>
 
@@ -8336,6 +8440,7 @@ function buildProviderDetailsText(contractorId) {
   if (ct.languages) lines.push(`Languages:    ${ct.languages}`)
   if (ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '')
     lines.push(`BMI Range:    Min ${ct.bmi_min}  Max ${ct.bmi_max ?? '—'}`)
+  if (ct.start_date) lines.push(`Start Date:   ${ct.start_date}`)
 
   if (stateLicenses.length > 0) {
     lines.push('')

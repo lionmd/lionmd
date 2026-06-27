@@ -561,6 +561,7 @@ app.get('/api/contractors', requireAdmin, async (c) => {
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN phone TEXT DEFAULT ''`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN bio TEXT DEFAULT ''`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN address TEXT DEFAULT ''`).run().catch(() => {})
+  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN start_date TEXT DEFAULT ''`).run().catch(() => {})
   // Default earns_commission=1 for Lion MD, PLLC contractors (Ana Lisa Carr, Kelly Tenbrink)
   await c.env.DB.prepare(
     `UPDATE contractors SET earns_commission=1 WHERE (LOWER(company) LIKE '%lion md%') AND earns_commission=0`
@@ -579,10 +580,10 @@ app.post('/api/contractors', requireAdmin, async (c) => {
 
 app.put('/api/contractors/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
-  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes, dob, languages, bmi_min, bmi_max } = await c.req.json()
+  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes, dob, languages, bmi_min, bmi_max, start_date } = await c.req.json()
   await c.env.DB.prepare(
-    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=?, dob=?, languages=?, bmi_min=?, bmi_max=? WHERE id=?`
-  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', dob || '', languages || '', bmi_min !== undefined && bmi_min !== '' && bmi_min !== null ? parseFloat(bmi_min) : null, bmi_max !== undefined && bmi_max !== '' && bmi_max !== null ? parseFloat(bmi_max) : null, id).run()
+    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=?, dob=?, languages=?, bmi_min=?, bmi_max=?, start_date=? WHERE id=?`
+  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', dob || '', languages || '', bmi_min !== undefined && bmi_min !== '' && bmi_min !== null ? parseFloat(bmi_min) : null, bmi_max !== undefined && bmi_max !== '' && bmi_max !== null ? parseFloat(bmi_max) : null, start_date || '', id).run()
   return c.json({ ok: true })
 })
 
@@ -867,6 +868,25 @@ app.post('/api/contractors/merge', requireAdmin, async (c) => {
   if (sessionStmts.length) await c.env.DB.batch(sessionStmts)
 
   return c.json({ ok: true, keep_id: keepId, merged: mergeIds, consults_moved: totalMoved })
+})
+
+// GET /api/admin/contractors/export-all — compact dataset for provider spreadsheet export
+// Returns all active contractors + all their licenses in two parallel queries
+app.get('/api/admin/contractors/export-all', requireAdmin, async (c) => {
+  const [ctRes, licRes] = await Promise.all([
+    c.env.DB.prepare(
+      `SELECT id, name, first_name, last_name, email, npi, dob, languages, bmi_min, bmi_max, start_date, role_group, specialty
+       FROM contractors WHERE is_active=1 ORDER BY role_group, name`
+    ).all(),
+    c.env.DB.prepare(
+      `SELECT contractor_id, state, license_type, license_number, expiry_date, status
+       FROM provider_licenses ORDER BY contractor_id, state`
+    ).all(),
+  ])
+  return c.json({
+    contractors: ctRes.results,
+    licenses:    licRes.results,
+  })
 })
 
 // GET /api/contractors/all — includes inactive, for merge UI
