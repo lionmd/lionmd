@@ -7433,7 +7433,15 @@ function obRenderContractorDetail(data) {
         <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
           <div class="flex items-center justify-between mb-3">
             <p class="text-xs font-bold text-gray-400 uppercase tracking-wider">Professional Details</p>
-            <button onclick="openContractorModal(${JSON.stringify(ct).replace(/"/g,'&quot;')})" class="text-xs text-blue-500 hover:underline">Edit →</button>
+            <div class="flex items-center gap-2">
+              <button onclick="copyProviderDetails(${ct.id})" class="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-200 transition-colors" title="Copy to clipboard">
+                <i class="fas fa-copy"></i> Copy
+              </button>
+              <button onclick="exportProviderDetails(${ct.id})" class="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-200 transition-colors" title="Export as text file">
+                <i class="fas fa-download"></i> Export
+              </button>
+              <button onclick="openContractorModal(${JSON.stringify(ct).replace(/"/g,'&quot;')})" class="text-xs text-blue-500 hover:underline ml-1">Edit →</button>
+            </div>
           </div>
           <div class="space-y-2.5">
 
@@ -8300,6 +8308,84 @@ async function ctHandleDocFileSelected(event, contractorId) {
     if (errEl) { errEl.textContent = 'Upload failed: ' + e.message; errEl.classList.remove('hidden') }
     showToast('Upload failed: ' + e.message, 'error')
   }
+}
+
+// ── Provider Details Copy / Export ───────────────────────────────
+function buildProviderDetailsText(contractorId) {
+  const fp = ctDetailState.fullProfile
+  const ct = fp?.contractor || fp
+  const licenses = ctDetailState.licenses || []
+  if (!ct) return null
+
+  const name = [ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.name || '—'
+  const stateLicenses = licenses.filter(l => l.license_type !== 'DEA')
+  const deaLicenses   = licenses.filter(l => l.license_type === 'DEA')
+
+  const lines = [
+    '─────────────────────────────────────',
+    'PROVIDER PROFESSIONAL DETAILS',
+    '─────────────────────────────────────',
+    `Name:         ${name}`,
+  ]
+  if (ct.dob)       lines.push(`Date of Birth: ${ct.dob}`)
+  if (ct.specialty || ct.role_group) lines.push(`Specialty:    ${[ct.specialty, ct.role_group].filter(Boolean).join(' / ')}`)
+  if (ct.npi)       lines.push(`NPI:          ${ct.npi}`)
+  if (ct.email)     lines.push(`Email:        ${ct.email}`)
+  if (ct.phone)     lines.push(`Phone:        ${ct.phone}`)
+  if (ct.ein_ssn)   lines.push(`EIN / SSN:    ${ct.ein_ssn}`)
+  if (ct.languages) lines.push(`Languages:    ${ct.languages}`)
+  if (ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '')
+    lines.push(`BMI Range:    Min ${ct.bmi_min}  Max ${ct.bmi_max ?? '—'}`)
+
+  if (stateLicenses.length > 0) {
+    lines.push('')
+    lines.push('STATE LICENSES')
+    lines.push('─────────────────────────────────────')
+    stateLicenses.forEach(l => {
+      const parts = [l.state, l.license_type, l.license_number].filter(Boolean)
+      if (l.expiry_date) parts.push(`exp. ${l.expiry_date}`)
+      if (l.status && l.status !== 'active') parts.push(`(${l.status})`)
+      lines.push('  ' + parts.join('  ·  '))
+    })
+  }
+
+  if (deaLicenses.length > 0) {
+    lines.push('')
+    lines.push('DEA CERTIFICATES')
+    lines.push('─────────────────────────────────────')
+    deaLicenses.forEach(d => {
+      const parts = [d.state, d.license_number].filter(Boolean)
+      if (d.expiry_date) parts.push(`exp. ${d.expiry_date}`)
+      lines.push('  ' + parts.join('  ·  '))
+    })
+  }
+
+  lines.push('─────────────────────────────────────')
+  return lines.join('\n')
+}
+
+function copyProviderDetails(contractorId) {
+  const text = buildProviderDetailsText(contractorId)
+  if (!text) { showToast('No provider data loaded', 'error'); return }
+  navigator.clipboard.writeText(text)
+    .then(() => showToast('Provider details copied to clipboard', 'success'))
+    .catch(() => showToast('Copy failed — try the Export button instead', 'error'))
+}
+
+function exportProviderDetails(contractorId) {
+  const text = buildProviderDetailsText(contractorId)
+  if (!text) { showToast('No provider data loaded', 'error'); return }
+  const fp = ctDetailState.fullProfile
+  const ct = fp?.contractor || fp
+  const name = (ct?.name || 'provider').replace(/\s+/g, '_')
+  const date = new Date().toISOString().slice(0, 10)
+  const fileName = `${name}_details_${date}.txt`
+  const blob = new Blob([text], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = fileName; a.click()
+  URL.revokeObjectURL(url)
+  showToast('Exported as ' + fileName, 'success')
 }
 
 async function ctDownloadContractorDoc(docId, fileName) {
