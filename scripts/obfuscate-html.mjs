@@ -54,7 +54,7 @@ let scriptCount = 0
 let totalOrigBytes = 0
 let totalObfBytes  = 0
 
-html = html.replace(SCRIPT_RE, (fullMatch, jsCode) => {
+html = html.replace(SCRIPT_RE, (fullMatch, jsCode, offset, _str, namedGroups, ...rest) => {
   const trimmed = jsCode.trim()
   if (trimmed.length < 200) return fullMatch   // skip trivial snippets
 
@@ -65,8 +65,15 @@ html = html.replace(SCRIPT_RE, (fullMatch, jsCode) => {
     const result = JavaScriptObfuscator.obfuscate(trimmed, OBF_OPTIONS)
     const obfCode = result.getObfuscatedCode()
     totalObfBytes += obfCode.length
-    // Replace the script body, preserve the opening/closing tags
-    return fullMatch.replace(trimmed, obfCode)
+
+    // Extract the opening tag (everything before the JS body starts)
+    // and closing tag, then reconstruct manually.
+    // IMPORTANT: do NOT use String.replace() here — obfuscated code contains
+    // `$` characters that String.replace() interprets as special replacement
+    // patterns ($&, $1, $$, etc.), corrupting the output.
+    const openTag  = fullMatch.slice(0, fullMatch.indexOf(jsCode))
+    const closeTag = '</script>'
+    return openTag + obfCode + closeTag
   } catch (err) {
     console.warn(`[obfuscate] Warning: could not obfuscate script block #${scriptCount}:`, err.message)
     return fullMatch   // leave original on error
