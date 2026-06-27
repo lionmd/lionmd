@@ -1139,12 +1139,13 @@
         <div id="cvPlaceholder">
           <i class="fas fa-cloud-upload-alt text-3xl text-gray-300 mb-2"></i>
           <div class="text-sm font-semibold text-gray-500">Drag &amp; drop your CV / Resume here</div>
-          <div class="text-xs text-gray-400 mt-1">PDF, DOC, DOCX — max 10 MB</div>
+          <div class="text-xs text-gray-400 mt-1">PDF, DOC, DOCX — max 650 KB</div>
         </div>
         <div id="cvFileInfo" class="hidden">
           <i class="fas fa-file-pdf text-3xl text-red-400 mb-2"></i>
           <div class="text-sm font-semibold text-gray-700" id="cvFileName"></div>
-          <div class="text-xs text-gray-400 mt-1">Click to change</div>
+          <div class="text-xs text-gray-400 mt-1" id="cvFileSize"></div>
+          <div class="text-xs text-gray-400">Click to change</div>
         </div>
       </div>
     </div>
@@ -2055,12 +2056,23 @@ async function applyHandlePhoto(file) {
 
 async function applyHandleCV(file) {
   if (!file) return
-  if (file.size > 10*1024*1024) { applyShowError('CV must be under 10 MB.'); return }
+  // D1 database has a ~650 KB per-value storage limit.
+  // Base64 encoding adds ~33% overhead, so raw file must be under ~650 KB.
+  const MAX_CV_BYTES = 650 * 1024  // 650 KB
+  if (file.size > MAX_CV_BYTES) {
+    applyShowError(
+      `Your CV is ${(file.size/1024).toFixed(0)} KB — the maximum is 650 KB. ` +
+      'Please compress or export a smaller version (e.g. save as PDF with reduced quality, or remove large images from the document).'
+    )
+    return
+  }
   applyState.cvB64 = await applyReadFileB64(file)
   applyState.cvMime = file.type
   applyState.cvName = file.name
   applyState.cvSize = file.size
   $('cvFileName').textContent = file.name
+  const sizeKb = (file.size / 1024).toFixed(0)
+  $('cvFileSize').textContent = sizeKb + ' KB'
   $('cvPlaceholder').classList.add('hidden')
   $('cvFileInfo').classList.remove('hidden')
 }

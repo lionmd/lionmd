@@ -2300,7 +2300,7 @@ app.post('/api/apply', async (c) => {
     // Cap photo at 800 KB of base64 (~600 KB raw) — photos should be small.
     // CV/resume is stored as a document row; cap at 900 KB base64 to be safe.
     const MAX_PHOTO_B64 = 800_000
-    const MAX_CV_B64    = 900_000
+    const MAX_CV_B64    = 870_000  // ~650 KB raw; base64 is ~33% larger
     const photoData = typeof body.photo_data === 'string' && body.photo_data.length <= MAX_PHOTO_B64
       ? body.photo_data : ''
     const photoMime = photoData ? (body.photo_mime || '') : ''
@@ -2388,8 +2388,8 @@ app.post('/api/apply/:id/documents', async (c) => {
     if (!body.file_data || !body.file_name) return c.json({ error: 'file_data and file_name required' }, 400)
 
     // Cap at 900 KB base64 (~675 KB raw) per D1 limits
-    if (typeof body.file_data !== 'string' || body.file_data.length > 900_000) {
-      return c.json({ error: 'File too large for storage. Please use a smaller file.' }, 413)
+    if (typeof body.file_data !== 'string' || body.file_data.length > 870_000) {
+      return c.json({ error: 'File too large. Maximum CV size is 650 KB. Please compress or export a smaller PDF.' }, 413)
     }
 
     await c.env.DB.prepare(`
