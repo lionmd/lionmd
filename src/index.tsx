@@ -2291,59 +2291,118 @@ app.put('/api/onboarding/candidates/:id', requireAdmin, async (c) => {
 
 // ── Public Application (no auth required) ───────────────────────
 app.post('/api/apply', async (c) => {
-  await ensureOnboardingSchema(c.env.DB)
-  const body = await c.req.json() as any
-  if (!body.full_name || !body.email) return c.json({ error: 'Name and email are required' }, 400)
-  // Create the candidate record with status 'new' and source 'Public Application'
-  const r = await c.env.DB.prepare(`
-    INSERT INTO onboarding_candidates
-      (full_name, company_name, email, phone, ein_ssn, role_group, specialty,
-       status, source, notes, states_licensed, photo_data, photo_mime)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
-  `).bind(
-    body.full_name || '', body.company_name || '', body.email || '',
-    body.phone || '', body.ein_ssn || '', body.role_group || '',
-    body.specialty || '', 'new', 'Public Application', body.notes || '',
-    body.states_licensed || '', body.photo_data || '', body.photo_mime || ''
-  ).run()
-  const candidateId = r.meta.last_row_id
-  // Attach CV/resume document if provided
-  if (body.cv_data && body.cv_name) {
+  try {
+    await ensureOnboardingSchema(c.env.DB)
+    const body = await c.req.json() as any
+    if (!body.full_name || !body.email) return c.json({ error: 'Name and email are required' }, 400)
+
+    // D1 has a ~1 MB per-value limit. Base64 files can easily exceed this.
+    // Cap photo at 800 KB of base64 (~600 KB raw) — photos should be small.
+    // CV/resume is stored as a document row; cap at 900 KB base64 to be safe.
+    const MAX_PHOTO_B64 = 800_000
+    const MAX_CV_B64    = 900_000
+    const photoData = typeof body.photo_data === 'string' && body.photo_data.length <= MAX_PHOTO_B64
+      ? body.photo_data : ''
+    const photoMime = photoData ? (body.photo_mime || '') : ''
+
+    // Create the candidate record with status 'new' and source 'Public Application'
+    const r = await c.env.DB.prepare(`
+      INSERT INTO onboarding_candidates
+        (full_name, company_name, email, phone, ein_ssn, role_group, specialty,
+         status, source, notes, states_licensed, photo_data, photo_mime)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+    `).bind(
+      body.full_name || '', body.company_name || '', body.email || '',
+      body.phone || '', body.ein_ssn || '', body.role_group || '',
+      body.specialty || '', 'new', 'Public Application', body.notes || '',
+      body.states_licensed || '', photoData, photoMime
+    ).run()
+    const candidateId = r.meta.last_row_id
+
+    // Attach CV/resume document if provided (cap at MAX_CV_B64)
+    if (body.cv_data && body.cv_name) {
+      const cvData = typeof body.cv_data === 'string' && body.cv_data.length <= MAX_CV_B64
+        ? body.cv_data : ''
+      if (cvData) {
+        await c.env.DB.prepare(`
+          INSERT INTO onboarding_documents (candidate_id, doc_type, file_name, file_data, file_size, mime_type)
+          VALUES (?,?,?,?,?,?)
+        `).bind(candidateId, 'resume', body.cv_name, cvData,
+                body.cv_size || 0, body.cv_mime || 'application/pdf').run()
+      }
+    }
+
+    // Save candidate licenses if provided
+    if (Array.isArray(body.licenses) && body.licenses.length > 0) {
+      await ensureCandidateSchema(c.env.DB)
+      for (const lic of body.licenses as any[]) {
+        const state = (lic.state || '').trim().toUpperCase()
+        if (!state) continue
+        await c.env.DB.prepare(`
+          INSERT INTO candidate_licenses
+            (candidate_id, state, license_type, license_number, expiry_date, status,
+             permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?)
+        `).bind(
+          candidateId,
+          state,
+          (lic.license_type || '').trim(),
+          (lic.license_number || '').trim(),
+          (lic.expiry_date || '').trim(),
+          (lic.status || 'active').trim(),
+          (lic.permitted_actions || '').trim(),
+          (lic.practice_type || '').trim(),
+          (lic.license_file_name || '').trim(),
+          (lic.license_file_data || ''),
+          (lic.license_file_mime || '').trim()
+        ).run().catch(() => {})
+      }
+    }
+
+    return c.json({ ok: true, id: candidateId })
+  } catch (err: any) {
+    console.error('/api/apply error:', err)
+    return c.json({ error: err?.message || 'Submission failed. Please try again.' }, 500)
+  }
+})
+
+// ── POST /api/apply/:id/documents ────────────────────────────────
+// Public endpoint: attach a document (CV/resume) to a freshly created
+// application. Separate from /api/apply to avoid D1 row-size limits on
+// large base64 payloads. Only valid for candidates with status='new'
+// created within the last 10 minutes (prevents abuse).
+app.post('/api/apply/:id/documents', async (c) => {
+  try {
+    const id = Number(c.req.param('id'))
+    if (!id || isNaN(id)) return c.json({ error: 'Invalid id' }, 400)
+    // Verify the candidate exists, is status='new', and was created recently
+    const candidate = await c.env.DB.prepare(
+      `SELECT id, status, created_at FROM onboarding_candidates WHERE id=? AND status='new'`
+    ).bind(id).first() as any
+    if (!candidate) return c.json({ error: 'Application not found' }, 404)
+    // Only allow attachment within 10 minutes of creation to prevent abuse
+    const createdMs = new Date(candidate.created_at).getTime()
+    if (Date.now() - createdMs > 10 * 60 * 1000) return c.json({ error: 'Upload window expired' }, 403)
+
+    const body = await c.req.json() as any
+    if (!body.file_data || !body.file_name) return c.json({ error: 'file_data and file_name required' }, 400)
+
+    // Cap at 900 KB base64 (~675 KB raw) per D1 limits
+    if (typeof body.file_data !== 'string' || body.file_data.length > 900_000) {
+      return c.json({ error: 'File too large for storage. Please use a smaller file.' }, 413)
+    }
+
     await c.env.DB.prepare(`
       INSERT INTO onboarding_documents (candidate_id, doc_type, file_name, file_data, file_size, mime_type)
       VALUES (?,?,?,?,?,?)
-    `).bind(candidateId, 'resume', body.cv_name, body.cv_data,
-            body.cv_size || 0, body.cv_mime || 'application/pdf').run()
+    `).bind(id, body.doc_type || 'resume', body.file_name, body.file_data,
+            body.file_size || 0, body.mime_type || 'application/octet-stream').run()
+
+    return c.json({ ok: true })
+  } catch (err: any) {
+    console.error('/api/apply/:id/documents error:', err)
+    return c.json({ error: err?.message || 'Upload failed' }, 500)
   }
-  // Save candidate licenses if provided
-  if (Array.isArray(body.licenses) && body.licenses.length > 0) {
-    await ensureCandidateSchema(c.env.DB)
-    // Create a portal_user row for the candidate so candidate_licenses FK works
-    // (candidate_id in candidate_licenses refers to onboarding_candidates.id directly)
-    for (const lic of body.licenses as any[]) {
-      const state = (lic.state || '').trim().toUpperCase()
-      if (!state) continue
-      await c.env.DB.prepare(`
-        INSERT INTO candidate_licenses
-          (candidate_id, state, license_type, license_number, expiry_date, status,
-           permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)
-      `).bind(
-        candidateId,
-        state,
-        (lic.license_type || '').trim(),
-        (lic.license_number || '').trim(),
-        (lic.expiry_date || '').trim(),
-        (lic.status || 'active').trim(),
-        (lic.permitted_actions || '').trim(),
-        (lic.practice_type || '').trim(),
-        (lic.license_file_name || '').trim(),
-        (lic.license_file_data || ''),
-        (lic.license_file_mime || '').trim()
-      ).run().catch(() => {})
-    }
-  }
-  return c.json({ ok: true, id: candidateId })
 })
 
 app.delete('/api/onboarding/candidates/:id', requireAdmin, async (c) => {
