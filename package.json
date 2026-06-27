@@ -21,6 +21,7 @@
     "@hono/vite-build": "^1.2.0",
     "@hono/vite-dev-server": "^0.18.2",
     "javascript-obfuscator": "^5.4.3",
+    "terser": "^5.48.0",
     "vite": "^6.3.5",
     "wrangler": "^4.4.0"
   }

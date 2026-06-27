@@ -1,90 +1,100 @@
 /**
  * scripts/obfuscate-html.mjs
  *
- * Post-build step: extracts every <script>…</script> block from
- * dist/index.html, obfuscates the JavaScript with javascript-obfuscator,
- * and writes the result back in place.
+ * Post-build step:
+ *   1. Reads  dist/static/app.js  (copied from public/static/app.js by Vite)
+ *   2. Minifies it with terser    → removes whitespace, shortens identifiers
+ *   3. Obfuscates with javascript-obfuscator → encodes strings, mangles names
+ *   4. Writes the result back to  dist/static/app.js
  *
- * Run automatically via `npm run build` (see package.json "postbuild" hook).
+ * Run automatically via `npm run build` (package.json build script).
  */
 
 import { readFileSync, writeFileSync } from 'fs'
-import { resolve, dirname } from 'path'
-import { fileURLToPath } from 'url'
-import JavaScriptObfuscator from 'javascript-obfuscator'
+import { resolve, dirname }            from 'path'
+import { fileURLToPath }               from 'url'
+import { minify }                      from 'terser'
+import JavaScriptObfuscator            from 'javascript-obfuscator'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const htmlPath  = resolve(__dirname, '../dist/index.html')
+const appJsPath = resolve(__dirname, '../dist/static/app.js')
 
-console.log('[obfuscate] Reading dist/index.html …')
-let html = readFileSync(htmlPath, 'utf8')
+console.log('[build] Reading dist/static/app.js …')
+const originalCode = readFileSync(appJsPath, 'utf8')
+const origKB       = (originalCode.length / 1024).toFixed(0)
 
-// ── Obfuscation options ────────────────────────────────────────────────────
-// Tuned for balance between protection strength and runtime performance.
-// Cloudflare Pages serves static files, so size increase is acceptable.
-const OBF_OPTIONS = {
-  // Rename local variables/functions to short random names
-  compact:                          true,
-  identifierNamesGenerator:        'mangled',   // short: a, b, c …
-  renameGlobals:                    false,       // keep global names intact (DOM APIs, etc.)
-  renameProperties:                 false,       // safer — avoid breaking object keys
-  shuffleStringArray:               true,
-  rotateStringArray:                true,
-  stringArray:                      true,
-  stringArrayEncoding:              ['base64'],  // string literals become base64
-  stringArrayThreshold:             0.75,        // encode 75 % of strings
-  splitStrings:                     false,       // skip — too slow at runtime for large files
-  deadCodeInjection:                false,       // skip — balloons file size
-  controlFlowFlattening:            false,       // skip — significant perf cost
-  selfDefending:                    false,       // skip — breaks in some CSP contexts
-  disableConsoleOutput:             false,       // keep console for error reporting
-  sourceMap:                        false,       // never emit source maps
-  debugProtection:                  false,       // skip — breaks legitimate debugging flows
-  transformObjectKeys:              false,       // skip — too risky with dynamic key access
-}
-
-// ── Extract and obfuscate inline <script> blocks ───────────────────────────
-// We skip:
-//   • external scripts (src="…") — CDN libraries, not our code
-//   • type="application/json" etc. — data blocks
-//   • very short snippets (< 200 chars) — likely harmless inline oneliners
-const SCRIPT_RE = /<script(?![^>]*\bsrc\b)(?![^>]*type=["'](?!text\/javascript)[^"']+["'])[^>]*>([\s\S]*?)<\/script>/gi
-
-let scriptCount = 0
-let totalOrigBytes = 0
-let totalObfBytes  = 0
-
-html = html.replace(SCRIPT_RE, (fullMatch, jsCode, offset, _str, namedGroups, ...rest) => {
-  const trimmed = jsCode.trim()
-  if (trimmed.length < 200) return fullMatch   // skip trivial snippets
-
-  scriptCount++
-  totalOrigBytes += trimmed.length
-
-  try {
-    const result = JavaScriptObfuscator.obfuscate(trimmed, OBF_OPTIONS)
-    const obfCode = result.getObfuscatedCode()
-    totalObfBytes += obfCode.length
-
-    // Extract the opening tag (everything before the JS body starts)
-    // and closing tag, then reconstruct manually.
-    // IMPORTANT: do NOT use String.replace() here — obfuscated code contains
-    // `$` characters that String.replace() interprets as special replacement
-    // patterns ($&, $1, $$, etc.), corrupting the output.
-    const openTag  = fullMatch.slice(0, fullMatch.indexOf(jsCode))
-    const closeTag = '</script>'
-    return openTag + obfCode + closeTag
-  } catch (err) {
-    console.warn(`[obfuscate] Warning: could not obfuscate script block #${scriptCount}:`, err.message)
-    return fullMatch   // leave original on error
-  }
+// ── Step 1: Minify with terser ─────────────────────────────────────────────
+// Removes all whitespace, comments, shortens local variable names.
+// Result: ~1 long line, unreadable but syntactically identical.
+console.log('[build] Minifying with terser …')
+const terserResult = await minify(originalCode, {
+  compress: {
+    drop_console:   false,   // keep console.error / console.warn
+    passes:         2,       // two compression passes for better results
+  },
+  mangle: {
+    toplevel: false,         // don't mangle top-level names (globals used by HTML)
+  },
+  format: {
+    comments: false,         // strip all comments
+  },
 })
 
-writeFileSync(htmlPath, html, 'utf8')
+if (terserResult.error) {
+  console.error('[build] terser error:', terserResult.error)
+  process.exit(1)
+}
 
-const pct = totalOrigBytes > 0
-  ? ((totalObfBytes - totalOrigBytes) / totalOrigBytes * 100).toFixed(1)
-  : '0'
+const minifiedCode = terserResult.code
+const minKB        = (minifiedCode.length / 1024).toFixed(0)
+console.log(`[build] Minified: ${origKB} KB → ${minKB} KB`)
 
-console.log(`[obfuscate] Done. ${scriptCount} script block(s) obfuscated.`)
-console.log(`[obfuscate] Size: ${(totalOrigBytes/1024).toFixed(0)} KB → ${(totalObfBytes/1024).toFixed(0)} KB (${pct > 0 ? '+' : ''}${pct}%)`)
+// ── Step 2: Obfuscate with javascript-obfuscator ───────────────────────────
+// Encodes string literals to base64, shuffles the lookup array, mangles
+// remaining identifiers.  Result: completely unreadable in DevTools.
+console.log('[build] Obfuscating …')
+const OBF_OPTIONS = {
+  compact:                    true,
+  identifierNamesGenerator:  'mangled',    // a, b, c …
+  renameGlobals:              false,        // keep globals intact (DOM APIs etc.)
+  renameProperties:           false,        // safer — dynamic key access intact
+  shuffleStringArray:         true,
+  rotateStringArray:          true,
+  stringArray:                true,
+  stringArrayEncoding:        ['base64'],   // string literals → base64
+  stringArrayThreshold:       0.75,         // encode 75 % of strings
+  splitStrings:               false,
+  deadCodeInjection:          false,
+  controlFlowFlattening:      false,
+  selfDefending:              false,
+  disableConsoleOutput:       false,
+  sourceMap:                  false,
+  debugProtection:            false,
+  transformObjectKeys:        false,
+}
+
+let obfCode
+try {
+  const result = JavaScriptObfuscator.obfuscate(minifiedCode, OBF_OPTIONS)
+  obfCode = result.getObfuscatedCode()
+} catch (err) {
+  console.error('[build] Obfuscator error:', err.message)
+  process.exit(1)
+}
+
+const obfKB = (obfCode.length / 1024).toFixed(0)
+
+// ── Step 3: Syntax-check the final output ─────────────────────────────────
+// Catches any corruption before it reaches users.
+try {
+  new Function(obfCode)
+  console.log('[build] Syntax check: ✅ OK')
+} catch (e) {
+  console.error('[build] ❌ Syntax error in obfuscated output:', e.message)
+  process.exit(1)
+}
+
+// ── Step 4: Write back ────────────────────────────────────────────────────
+writeFileSync(appJsPath, obfCode, 'utf8')
+
+console.log(`[build] Done. app.js: ${origKB} KB → ${minKB} KB (minified) → ${obfKB} KB (obfuscated)`)

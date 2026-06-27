@@ -1,0 +1,17845 @@
+// ════════════════════════════════════════════════════
+// STATE
+// ════════════════════════════════════════════════════
+let state = {
+  role: null,          // 'admin' | 'onboarding' | 'provider' | 'manager' | 'license_editor'
+  user: null,          // { id, name, email, role }
+  token: null,         // JWT session token
+  periods: [],
+  currentPeriod: null,
+  currentSummary: null,
+  contractors: [],
+  rates: [],
+  currentPage: 'dashboard'
+}
+
+// Store for all compliance flag items (keyed by flag id) — used by "View all" modal
+const licAllFlagsData = {}
+
+// ════════════════════════════════════════════════════
+// UTILS
+// ════════════════════════════════════════════════════
+const $ = id => document.getElementById(id)
+const fmt = (n) => new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(n || 0)
+const fmtNum = (n) => new Intl.NumberFormat('en-US').format(n || 0)
+
+function showToast(msg, type = 'success', duration = 3500) {
+  const icons = { success: 'fa-check-circle text-green-500', error: 'fa-times-circle text-red-500', info: 'fa-info-circle text-blue-500', warning: 'fa-exclamation-triangle text-yellow-500' }
+  $('toastIcon').className = `fas ${icons[type] || icons.success} text-xl`
+  $('toastMsg').textContent = msg
+  $('toastMsg').style.cursor = ''
+  $('toastMsg').onclick = null
+  $('toast').classList.remove('hidden')
+  clearTimeout(window._toastTimer)
+  window._toastTimer = setTimeout(() => $('toast').classList.add('hidden'), duration)
+}
+
+function showLoading(msg = 'Processing...', showProgress = false) {
+  $('loadingMsg').textContent = msg
+  $('loadingOverlay').classList.remove('hidden')
+  if (showProgress) { $('progressWrapper').classList.remove('hidden') }
+  else { $('progressWrapper').classList.add('hidden') }
+}
+
+function hideLoading() { $('loadingOverlay').classList.add('hidden') }
+
+function setProgress(pct) { $('progressBar').style.width = pct + '%' }
+
+async function api(path, options = {}) {
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) }
+  if (state.token) headers['Authorization'] = 'Bearer ' + state.token
+  const res = await fetch(path, { ...options, headers })
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}))
+    const msg = e.error || `API error ${res.status}`
+    // Only auto-logout on 401 for non-mutating requests; for mutations always surface the error
+    if (res.status === 401 && !options.method) { logout(); return }
+    throw new Error(msg)
+  }
+  return res.json()
+}
+
+function visitTypeLabel(vt) {
+  const map = { ASYNC_TEXT_EMAIL: 'Async', SYNC_PHONE: 'Sync Phone', SYNC_VIDEO: 'Sync Video', SYNC_IN_PERSON: 'Sync In Person', NO_SHOW: 'No Show', ORDERLY: 'OrderlyMeds' }
+  return map[vt] || vt
+}
+
+function visitTypeBadge(vt, fee, isOrderly) {
+  // Use the is_orderly flag stored at upload time (org-name based, ASYNC only)
+  if (isOrderly) return `<span class="status-badge badge-orderly">OrderlyMeds</span>`
+  if (vt === 'ASYNC_TEXT_EMAIL') return `<span class="status-badge badge-async">Async</span>`
+  if (vt && vt.startsWith('SYNC')) return `<span class="status-badge badge-sync">${visitTypeLabel(vt)}</span>`
+  return `<span class="status-badge" style="background:#f1f5f9;color:#64748b">${visitTypeLabel(vt)}</span>`
+}
+
+// ════════════════════════════════════════════════════
+// AUTH — login / logout / session
+// ════════════════════════════════════════════════════
+
+function toggleLoginPw() {
+  const inp = $('loginPassword')
+  const eye = $('loginPwEye')
+  if (inp.type === 'password') { inp.type = 'text'; eye.className = 'fas fa-eye-slash text-sm' }
+  else { inp.type = 'password'; eye.className = 'fas fa-eye text-sm' }
+}
+
+async function doLogin() {
+  const email = ($('loginEmail').value || '').trim()
+  const pw    = ($('loginPassword').value || '').trim()
+  const errEl = $('loginError')
+  errEl.classList.add('hidden')
+  if (!email || !pw) { errEl.textContent = 'Please enter your email and password.'; errEl.classList.remove('hidden'); return }
+
+  $('loginBtn').disabled = true
+  $('loginBtnText').textContent = 'Signing in…'
+  $('loginBtnSpin').classList.remove('hidden')
+
+  try {
+    const data = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password: pw })
+    }).then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || 'Login failed'); return d })
+
+    // User has a pending invite — direct them to use their email link.
+    // SECURITY: server no longer returns the invite_token in the login response
+    // (prevents account takeover by anyone who knows the email address).
+    // The token is only delivered via the invite email; user must click that link.
+    if (data.must_set_password) {
+      errEl.textContent = 'Your account requires a password setup. Please check your email for an invite link and click it to set your password.'
+      errEl.classList.remove('hidden')
+      return
+    }
+
+    applySession(data.token, data.user)
+  } catch(e) {
+    errEl.textContent = e.message || 'Invalid email or password.'
+    errEl.classList.remove('hidden')
+  } finally {
+    $('loginBtn').disabled = false
+    $('loginBtnText').textContent = 'Sign In'
+    $('loginBtnSpin').classList.add('hidden')
+  }
+}
+
+// Called when visiting /?token=xxx
+async function checkInviteToken() {
+  const params = new URLSearchParams(window.location.search)
+  const token = params.get('token')
+  if (!token) return false
+  try {
+    const data = await fetch('/api/auth/invite/' + token).then(async r => {
+      const d = await r.json()
+      if (!r.ok) throw new Error(d.error || 'Invalid invite')
+      return d
+    })
+    window.history.replaceState({}, '', window.location.pathname)
+    $('landingPage').classList.add('hidden')
+    $('loginPanel').classList.remove('hidden')
+
+    if (!data.must_set_password) {
+      // Established provider: they already have a password — just take them to login
+      $('loginCard').classList.remove('hidden')
+      $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+      $('loginEmail').value = data.email || ''
+      showToast('Welcome back, ' + data.name.split(' ')[0] + '! Please sign in.', 'info', 5000)
+    } else {
+      // First-time user: show password setup
+      $('loginCard').classList.add('hidden')
+      $('setupCard').classList.remove('hidden')
+      $('setupWelcomeMsg').textContent = 'Welcome, ' + data.name + '! Create a password to access the portal.'
+      $('setupCard').dataset.token = token
+    }
+    return true
+  } catch(e) { return false }
+}
+
+async function doSetupPassword() {
+  const pw1   = ($('setupPw1').value || '').trim()
+  const pw2   = ($('setupPw2').value || '').trim()
+  const token = $('setupCard').dataset.token
+  const errEl = $('setupError')
+  errEl.classList.add('hidden')
+  if (!pw1 || pw1.length < 8) { errEl.textContent = 'Password must be at least 8 characters.'; errEl.classList.remove('hidden'); return }
+  if (pw1 !== pw2) { errEl.textContent = 'Passwords do not match.'; errEl.classList.remove('hidden'); return }
+  try {
+    const data = await fetch('/api/auth/setup-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ invite_token: token, password: pw1, confirm_password: pw1 })
+    }).then(async r => { const d = await r.json(); if (!r.ok) throw new Error(d.error || 'Setup failed'); return d })
+    applySession(data.token, data.user)
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden') }
+}
+
+function applySession(token, user) {
+  state.token = token
+  state.user  = user
+  state.role  = user.role
+  localStorage.setItem('lmd_token', token)
+  localStorage.setItem('lmd_user',  JSON.stringify(user))
+  applyRoleUI(user.role, user.name)
+  buildNav()
+
+  if (user.role === 'admin') {
+    // Show view picker card (still within loginScreen)
+    $('loginCard').classList.add('hidden')
+    $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+    $('viewPickerCard').classList.remove('hidden')
+    $('landingPage').classList.add('hidden')
+    $('loginPanel').classList.remove('hidden')
+    const wl = $('vpWelcome')
+    if (wl) wl.textContent = 'Welcome back, ' + user.name.split(' ')[0] + '!'
+  } else if (user.role === 'provider') {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    renderProviderPortal()
+  } else if (user.role === 'candidate') {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    renderCandidatePortal()
+  } else if (user.role === 'manager') {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    renderManagerPortal()
+  } else if (user.role === 'license_editor') {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    renderLicenseEditorPortal()
+  } else {
+    $('loginScreen').classList.add('hidden')
+    showApp()
+    loadInitialData()
+  }
+}
+
+// Called when admin picks Payroll or Onboarding
+function vpGo(view) {
+  $('loginScreen').classList.add('hidden')
+  $('viewPickerCard').classList.add('hidden')
+  showApp()
+  state.adminView = view
+  localStorage.setItem('lmd_admin_view', view)  // persist across refreshes
+  // Rebuild nav and subtitle immediately so sidebar reflects the chosen view
+  applyRoleUI(state.role, state.user?.name)
+  buildNav()
+  loadInitialData()
+}
+
+// Back to login card from view picker
+function showLoginCard() {
+  $('viewPickerCard').classList.add('hidden')
+  $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+  $('loginCard').classList.remove('hidden')
+}
+
+function showForgotCard() {
+  $('loginCard').classList.add('hidden')
+  $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+  $('forgotCard').classList.remove('hidden')
+  $('forgotEmail').value = $('loginEmail').value || ''  // pre-fill from login field
+  $('forgotError').classList.add('hidden')
+  $('forgotSuccess').classList.add('hidden')
+  $('forgotEmail').focus()
+}
+
+async function doForgotPassword() {
+  const email  = ($('forgotEmail').value || '').trim()
+  const errEl  = $('forgotError')
+  const okEl   = $('forgotSuccess')
+  const btn    = $('forgotBtn')
+  const btnTxt = $('forgotBtnText')
+  const spin   = $('forgotBtnSpin')
+
+  errEl.classList.add('hidden')
+  okEl.classList.add('hidden')
+
+  if (!email) {
+    errEl.textContent = 'Please enter your email address.'
+    errEl.classList.remove('hidden')
+    return
+  }
+
+  btn.disabled = true
+  btnTxt.textContent = 'Sending…'
+  spin.classList.remove('hidden')
+
+  try {
+    await fetch('/api/auth/forgot-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email })
+    })
+    // Always show success — never reveal whether the email exists
+    okEl.textContent = '✅ If that email is registered, a reset link has been sent. Check your inbox.'
+    okEl.classList.remove('hidden')
+    btnTxt.textContent = 'Sent!'
+    btn.disabled = true  // prevent double-send
+    spin.classList.add('hidden')
+  } catch(e) {
+    errEl.textContent = 'Something went wrong. Please try again.'
+    errEl.classList.remove('hidden')
+    btn.disabled = false
+    btnTxt.textContent = 'Send Reset Link'
+    spin.classList.add('hidden')
+  }
+}
+
+// Show the login panel from the landing page
+function openContactEmail() {
+  const email = 'contact@lion.md'
+  // Try mailto — works in most desktop browsers and native mobile mail apps
+  const mailto = `mailto:${email}?subject=${encodeURIComponent('Lion MD Portal — Support Request')}`
+  let opened = false
+  try {
+    // Use a hidden <a> click — more reliable than window.location.href in WebViews
+    const a = document.createElement('a')
+    a.href = mailto
+    a.target = '_blank'   // needed in some WebView/PWA contexts
+    a.rel = 'noopener'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    opened = true
+  } catch(e) { opened = false }
+  // Always show the email address in a toast so users can copy it manually
+  // in browsers/environments where no mail client is configured
+  setTimeout(() => {
+    showToast('📧 contact@lion.md — tap to copy', 'info', 7000)
+    const toastEl = $('toastMsg')
+    if (toastEl) {
+      toastEl.style.cursor = 'pointer'
+      toastEl.onclick = () => {
+        navigator.clipboard?.writeText(email)
+          .then(() => showToast('Email address copied!', 'success'))
+          .catch(() => {})
+      }
+    }
+  }, opened ? 400 : 0)
+}
+
+function showLoginForm() {
+  $('landingPage').classList.add('hidden')
+  $('loginPanel').classList.remove('hidden')
+  $('loginCard').classList.remove('hidden')
+  $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+  $('viewPickerCard').classList.add('hidden')
+  $('loginEmail').focus()
+  history.pushState({}, '', '/login')
+}
+
+// Return to landing page from login panel
+function showLandingPage() {
+  $('loginPanel').classList.add('hidden')
+  $('landingPage').classList.remove('hidden')
+  document.body.style.overflow = ''
+  history.pushState({}, '', '/')
+}
+
+// ════════════════════════════════════════════════════
+// PROVIDER APPLICATION FORM
+// ════════════════════════════════════════════════════
+
+let applyState = {
+  currentStep: 1,
+  photoB64: '', photoMime: '', photoName: '',
+  cvB64: '', cvMime: '', cvName: '', cvSize: 0,
+  selectedStates: new Set(),
+  licenses: [],          // { _id, state, license_type, license_number, expiry_date, status, permitted_actions, practice_type, license_file_name, license_file_data, license_file_mime }
+  _licFileState: {},     // temp file for modal
+}
+
+function showApplyForm() {
+  // Reset state
+  applyState = { currentStep: 1, photoB64:'', photoMime:'', photoName:'', cvB64:'', cvMime:'', cvName:'', cvSize:0, selectedStates: new Set(), licenses: [], _licFileState: {} }
+  // Release any scroll lock, hide login screen, show apply screen
+  document.body.style.overflow = ''
+  $('loginScreen').classList.add('hidden')
+  $('applyScreen').classList.remove('hidden')
+  history.pushState({}, '', '/apply')
+  // Reset to step 1
+  document.querySelectorAll('.apply-step').forEach(s => s.classList.remove('active'))
+  $('applyStep1').classList.add('active')
+  // Reset indicators
+  for (let i=1;i<=4;i++) {
+    const ind = $('applyInd'+i)
+    if (ind) { ind.className = 'apply-step-indicator ' + (i===1?'active':'pending'); ind.textContent = i }
+    const conn = $('applyConn'+i)
+    if (conn) conn.className = 'apply-connector'
+  }
+  // Clear fields
+  ;['applyName','applyEmail','applyPhone','applyCompany','applySSN','applyEIN','applyNPI','applyNotes'].forEach(id => { const el=$(id); if(el) el.value='' })
+  const rg = $('applyRoleGroup'); if(rg) rg.value = ''
+  $('photoPlaceholder').classList.remove('hidden'); $('photoPreviewWrap').classList.add('hidden')
+  $('cvPlaceholder').classList.remove('hidden'); $('cvFileInfo').classList.add('hidden')
+  $('applyError').classList.add('hidden')
+  applyLicDraw()
+  window.scrollTo(0,0)
+}
+
+function hideApplyForm() {
+  $('applyScreen').classList.add('hidden')
+  $('loginScreen').classList.remove('hidden')
+  document.body.style.overflow = ''
+  window.scrollTo(0, 0)
+  history.pushState({}, '', '/')
+}
+
+function applyGoStep(n) {
+  // Validate current step before advancing
+  if (n > applyState.currentStep) {
+    const err = applyValidateStep(applyState.currentStep)
+    if (err) { applyShowError(err); return }
+  }
+  applyShowError('')
+  const prev = applyState.currentStep
+  applyState.currentStep = n
+
+  // Update step visibility
+  document.querySelectorAll('.apply-step').forEach(s => s.classList.remove('active'))
+  const stepEl = $('applyStep' + n) || $('applyStepDone')
+  if (stepEl) stepEl.classList.add('active')
+
+  // Update indicators
+  for (let i=1;i<=4;i++) {
+    const ind = $('applyInd'+i)
+    if (!ind) continue
+    if (i < n)      { ind.className='apply-step-indicator done';    ind.innerHTML='<i class="fas fa-check" style="font-size:11px;"></i>' }
+    else if (i===n) { ind.className='apply-step-indicator active';  ind.textContent=i }
+    else            { ind.className='apply-step-indicator pending';  ind.textContent=i }
+    const conn = $('applyConn'+i)
+    if (conn) conn.className = 'apply-connector' + (i < n ? ' done' : '')
+  }
+
+  // Build review summary on step 4
+  if (n === 4) applyBuildSummary()
+  window.scrollTo(0,0)
+}
+
+function applyValidateStep(step) {
+  if (step === 1) {
+    if (!($('applyName')?.value||'').trim()) return 'Please enter your full name.'
+    if (!($('applyEmail')?.value||'').trim()) return 'Please enter your email address.'
+    if (!($('applyPhone')?.value||'').trim()) return 'Please enter your phone number.'
+  }
+  if (step === 2) {
+    if (!($('applyRoleGroup')?.value||'').trim()) return 'Please select your provider type.'
+    const ssn = ($('applySSN')?.value||'').trim()
+    if (!ssn || ssn.length !== 4) return 'Please enter the last 4 digits of your SSN.'
+  }
+  if (step === 3) {
+    if (!applyState.licenses.length) return 'Please add at least one state license before continuing.'
+  }
+  if (step === 4) {
+    if (!applyState.cvB64) return 'Please upload your CV / Resume.'
+  }
+  return ''
+}
+
+function applyShowError(msg) {
+  const el = $('applyError')
+  if (!el) return
+  if (!msg) { el.classList.add('hidden'); return }
+  el.textContent = msg
+  el.classList.remove('hidden')
+  el.scrollIntoView({ behavior:'smooth', block:'nearest' })
+}
+
+function applyBuildSummary() {
+  const lines = [
+    ['fa-user',         'Name',           ($('applyName')?.value||'').trim()],
+    ['fa-envelope',     'Email',          ($('applyEmail')?.value||'').trim()],
+    ['fa-phone',        'Phone',          ($('applyPhone')?.value||'').trim()],
+    ['fa-building',     'Company',        ($('applyCompany')?.value||'').trim() || '—'],
+    ['fa-id-badge',     'Provider Type',  ($('applyRoleGroup')?.value||'')],
+    ['fa-stethoscope',  'Specialty',      ($('applySpecialty')?.value||'').trim() || '—'],
+    ['fa-lock',         'SSN last 4',     ($('applySSN')?.value||'').trim() ? '•••• '+($('applySSN')?.value||'') : '—'],
+    ['fa-certificate',   'Licenses',       applyState.licenses.length ? applyState.licenses.map(l => l.state + (l.license_type ? ' ('+l.license_type+')' : '')).join(', ') : 'None added'],
+    ['fa-file-alt',     'CV / Resume',    applyState.cvName || '—'],
+    ['fa-camera',       'Photo',          applyState.photoName || 'Not provided'],
+  ]
+  $('applySummaryBody').innerHTML = lines.map(([icon,label,val]) => `
+    <div class="flex gap-2 py-1 border-b border-gray-50 last:border-0">
+      <i class="fas ${icon} w-4 text-center text-gray-300 mt-0.5 flex-shrink-0"></i>
+      <span class="text-gray-400 w-28 flex-shrink-0">${label}</span>
+      <span class="text-gray-700 font-medium break-all">${val}</span>
+    </div>
+  `).join('')
+}
+
+// ── Onboarding license manager (Step 3) ─────────────────────────
+
+function applyLicDraw() {
+  const el = $('applyLicList')
+  if (!el) return
+  const lics = applyState.licenses
+  if (!lics.length) {
+    el.innerHTML = `
+      <div class="text-center py-8 text-gray-300">
+        <i class="fas fa-certificate text-4xl mb-2 block"></i>
+        <p class="text-sm text-gray-400">No licenses added yet — click <strong>Add License</strong> to get started.</p>
+
+      </div>`
+    return
+  }
+  el.innerHTML = `<div class="space-y-2">` + lics.map((lic, idx) => {
+    const expDate = lic.expiry_date ? new Date(lic.expiry_date) : null
+    const today = new Date()
+    const daysLeft = expDate ? Math.ceil((expDate - today) / 86400000) : null
+    let expiryNote = ''
+    if (daysLeft !== null) {
+      if (daysLeft < 0) expiryNote = `<span class="text-xs text-red-500 ml-1">(Expired)</span>`
+      else if (daysLeft <= 60) expiryNote = `<span class="text-xs text-orange-500 ml-1">(${daysLeft}d left)</span>`
+    }
+    const statusColor = lic.status === 'active' ? 'bg-green-100 text-green-700' : lic.status === 'expired' ? 'bg-red-100 text-red-700' : 'bg-yellow-100 text-yellow-700'
+    return `
+    <div class="flex items-start gap-3 p-3 rounded-xl border border-gray-100 bg-gray-50">
+      <div class="w-9 h-9 rounded-lg bg-white border border-gray-200 flex items-center justify-center flex-shrink-0">
+        <i class="fas fa-certificate text-green-500 text-sm"></i>
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-bold text-gray-800 text-sm">${escHtml(lic.state)}</span>
+          ${lic.license_type ? `<span class="text-xs text-gray-500">${escHtml(lic.license_type)}</span>` : ''}
+          <span class="px-1.5 py-0.5 rounded-full text-xs font-medium ${statusColor}">${escHtml(lic.status||'active')}</span>
+        </div>
+        <div class="flex flex-wrap gap-3 mt-1 text-xs text-gray-400">
+          ${lic.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(lic.license_number)}</span>` : '<span class="text-orange-400 italic">No license # yet</span>'}
+          ${lic.expiry_date ? `<span><i class="fas fa-calendar mr-0.5"></i>${lic.expiry_date}${expiryNote}</span>` : ''}
+          ${lic.permitted_actions ? `<span><i class="fas fa-stethoscope mr-0.5"></i>${escHtml(lic.permitted_actions)}</span>` : ''}
+        </div>
+        ${lic.license_file_name ? `<div class="mt-1 text-xs text-blue-500"><i class="fas fa-paperclip mr-1"></i>${escHtml(lic.license_file_name)}</div>` : ''}
+      </div>
+      <div class="flex gap-1 flex-shrink-0">
+        <button type="button" onclick="applyLicOpenModal(${idx})" class="w-7 h-7 rounded-lg hover:bg-white border border-transparent hover:border-gray-200 text-gray-400 hover:text-blue-500 flex items-center justify-center" title="Edit">
+          <i class="fas fa-pencil-alt text-xs"></i>
+        </button>
+        <button type="button" onclick="applyLicDelete(${idx})" class="w-7 h-7 rounded-lg hover:bg-white border border-transparent hover:border-gray-200 text-gray-400 hover:text-red-500 flex items-center justify-center" title="Remove">
+          <i class="fas fa-trash text-xs"></i>
+        </button>
+      </div>
+    </div>`
+  }).join('') + `</div>`
+}
+
+function applyLicDelete(idx) {
+  applyState.licenses.splice(idx, 1)
+  applyLicDraw()
+}
+
+function applyLicOpenModal(idx) {
+  const isEdit = idx !== null && idx >= 0
+  const lic = isEdit ? applyState.licenses[idx] : null
+  applyState._licFileState = {}
+
+  let modal = $('applyLicModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'applyLicModal'
+    modal.className = 'fixed inset-0 z-50 flex items-center justify-center p-4'
+    modal.style.background = 'rgba(0,0,0,0.45)'
+    document.body.appendChild(modal)
+  }
+
+  modal.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[92vh] overflow-y-auto">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <h3 class="font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-certificate text-green-500"></i>
+        ${isEdit ? 'Edit License' : 'Add State License'}
+      </h3>
+      <button type="button" id="applyLicModalClose" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+    <div class="p-5 space-y-4">
+
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State <span class="text-red-400">*</span></label>
+          <select id="aLicState" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">Select…</option>
+            ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select id="aLicStatus" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="active"  ${(!lic||lic.status==='active') ?'selected':''}>Active</option>
+            <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+            <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+        <input id="aLicType" type="text" placeholder="e.g. MD, DO, NP, ARNP, PA"
+          value="${escHtml(lic?.license_type||'')}"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Number</label>
+        <input id="aLicNum" type="text" placeholder="e.g. AP123456"
+          value="${escHtml(lic?.license_number||'')}"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+      </div>
+
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Expiration Date</label>
+        <input id="aLicExpiry" type="date" value="${lic?.expiry_date||''}"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300"/>
+      </div>
+
+      <!-- Practice Authority -->
+      <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
+        <div class="text-xs font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5">
+          <i class="fas fa-stethoscope"></i> Practice Authority
+          <span class="font-normal text-blue-500 normal-case tracking-normal">— What are you authorized to do in this state?</span>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions</label>
+          <select id="aLicPermitted" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="" ${!lic?.permitted_actions?'selected':''}>— Select —</option>
+            <option value="Can See Patients + Prescribe"          ${lic?.permitted_actions==='Can See Patients + Prescribe'?'selected':''}>✅ Can See Patients + Prescribe (Full CRx)</option>
+            <option value="Can See Patients (No CRx)"             ${lic?.permitted_actions==='Can See Patients (No CRx)'?'selected':''}>🟡 Can See Patients (No CRx)</option>
+            <option value="Can See Patients + Prescribe (Collab)" ${lic?.permitted_actions==='Can See Patients + Prescribe (Collab)'?'selected':''}>🤝 Can See Patients + Prescribe (Collab MD)</option>
+            <option value="Can See Patients (No CRx, Collab)"     ${lic?.permitted_actions==='Can See Patients (No CRx, Collab)'?'selected':''}>🤝 Can See Patients (No CRx, Collab MD)</option>
+            <option value="Pending License"                        ${lic?.permitted_actions==='Pending License'?'selected':''}>⏳ Pending License</option>
+            <option value="Not Licensed"                           ${lic?.permitted_actions==='Not Licensed'?'selected':''}>❌ Not Licensed in This State</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+          <select id="aLicPracticeType" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value=""            ${!lic?.practice_type?'selected':''}>— Select —</option>
+            <option value="independent" ${lic?.practice_type==='independent'?'selected':''}>Independent (Full Practice Authority)</option>
+            <option value="collab_md"   ${lic?.practice_type==='collab_md'?'selected':''}>Requires Collaborating MD</option>
+            <option value="md_self"     ${lic?.practice_type==='md_self'?'selected':''}>Physician (Self-supervised)</option>
+            <option value="unclear"     ${lic?.practice_type==='unclear'?'selected':''}>Unclear / Needs Review</option>
+          </select>
+        </div>
+      </div>
+
+      <!-- File upload -->
+      <div class="border-t border-gray-100 pt-3">
+        <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+          <i class="fas fa-paperclip mr-1 text-gray-400"></i>License Copy (PDF or image)
+        </label>
+        ${lic?.license_file_name ? `
+        <div id="aLicFileExisting" class="flex items-center gap-2 mb-2 p-2 bg-green-50 border border-green-200 rounded-lg">
+          <i class="fas fa-file-pdf text-green-500 text-sm"></i>
+          <span class="text-xs text-green-700 font-medium flex-1 truncate">${escHtml(lic.license_file_name)}</span>
+          <button type="button" id="aLicFileRemoveBtn" class="text-xs text-red-400 hover:text-red-600"><i class="fas fa-times"></i></button>
+        </div>` : ''}
+        <div id="aLicFileNew" class="${lic?.license_file_name ? 'hidden' : ''}">
+          <label class="flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border-2 border-dashed border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors">
+            <i class="fas fa-upload text-gray-400 text-sm"></i>
+            <span id="aLicFileLabel" class="text-xs text-gray-500">Upload license copy…</span>
+            <input type="file" id="aLicFileInput" accept=".pdf,.jpg,.jpeg,.png,.webp" class="hidden">
+          </label>
+        </div>
+      </div>
+
+      <div id="aLicError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+
+      <div class="flex gap-3 pt-1">
+        <button type="button" id="aLicCancelBtn" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+        <button type="button" id="aLicSaveBtn" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+          ${isEdit ? 'Save Changes' : 'Add License'}
+        </button>
+      </div>
+    </div>
+  </div>`
+
+  modal.classList.remove('hidden')
+
+  // Wire close
+  document.getElementById('applyLicModalClose').addEventListener('click', () => modal.classList.add('hidden'))
+  document.getElementById('aLicCancelBtn').addEventListener('click', () => modal.classList.add('hidden'))
+  modal.addEventListener('click', e => { if (e.target === modal) modal.classList.add('hidden') })
+
+  // Wire file input
+  const fileInput = document.getElementById('aLicFileInput')
+  const fileLabel = document.getElementById('aLicFileLabel')
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files[0]
+    if (!file) return
+    if (fileLabel) fileLabel.textContent = file.name
+    const reader = new FileReader()
+    reader.onload = ev => {
+      const full = ev.target.result
+      applyState._licFileState = {
+        license_file_name: file.name,
+        license_file_data: full.split(',')[1],
+        license_file_mime: file.type || 'application/octet-stream'
+      }
+    }
+    reader.readAsDataURL(file)
+  })
+
+  // Wire remove existing file
+  const removeBtn = document.getElementById('aLicFileRemoveBtn')
+  if (removeBtn) {
+    removeBtn.addEventListener('click', () => {
+      applyState._licFileState = { _removeFile: true }
+      const existing = document.getElementById('aLicFileExisting')
+      if (existing) existing.remove()
+      const newFile = document.getElementById('aLicFileNew')
+      if (newFile) newFile.classList.remove('hidden')
+    })
+  }
+
+  // Wire save
+  document.getElementById('aLicSaveBtn').addEventListener('click', () => applyLicSave(idx))
+}
+
+function applyLicSave(idx) {
+  const isEdit = idx !== null && idx >= 0
+  const state   = ($('aLicState')?.value||'').trim()
+  const status  = ($('aLicStatus')?.value||'active')
+  const type    = ($('aLicType')?.value||'').trim()
+  const num     = ($('aLicNum')?.value||'').trim()
+  const expiry  = ($('aLicExpiry')?.value||'')
+  const permitted_actions = ($('aLicPermitted')?.value||'').trim()
+  const practice_type     = ($('aLicPracticeType')?.value||'').trim()
+  const errEl = $('aLicError')
+
+  if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  errEl.classList.add('hidden')
+
+  const existing = isEdit ? applyState.licenses[idx] : {}
+  const fs = applyState._licFileState
+
+  const entry = {
+    _id: isEdit ? existing._id : Date.now(),
+    state, status, license_type: type, license_number: num, expiry_date: expiry,
+    permitted_actions, practice_type,
+    // file: use new upload, or keep existing unless removed
+    license_file_name: fs.license_file_name || (!fs._removeFile ? (existing.license_file_name||'') : ''),
+    license_file_data: fs.license_file_data || (!fs._removeFile ? (existing.license_file_data||'') : ''),
+    license_file_mime: fs.license_file_mime || (!fs._removeFile ? (existing.license_file_mime||'') : ''),
+  }
+
+  if (isEdit) applyState.licenses[idx] = entry
+  else applyState.licenses.push(entry)
+
+  applyState._licFileState = {}
+  $('applyLicModal').classList.add('hidden')
+  applyLicDraw()
+}
+
+// ── State license selector (legacy — kept for compatibility) ──────
+function applyRenderStateGrid(filter) {
+  const grid = $('stateGrid')
+  if (!grid) return
+  const q = (filter||'').toUpperCase().trim()
+  const visible = q ? US_STATES.filter(s => s.startsWith(q)) : US_STATES
+  grid.innerHTML = visible.map(s => {
+    const sel = applyState.selectedStates.has(s)
+    return `<button type="button" onclick="applyToggleState('${s}')"
+      class="px-3 py-1.5 rounded-lg text-xs font-semibold border transition-all text-left
+             ${sel ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-600 border-gray-200 hover:border-blue-400 hover:text-blue-600'}">${s}</button>`
+  }).join('')
+}
+
+function applyToggleState(s) {
+  if (applyState.selectedStates.has(s)) applyState.selectedStates.delete(s)
+  else applyState.selectedStates.add(s)
+  applyRenderStateGrid($('stateSearch')?.value||'')
+  applyRenderStateChips()
+}
+
+function applyRenderStateChips() {
+  const el = $('stateChipsSelected')
+  if (!el) return
+  el.innerHTML = [...applyState.selectedStates].sort().map(s => `
+    <span class="state-chip" onclick="applyToggleState('${s}')">
+      ${s}<span class="chip-x"><i class="fas fa-times"></i></span>
+    </span>`).join('')
+}
+
+function applyFilterStates(q) {
+  applyRenderStateGrid(q)
+}
+
+// ── File handling ────────────────────────────────────────────────
+function applyReadFileB64(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader()
+    r.onload = e => res(e.target.result.split(',')[1])
+    r.onerror = rej
+    r.readAsDataURL(file)
+  })
+}
+
+async function applyHandlePhoto(file) {
+  if (!file) return
+  if (file.size > 5*1024*1024) { applyShowError('Photo must be under 5 MB.'); return }
+  applyState.photoB64 = await applyReadFileB64(file)
+  applyState.photoMime = file.type
+  applyState.photoName = file.name
+  $('photoPreviewImg').src = 'data:' + file.type + ';base64,' + applyState.photoB64
+  $('photoPreviewName').textContent = file.name
+  $('photoPlaceholder').classList.add('hidden')
+  $('photoPreviewWrap').classList.remove('hidden')
+}
+
+async function applyHandleCV(file) {
+  if (!file) return
+  // D1 database has a ~650 KB per-value storage limit.
+  // Base64 encoding adds ~33% overhead, so raw file must be under ~650 KB.
+  const MAX_CV_BYTES = 650 * 1024  // 650 KB
+  if (file.size > MAX_CV_BYTES) {
+    applyShowError(
+      `Your CV is ${(file.size/1024).toFixed(0)} KB — the maximum is 650 KB. ` +
+      'Please compress or export a smaller version (e.g. save as PDF with reduced quality, or remove large images from the document).'
+    )
+    return
+  }
+  applyState.cvB64 = await applyReadFileB64(file)
+  applyState.cvMime = file.type
+  applyState.cvName = file.name
+  applyState.cvSize = file.size
+  $('cvFileName').textContent = file.name
+  const sizeKb = (file.size / 1024).toFixed(0)
+  $('cvFileSize').textContent = sizeKb + ' KB'
+  $('cvPlaceholder').classList.add('hidden')
+  $('cvFileInfo').classList.remove('hidden')
+}
+
+// Drag and drop helpers
+function applyDragOver(e, zoneId) {
+  e.preventDefault(); $( zoneId).classList.add('drag-over')
+}
+function applyDragLeave(zoneId) { $(zoneId).classList.remove('drag-over') }
+function applyDropPhoto(e) {
+  e.preventDefault(); $('photoZone').classList.remove('drag-over')
+  const f = e.dataTransfer.files[0]; if(f) applyHandlePhoto(f)
+}
+function applyDropCV(e) {
+  e.preventDefault(); $('cvZone').classList.remove('drag-over')
+  const f = e.dataTransfer.files[0]; if(f) applyHandleCV(f)
+}
+
+// ── Submit ───────────────────────────────────────────────────────
+async function applySubmit() {
+  const err = applyValidateStep(4)
+  if (err) { applyShowError(err); return }
+
+  const btn = $('applySubmitBtn')
+  btn.disabled = true
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Submitting…'
+  applyShowError('')
+
+  // Build ein_ssn: prefer EIN if provided, otherwise store last-4 SSN
+  const ein = ($('applyEIN')?.value||'').trim()
+  const ssn4 = ($('applySSN')?.value||'').trim()
+  const ein_ssn = ein || (ssn4 ? '•••-••-'+ssn4 : '')
+
+  // Build notes — append NPI if provided
+  const npi = ($('applyNPI')?.value||'').trim()
+  let notes = ($('applyNotes')?.value||'').trim()
+  if (npi) notes = (notes ? notes + '\n' : '') + 'NPI: ' + npi
+
+  // Step 1: submit metadata only (no large base64 blobs inline).
+  // Photo is small enough to include if under 600 KB base64 (~450 KB raw).
+  // CV/resume is uploaded as a separate request after the candidate record is created.
+  const MAX_INLINE_PHOTO = 600_000 // base64 chars
+  const body = {
+    full_name:       ($('applyName')?.value||'').trim(),
+    email:           ($('applyEmail')?.value||'').trim(),
+    phone:           ($('applyPhone')?.value||'').trim(),
+    company_name:    ($('applyCompany')?.value||'').trim(),
+    role_group:      $('applyRoleGroup')?.value || '',
+    specialty:       ($('applySpecialty')?.value||'').trim(),
+    ein_ssn,
+    states_licensed: applyState.licenses.map(l => l.state).filter(Boolean).join(', '),
+    licenses:        applyState.licenses,
+    notes,
+    // Only include photo inline if it's small enough
+    photo_data:      (applyState.photoB64 && applyState.photoB64.length <= MAX_INLINE_PHOTO) ? applyState.photoB64 : '',
+    photo_mime:      (applyState.photoB64 && applyState.photoB64.length <= MAX_INLINE_PHOTO) ? applyState.photoMime : '',
+    // CV is uploaded separately below — do not inline here to avoid D1 row size limits
+    cv_data:         '',
+    cv_name:         applyState.cvName,
+    cv_mime:         applyState.cvMime,
+    cv_size:         applyState.cvSize,
+  }
+
+  try {
+    const res = await fetch('/api/apply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    })
+    const data = await res.json()
+    if (!res.ok) throw new Error(data.error || 'Submission failed')
+
+    // Step 2: upload CV as a separate document request to avoid payload size limits
+    if (applyState.cvB64 && applyState.cvName && data.id) {
+      try {
+        await fetch(`/api/apply/${data.id}/documents`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            doc_type:  'resume',
+            file_name: applyState.cvName,
+            file_data: applyState.cvB64,
+            file_size: applyState.cvSize,
+            mime_type: applyState.cvMime || 'application/octet-stream',
+          })
+        })
+      } catch(_) { /* CV upload failure is non-fatal — candidate record already saved */ }
+    }
+    // Show success
+    document.querySelectorAll('.apply-step').forEach(s => s.classList.remove('active'))
+    $('applyStepDone').classList.add('active')
+    // Mark all indicators done
+    for(let i=1;i<=4;i++){
+      const ind=$('applyInd'+i); if(ind){ind.className='apply-step-indicator done';ind.innerHTML='<i class="fas fa-check" style="font-size:11px;"></i>'}
+      const conn=$('applyConn'+i); if(conn) conn.className='apply-connector done'
+    }
+    window.scrollTo(0,0)
+  } catch(e) {
+    applyShowError(e.message || 'Something went wrong. Please try again.')
+    btn.disabled = false
+    btn.innerHTML = '<i class="fas fa-paper-plane mr-2"></i>Submit Application'
+  }
+}
+
+function applyRoleUI(role, name) {
+  const roleTag  = $('roleTag')
+  const subtitle = $('sidebarSubtitle')
+  const userNameEl = $('sidebarUserName')
+  const svBtn = $('switchViewBtn')
+  if (userNameEl && name) userNameEl.textContent = name
+  const adminInOb = role === 'admin' && state.adminView === 'onboarding'
+  if (role === 'admin') {
+    roleTag.textContent = '👑 Admin'
+    roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-yellow-100 text-yellow-800 hidden md:block'
+    if (subtitle) subtitle.textContent = adminInOb ? 'Onboarding' : 'Payroll'
+    if (svBtn) svBtn.classList.remove('hidden')
+  } else if (role === 'provider') {
+    roleTag.textContent = '🩺 Provider'
+    roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-purple-100 text-purple-800 hidden md:block'
+    if (subtitle) subtitle.textContent = 'My Profile'
+    if (svBtn) svBtn.classList.add('hidden')
+  } else if (role === 'candidate') {
+    roleTag.textContent = '📋 Applicant'
+    roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-sky-100 text-sky-800 hidden md:block'
+    if (subtitle) subtitle.textContent = 'My Application'
+    if (svBtn) svBtn.classList.add('hidden')
+  } else {
+    roleTag.textContent = '🟢 Onboarding'
+    roleTag.className = 'text-xs font-semibold px-2 py-1 rounded-full bg-emerald-100 text-emerald-800 hidden md:block'
+    if (subtitle) subtitle.textContent = 'Onboarding'
+    if (svBtn) svBtn.classList.add('hidden')
+  }
+}
+
+// Show the view picker (admin switches between Payroll / Onboarding)
+function showViewPicker() {
+  const wl = $('vpWelcome')
+  if (wl && state.user) wl.textContent = 'Hi ' + state.user.name.split(' ')[0] + '! Where would you like to go?'
+  hideApp()
+  $('loginCard').classList.add('hidden')
+  $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+  $('viewPickerCard').classList.remove('hidden')
+  $('loginScreen').classList.remove('hidden')
+  // Always show loginPanel (dark bg), not landing page
+  $('landingPage').classList.add('hidden')
+  $('loginPanel').classList.remove('hidden')
+}
+
+function logout() {
+  localStorage.removeItem('lmd_token')
+  localStorage.removeItem('lmd_user')
+  localStorage.removeItem('lmd_admin_view')
+  localStorage.removeItem('lmd_last_page')
+  state = { role: null, user: null, token: null, periods: [], currentPeriod: null, currentSummary: null, contractors: [], rates: [], currentPage: 'dashboard' }
+  // Close sidebar if open, then hide app (hideApp releases all body scroll locks)
+  $('sidebar').classList.remove('sidebar-open')
+  $('mobileOverlay').classList.remove('active')
+  // Return to landing page, not directly to login card
+  hideApp()
+  $('loginScreen').classList.remove('hidden')
+  $('landingPage').classList.remove('hidden')
+  $('loginPanel').classList.add('hidden')
+  $('loginCard').classList.remove('hidden')
+  $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+  $('viewPickerCard').classList.add('hidden')
+  $('loginEmail').value = ''
+  $('loginPassword').value = ''
+  $('loginError').classList.add('hidden')
+  $('sessionSelector').innerHTML = '<option value="">Select Period...</option>'
+  const subtitle = $('sidebarSubtitle')
+  if (subtitle) subtitle.textContent = 'Payroll'
+}
+
+// Restore session on page load
+async function tryRestoreSession() {
+  const token = localStorage.getItem('lmd_token')
+  if (!token) return false
+  try {
+    const me = await fetch('/api/auth/me', {
+      headers: { 'Authorization': 'Bearer ' + token }
+    }).then(async r => { if (!r.ok) throw new Error(); return r.json() })
+    state.token = token
+    state.user  = me
+    state.role  = me.role
+    applyRoleUI(me.role, me.name)
+    buildNav()
+    if (me.role === 'admin') {
+      const savedView = localStorage.getItem('lmd_admin_view')
+      if (savedView) {
+        // Skip the picker — go straight back to where they were
+        state.adminView = savedView
+        applyRoleUI(me.role, me.name)
+        buildNav()
+        $('loginScreen').classList.add('hidden')
+        showApp()
+            loadInitialData()
+      } else {
+        // First login — show the view picker
+        $('loginCard').classList.add('hidden')
+        $('setupCard').classList.add('hidden')
+  $('forgotCard').classList.add('hidden')
+        $('viewPickerCard').classList.remove('hidden')
+        $('landingPage').classList.add('hidden')
+        $('loginPanel').classList.remove('hidden')
+        const wl = $('vpWelcome')
+        if (wl) wl.textContent = 'Welcome back, ' + me.name.split(' ')[0] + '!'
+      }
+    } else if (me.role === 'provider') {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        renderProviderPortal()
+    } else if (me.role === 'candidate') {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        renderCandidatePortal()
+    } else if (me.role === 'manager') {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        renderManagerPortal()
+    } else if (me.role === 'license_editor') {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        renderLicenseEditorPortal()
+    } else {
+      $('loginScreen').classList.add('hidden')
+      showApp()
+        loadInitialData()
+    }
+    return true
+  } catch(e) {
+    localStorage.removeItem('lmd_token')
+    localStorage.removeItem('lmd_user')
+    return false
+  }
+}
+
+// Change Password modal
+function openChangePwModal() {
+  $('changePwModal').classList.remove('hidden')
+  $('cpOldPw').value = ''; $('cpNewPw1').value = ''; $('cpNewPw2').value = ''
+  $('cpError').classList.add('hidden')
+}
+function closeChangePwModal() { $('changePwModal').classList.add('hidden') }
+async function doChangePw() {
+  const oldPw = $('cpOldPw').value
+  const pw1   = $('cpNewPw1').value
+  const pw2   = $('cpNewPw2').value
+  const errEl = $('cpError')
+  errEl.classList.add('hidden')
+  if (!oldPw || !pw1) { errEl.textContent = 'All fields required.'; errEl.classList.remove('hidden'); return }
+  if (pw1.length < 8) { errEl.textContent = 'New password must be at least 8 characters.'; errEl.classList.remove('hidden'); return }
+  if (pw1 !== pw2) { errEl.textContent = 'Passwords do not match.'; errEl.classList.remove('hidden'); return }
+  try {
+    await api('/api/auth/change-password', { method: 'POST', body: JSON.stringify({ old_password: oldPw, new_password: pw1 }) })
+    showToast('Password changed successfully!', 'success')
+    closeChangePwModal()
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden') }
+}
+
+// ════════════════════════════════════════════════════
+// MOBILE SIDEBAR
+// ════════════════════════════════════════════════════
+function isMobile() { return window.innerWidth < 768 }
+
+// Show/hide the main app shell.
+// Body is locked while the app is visible so the landing page
+// beneath it cannot scroll; released on logout so it can scroll freely.
+function showApp() {
+  $('app').style.display = 'flex'
+  document.body.style.overflow = 'hidden'
+  document.body.style.position = 'fixed'
+  document.body.style.width = '100%'
+}
+function hideApp() {
+  $('app').style.display = 'none'
+  document.body.style.overflow = ''
+  document.body.style.position = ''
+  document.body.style.width = ''
+}
+
+function openMobileSidebar() {
+  $('sidebar').classList.add('sidebar-open')
+  $('mobileOverlay').classList.add('active')
+}
+
+function closeMobileSidebar() {
+  $('sidebar').classList.remove('sidebar-open')
+  $('mobileOverlay').classList.remove('active')
+}
+
+window.addEventListener('resize', () => {
+  if (!isMobile()) closeMobileSidebar()
+})
+
+// ════════════════════════════════════════════════════
+// NAV
+// ════════════════════════════════════════════════════
+function buildNav() {
+  const adminNav = [
+    { id: 'dashboard',   icon: 'fa-chart-pie',       label: 'Dashboard' },
+    { id: 'upload',      icon: 'fa-upload',           label: 'Upload Report' },
+    { id: 'consults',    icon: 'fa-table',            label: 'Consult Records' },
+    { id: 'payroll',     icon: 'fa-money-bill-wave',  label: 'Contractor Payroll' },
+    { id: 'contractors', icon: 'fa-user-md',          label: 'Contractors' },
+    { id: 'onboarding',  icon: 'fa-user-plus',        label: 'Onboarding' },
+    { id: 'rates',       icon: 'fa-sliders-h',        label: 'Payment Rates' },
+    { id: 'lic_dashboard',icon: 'fa-map-marker-alt',   label: 'Licensing' },
+    { id: 'users',       icon: 'fa-users-cog',        label: 'User Management' },
+    { id: 'payments',      icon: 'fa-credit-card',       label: 'Client Payments' },
+    { id: 'availability',  icon: 'fa-calendar-check',    label: 'Availability' },
+  ]
+  const obNav = [
+    { id: 'onboarding',  icon: 'fa-user-plus',   label: 'Onboarding' },
+    { id: 'contractors', icon: 'fa-user-check',  label: 'Contractors' },
+    { id: 'calendar',    icon: 'fa-calendar-alt', label: 'Calendar' },
+  ]
+  const providerNav = [
+    { id: 'provider_profile',   icon: 'fa-user-circle',    label: 'My Profile' },
+    { id: 'provider_payroll',   icon: 'fa-money-bill-wave', label: 'My Payroll' },
+    { id: 'provider_consults',  icon: 'fa-file-medical',   label: 'My Consults' },
+    { id: 'provider_licenses',  icon: 'fa-map-marker-alt', label: 'State Licenses' },
+    { id: 'provider_documents',     icon: 'fa-file-alt',       label: 'My Documents' },
+    { id: 'provider_availability',  icon: 'fa-calendar-check',  label: 'My Availability' },
+  ]
+  const candidateNav = [
+    { id: 'candidate_status',    icon: 'fa-clipboard-list', label: 'My Application' },
+    { id: 'candidate_licenses',  icon: 'fa-certificate',    label: 'My Licenses' },
+    { id: 'candidate_documents', icon: 'fa-file-alt',       label: 'My Documents' },
+  ]
+  const managerNav = [
+    { id: 'mgr_contractors',        icon: 'fa-user-md',          label: 'Contractors' },
+    { id: 'mgr_licenses',          icon: 'fa-map-marker-alt',   label: 'Licenses' },
+    { id: 'mgr_consults',          icon: 'fa-table',            label: 'Consult Records' },
+    { id: 'mgr_availability',      icon: 'fa-calendar-check',   label: 'Availability' },
+  ]
+  const licEditorNav = [
+    { id: 'lic_dashboard', icon: 'fa-map-marker-alt',  label: 'Licensing Dashboard' },
+    { id: 'lic_edit',      icon: 'fa-edit',            label: 'Edit Licenses' },
+  ]
+
+  // Admin in onboarding view gets the same 3-item nav as the onboarding role
+  const inObView = state.role === 'onboarding' || (state.role === 'admin' && state.adminView === 'onboarding')
+  let items
+  if (state.role === 'candidate') items = candidateNav
+  else if (state.role === 'provider') items = providerNav
+  else if (state.role === 'manager') items = managerNav
+  else if (state.role === 'license_editor') items = licEditorNav
+  else if (inObView) items = obNav
+  else if (state.role === 'admin') items = adminNav
+  else items = []
+  $('sidebarNav').innerHTML = items.map(item => `
+    <button onclick="navigate('${item.id}')" id="nav_${item.id}"
+      class="nav-item w-full flex items-center gap-3 px-3 py-3 rounded-lg text-gray-400 hover:text-white transition-all">
+      <i class="fas ${item.icon} w-5 text-center flex-shrink-0"></i>
+      <span class="text-sm sidebar-text">${item.label}</span>
+    </button>
+  `).join('')
+}
+
+// Map page id → clean URL path
+const PAGE_PATHS = {
+  dashboard:          '/dashboard',
+  upload:             '/upload',
+  consults:           '/consults',
+  payroll:            '/payroll',
+  contractors:        '/contractors',
+  onboarding:         '/onboarding',
+  rates:              '/rates',
+  partner_view:       '/partner-view',
+  users:              '/users',
+  payments:           '/payments',
+  provider_profile:    '/portal/profile',
+  provider_payroll:    '/portal/payroll',
+  provider_consults:   '/portal/consults',
+  provider_licenses:   '/portal/licenses',
+  provider_documents:     '/portal/documents',
+  provider_availability:  '/portal/availability',
+  availability:           '/availability',
+  mgr_contractors:        '/manager/contractors',
+  mgr_licenses:           '/manager/licenses',
+  mgr_consults:           '/manager/consults',
+  mgr_availability:       '/manager/availability',
+  candidate_status:       '/candidate/status',
+  candidate_licenses:     '/candidate/licenses',
+  candidate_documents:    '/candidate/documents',
+  lic_dashboard:       '/licensing',
+  lic_edit:            '/licensing/edit',
+  // onboarding sub-tabs
+  'onboarding/kanban':    '/onboarding',
+  'onboarding/onboarded': '/contractors/onboarded',
+  'onboarding/calendar':  '/onboarding/calendar',
+}
+
+function navigate(page) {
+  // Special routing for onboarding-view sidebar items
+  const inObView = state.role === 'onboarding' || (state.role === 'admin' && state.adminView === 'onboarding')
+  if (inObView && (page === 'calendar' || page === 'contractors' || page === 'onboarding')) {
+    const tabMap   = { onboarding: 'kanban', contractors: 'onboarded', calendar: 'calendar' }
+    const titleMap = { onboarding: 'Onboarding', contractors: 'Onboarded Contractors', calendar: 'Calendar & Deadlines' }
+    state.currentPage = 'onboarding'
+    const targetTab = tabMap[page] || 'kanban'
+    localStorage.setItem('lmd_last_page', 'onboarding')
+    history.pushState({}, '', PAGE_PATHS['onboarding/' + targetTab] || '/onboarding')
+    $('pageTitle').textContent = titleMap[page] || 'Onboarding'
+    document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+    const navEl = $(`nav_${page}`); if (navEl) navEl.classList.add('active')
+    if ($('obRoot')) { obSwitchMainTab(targetTab) } else { obState.mainTab = targetTab; renderOnboarding() }
+    if (isMobile()) closeMobileSidebar()
+    return
+  }
+
+  state.currentPage = page
+  localStorage.setItem('lmd_last_page', page)
+  if (PAGE_PATHS[page]) history.pushState({}, '', PAGE_PATHS[page])
+
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const navEl = $(`nav_${page}`)
+  if (navEl) navEl.classList.add('active')
+
+  const titles = { dashboard:'Dashboard', upload:'Upload Report', consults:'Consult Records', payroll:'Contractor Payroll', contractors:'Contractors', onboarding:'Onboarding', rates:'Payment Rates', partner_view:'Partner View', users:'User Management', payments:'Client Payments', provider_profile:'My Profile', provider_payroll:'My Payroll', provider_consults:'My Consults', provider_licenses:'State Licenses', provider_documents:'My Documents', provider_availability:'My Availability', availability:'Availability', mgr_availability:'Availability', candidate_status:'My Application', candidate_licenses:'My Licenses', candidate_documents:'My Documents', mgr_contractors:'Contractors', mgr_licenses:'Licenses', mgr_consults:'Consult Records', lic_dashboard:'Licensing Dashboard', lic_edit:'Edit Licenses' }
+  $('pageTitle').textContent = titles[page] || page
+
+  const pages = { dashboard: renderDashboard, upload: renderUpload, consults: renderConsults, payroll: renderPayroll, contractors: renderContractors, onboarding: renderOnboarding, rates: renderRates, partner_view: renderPartnerView, users: renderUserManagement, payments: renderClientPayments, provider_profile: renderProviderProfile, provider_payroll: renderProviderPayroll, provider_consults: renderProviderConsults, provider_licenses: renderProviderLicenses, provider_documents: renderProviderDocuments, candidate_status: renderCandidateStatus, candidate_licenses: renderCandidateLicenses, candidate_documents: renderCandidateDocuments, mgr_contractors: renderMgrContractors, mgr_licenses: renderMgrLicenses, mgr_consults: renderMgrConsults, mgr_availability: renderMgrAvailability,
+  availability: renderAvailabilityDashboard, provider_availability: renderProviderAvailability,
+  lic_dashboard: renderLicDashboard, lic_edit: renderLicEdit }
+  if (pages[page]) pages[page]()
+
+  if (isMobile()) closeMobileSidebar()
+}
+
+// Contractor type helpers
+function contractorTypeLabel(t) {
+  return t === 'owner' ? 'Owner' : 'Regular'
+}
+function contractorTypeBadge(t) {
+  const cls = t === 'owner' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'
+  return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${cls}">${contractorTypeLabel(t)}</span>`
+}
+
+// ════════════════════════════════════════════════════
+// INITIAL DATA
+// ════════════════════════════════════════════════════
+async function loadInitialData() {
+  // Onboarding-only role (or admin who chose onboarding): skip payroll APIs
+  const goOnboarding = state.role === 'onboarding' || (state.role === 'admin' && state.adminView === 'onboarding')
+  if (goOnboarding) {
+    $('topBarRight').style.display = 'none'
+    hideLoading()
+    navigate('onboarding')
+    return
+  }
+
+  // Restore period selector visibility
+  const topBarRight = $('topBarRight')
+  if (topBarRight) topBarRight.style.display = ''
+
+  showLoading('Loading data...')
+  try {
+    state.periods = await api('/api/sessions')
+    await reloadContractors()
+    state.rates = await api('/api/rates')
+    state.typeRates = await api('/api/contractor-type-rates').catch(() => [])
+    populateSessionSelector()
+
+    // Resolve target page BEFORE selectPeriod so its navigate(state.currentPage) uses the right page
+    const savedPage = localStorage.getItem('lmd_last_page')
+    const defaultPage = state.role === 'license_editor' ? 'lic_dashboard' : 'dashboard'
+    const validPages = ['dashboard','upload','consults','payroll','contractors','onboarding','rates','partner_view','users','payments','provider_profile','provider_payroll','provider_consults','provider_licenses','provider_documents','provider_availability','availability','mgr_contractors','mgr_licenses','mgr_consults','mgr_availability','lic_dashboard','lic_edit']
+    state.currentPage = (savedPage && validPages.includes(savedPage)) ? savedPage : defaultPage
+
+    if (state.periods.length > 0) {
+      await selectPeriod(state.periods[0].period_key)
+    } else {
+      navigate(state.currentPage)
+    }
+  } catch(e) {
+    showToast('Error loading data: ' + e.message, 'error')
+  } finally {
+    hideLoading()
+  }
+}
+
+function populateSessionSelector() {
+  const sel = $('sessionSelector')
+  sel.innerHTML = '<option value="">Select Period...</option>' + state.periods.map(p =>
+    `<option value="${p.period_key}">${p.period_label} (${p.files.length} file${p.files.length>1?'s':''})</option>`
+  ).join('')
+  if (state.currentPeriod) sel.value = state.currentPeriod.period_key
+}
+
+async function selectPeriod(pk) {
+  if (!pk) return
+  state.currentPeriod = state.periods.find(p => p.period_key === pk)
+  if (state.currentPeriod) {
+    $('sessionSelector').value = pk
+    const badge = $('periodBadge')
+    badge.textContent = state.currentPeriod.period_label
+    badge.classList.remove('hidden')
+    showLoading('Loading summary...')
+    try {
+      state.currentSummary = await api(`/api/summary/period/${pk}`)
+    } catch(e) { console.error(e) }
+    finally { hideLoading() }
+    navigate(state.currentPage)
+  }
+}
+
+async function onSessionChange(pk) {
+  await selectPeriod(pk)
+}
+
+// ════════════════════════════════════════════════════
+// DASHBOARD COLUMN VISIBILITY
+// ════════════════════════════════════════════════════
+const DASH_COLS = [
+  { key: 'cases',    label: 'Cases' },
+  { key: 'async',    label: 'Async' },
+  { key: 'sync',     label: 'Sync' },
+  { key: 'orderly',  label: 'Orderly' },
+  { key: 'noshow',   label: 'No Show' },
+  { key: 'other',    label: 'Other' },
+  { key: 'cv',       label: 'CV Pays Us' },
+  { key: 'pay',      label: 'We Pay' },
+  { key: 'comm',     label: 'Chris Mgmt Fee' },
+  { key: 'margin',   label: 'Margin' },
+  { key: 'actions',  label: 'Actions' },
+]
+
+// Load saved visibility from localStorage (default: all visible)
+function loadDashColVisibility() {
+  try {
+    const saved = JSON.parse(localStorage.getItem('dashColVisibility') || '{}')
+    const vis = {}
+    DASH_COLS.forEach(c => { vis[c.key] = saved[c.key] !== false })
+    return vis
+  } catch(_) {
+    const vis = {}; DASH_COLS.forEach(c => { vis[c.key] = true }); return vis
+  }
+}
+
+let dashColVisibility = loadDashColVisibility()
+
+function saveDashColVisibility() {
+  try { localStorage.setItem('dashColVisibility', JSON.stringify(dashColVisibility)) } catch(_) {}
+}
+
+function applyDashColVisibility() {
+  DASH_COLS.forEach(c => {
+    document.querySelectorAll(`[data-col="${c.key}"]`).forEach(el => {
+      el.classList.toggle('dash-col-hidden', !dashColVisibility[c.key])
+    })
+  })
+  // Sync checkboxes in the panel if open
+  DASH_COLS.forEach(c => {
+    const cb = document.getElementById('dashcol_' + c.key)
+    if (cb) cb.checked = dashColVisibility[c.key]
+  })
+  updateDashColBtn()
+}
+
+function toggleDashColPanel() {
+  const panel = document.getElementById('dashColPanel')
+  if (!panel) return
+  const isHidden = panel.classList.contains('hidden')
+  if (isHidden) {
+    panel.classList.remove('hidden')
+    // Close when clicking outside
+    setTimeout(() => {
+      document.addEventListener('click', _closeDashColPanel)
+    }, 0)
+  } else {
+    panel.classList.add('hidden')
+    document.removeEventListener('click', _closeDashColPanel)
+  }
+}
+
+function _closeDashColPanel(e) {
+  const panel = document.getElementById('dashColPanel')
+  const btn = document.getElementById('dashColBtn')
+  if (panel && !panel.contains(e.target) && (!btn || !btn.contains(e.target))) {
+    panel.classList.add('hidden')
+    document.removeEventListener('click', _closeDashColPanel)
+  }
+}
+
+function toggleDashCol(key) {
+  dashColVisibility[key] = !dashColVisibility[key]
+  saveDashColVisibility()
+  applyDashColVisibility()
+  updateDashColBtn()
+}
+
+function dashColShowAll() {
+  DASH_COLS.forEach(c => { dashColVisibility[c.key] = true })
+  saveDashColVisibility()
+  applyDashColVisibility()
+  updateDashColBtn()
+}
+
+function dashColHideAll() {
+  // Keep doctor col always; hide all toggleable cols
+  DASH_COLS.forEach(c => { dashColVisibility[c.key] = false })
+  saveDashColVisibility()
+  applyDashColVisibility()
+  updateDashColBtn()
+}
+
+function updateDashColBtn() {
+  const btn = document.getElementById('dashColBtn')
+  if (!btn) return
+  const hiddenCount = DASH_COLS.filter(c => !dashColVisibility[c.key]).length
+  const badge = btn.querySelector('.col-badge')
+  if (hiddenCount > 0) {
+    if (badge) {
+      badge.textContent = hiddenCount + ' hidden'
+      badge.style.display = ''
+    } else {
+      const b = document.createElement('span')
+      b.className = 'col-badge'
+      b.textContent = hiddenCount + ' hidden'
+      btn.appendChild(b)
+    }
+    btn.style.borderColor = '#f59e0b'
+    btn.style.color = '#d97706'
+  } else {
+    if (badge) badge.style.display = 'none'
+    btn.style.borderColor = ''
+    btn.style.color = ''
+  }
+}
+
+// ════════════════════════════════════════════════════
+// DASHBOARD PAGE
+// ════════════════════════════════════════════════════
+async function renderDashboard() {
+  if (!state.currentPeriod) {
+    $('mainContent').innerHTML = `
+      <div class="flex flex-col items-center justify-center h-64 text-center">
+        <div class="w-16 h-16 rounded-2xl flex items-center justify-center mb-4" style="background:#f0f2f5">
+          <i class="fas fa-upload text-gray-300 text-2xl"></i>
+        </div>
+        <h3 class="text-lg font-semibold text-gray-600">No Data Yet</h3>
+        <p class="text-gray-400 text-sm mt-1 mb-4">Upload a CareValidate report to get started</p>
+        <button onclick="navigate('upload')" class="btn-primary px-6 py-2.5 rounded-xl font-medium text-sm">
+          <i class="fas fa-upload mr-2"></i>Upload Report
+        </button>
+      </div>`
+    return
+  }
+  // Always re-fetch so recalculate/match changes reflect immediately
+  $('mainContent').innerHTML = '<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>'
+  try { state.currentSummary = await api(`/api/summary/period/${state.currentPeriod.period_key}`) }
+  catch(e) { $('mainContent').innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`; return }
+  const s = state.currentSummary
+  const t = s.totals || {}
+  const margin = (t.total_margin || 0)
+  const marginPct = t.total_carevalidate > 0 ? ((margin / t.total_carevalidate) * 100).toFixed(1) : 0
+  const pk = state.currentPeriod.period_key
+
+  $('mainContent').innerHTML = `
+    <div class="space-y-6">
+      <!-- Stats Row -->
+      <div class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+        <div class="card p-3 md:p-4 flex flex-col gap-2 cursor-pointer hover:shadow-md transition-shadow" onclick="drillDownConsults({})" title="Click to view all consults">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0" style="background:rgba(201,168,76,0.1)">
+            <i class="fas fa-file-medical text-yellow-500 text-base"></i>
+          </div>
+          <div>
+            <div class="text-xl md:text-2xl font-bold text-gray-800 leading-tight break-all">${fmtNum(t.total_cases)}</div>
+            <div class="text-xs text-gray-500 font-medium mt-0.5">Total Approved Cases <i class="fas fa-external-link-alt text-gray-300 ml-1"></i></div>
+          </div>
+        </div>
+        <div class="card p-3 md:p-4 flex flex-col gap-2 cursor-pointer hover:shadow-md transition-shadow" onclick="drillDownConsults({})" title="Click to view all consults contributing to CV amount">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-blue-50">
+            <i class="fas fa-building text-blue-500 text-base"></i>
+          </div>
+          <div>
+            <div class="text-base md:text-xl font-bold text-gray-800 leading-tight break-all">${fmt(t.total_carevalidate)}</div>
+            <div class="text-xs text-gray-500 font-medium mt-0.5">CV Owes Us <i class="fas fa-external-link-alt text-gray-300 ml-1"></i></div>
+          </div>
+        </div>
+        <div class="card p-3 md:p-4 flex flex-col gap-2 cursor-pointer hover:shadow-md transition-shadow" onclick="drillDownConsults({})" title="Click to view all consults contributing to contractor pay">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-purple-50">
+            <i class="fas fa-user-md text-purple-500 text-base"></i>
+          </div>
+          <div>
+            <div class="text-base md:text-xl font-bold text-gray-800 leading-tight break-all">${fmt(t.total_contractor)}</div>
+            <div class="text-xs text-gray-500 font-medium mt-0.5">We Owe Contractors <i class="fas fa-external-link-alt text-gray-300 ml-1"></i></div>
+          </div>
+        </div>
+        <div class="card p-3 md:p-4 flex flex-col gap-2">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-blue-50">
+            <i class="fas fa-percent text-blue-500 text-base"></i>
+          </div>
+          <div>
+            <div class="text-base md:text-xl font-bold text-blue-600 leading-tight break-all" id="dashChrisComm"><span class="text-sm text-gray-400">...</span></div>
+            <div class="text-xs text-gray-500 font-medium mt-0.5">Chris Mgmt Fee</div>
+          </div>
+        </div>
+        <div class="card p-3 md:p-4 flex flex-col gap-2 col-span-2 sm:col-span-1">
+          <div class="w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 bg-green-50">
+            <i class="fas fa-chart-line text-green-500 text-base"></i>
+          </div>
+          <div>
+            <div class="text-base md:text-xl font-bold leading-tight break-all ${margin >= 0 ? 'text-green-600' : 'text-red-600'}" id="dashNetMargin">${fmt(margin)}</div>
+            <div class="text-xs text-gray-500 font-medium mt-0.5" id="dashMarginLabel">Net Margin (${marginPct}%)</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Charts Row -->
+      <div class="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <!-- Visit Type Breakdown -->
+        <div class="card p-5">
+          <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+            <i class="fas fa-chart-pie text-yellow-500"></i> Visit Type Breakdown
+          </h3>
+          <canvas id="visitTypeChart" height="200"></canvas>
+        </div>
+
+        <!-- Contractor Earnings -->
+        <div class="card p-5 flex flex-col">
+          <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+            <i class="fas fa-user-md text-purple-500"></i> Contractor Earnings
+          </h3>
+          <div class="space-y-3 overflow-y-auto" style="max-height:360px" id="contractorBars"></div>
+        </div>
+      </div>
+
+      <!-- Doctor Summary Table -->
+      <div class="card p-5">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="font-semibold text-gray-700 flex items-center gap-2">
+            <i class="fas fa-table text-blue-500"></i> Payroll Summary by Doctor
+            ${s.flaggedCount > 0 ? '<span class="status-badge badge-flagged"><i class="fas fa-flag mr-1"></i>' + s.flaggedCount + ' Flagged</span>' : ''}
+          </h3>
+          <div class="flex flex-wrap gap-2">
+            <div class="relative">
+              <button id="dashColBtn" onclick="toggleDashColPanel()" class="btn-outline px-3 py-2 rounded-xl text-sm font-medium" title="Show/hide columns" ${DASH_COLS.filter(c=>!dashColVisibility[c.key]).length > 0 ? 'style="border-color:#f59e0b;color:#d97706"' : ''}>
+                <i class="fas fa-columns mr-2"></i>Columns${DASH_COLS.filter(c=>!dashColVisibility[c.key]).length > 0 ? '<span class="col-badge">' + DASH_COLS.filter(c=>!dashColVisibility[c.key]).length + ' hidden</span>' : ''}
+              </button>
+              <div id="dashColPanel" class="hidden">
+                <div class="flex items-center justify-between mb-2 pb-2 border-b border-gray-100">
+                  <span class="text-xs font-bold text-gray-600 uppercase tracking-wider">Toggle Columns</span>
+                  <div class="flex gap-2">
+                    <button onclick="dashColShowAll()" class="text-xs text-blue-500 hover:text-blue-700 font-medium">All</button>
+                    <span class="text-gray-200">|</span>
+                    <button onclick="dashColHideAll()" class="text-xs text-gray-400 hover:text-gray-600 font-medium">None</button>
+                  </div>
+                </div>
+                ${DASH_COLS.map(c => '<label class="flex items-center gap-2 py-1 cursor-pointer hover:bg-gray-50 rounded px-1"><input type="checkbox" id="dashcol_' + c.key + '" ' + (dashColVisibility[c.key] ? 'checked' : '') + ' onchange="toggleDashCol(\'' + c.key + '\')" class="w-3.5 h-3.5 accent-blue-500"><span class="text-sm text-gray-700">' + c.label + '</span></label>').join('')}
+                <div class="mt-2 pt-2 border-t border-gray-100 text-xs text-gray-400 text-center">Hidden columns are excluded from PDF export</div>
+              </div>
+            </div>
+            <button onclick="navigate('payroll')" class="btn-outline px-3 py-2 rounded-xl text-sm font-medium" title="View Payroll">
+              <i class="fas fa-file-invoice-dollar"></i><span class="dash-btn-label ml-2">Payroll</span>
+            </button>
+            <button onclick="exportDashboardPDF()" class="btn-outline px-3 py-2 rounded-xl text-sm font-medium" style="border-color:#ef4444;color:#ef4444" title="Export PDF">
+              <i class="fas fa-file-pdf"></i><span class="dash-btn-label ml-2">PDF</span>
+            </button>
+            <button onclick="exportDashboardExcel()" class="btn-outline px-3 py-2 rounded-xl text-sm font-medium" style="border-color:#16a34a;color:#16a34a" title="Export Excel">
+              <i class="fas fa-file-excel"></i><span class="dash-btn-label ml-2">Excel</span>
+            </button>
+            <button onclick="exportGusto()" class="btn-primary px-3 py-2 rounded-xl text-sm font-medium" title="Export Gusto CSV">
+              <i class="fas fa-file-csv"></i><span class="dash-btn-label ml-2">Gusto</span>
+            </button>
+          </div>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="min-width:760px">
+            <thead>
+              <tr class="border-b border-gray-100">
+                <th class="text-left pb-3 text-gray-500 font-semibold px-3">Doctor / Contractor</th>
+                <th data-col="cases"   class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">Cases</th>
+                <th data-col="async"   class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">Async</th>
+                <th data-col="sync"    class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">Sync</th>
+                <th data-col="orderly" class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">Orderly</th>
+                <th data-col="noshow"  class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">No Show</th>
+                <th data-col="other"   class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">Other</th>
+                <th data-col="cv"      class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">CV Pays Us</th>
+                <th data-col="pay"     class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">We Pay</th>
+                <th data-col="comm"    class="text-right pb-3 text-blue-500 font-semibold px-3 whitespace-nowrap">Chris Mgmt Fee</th>
+                <th data-col="margin"  class="text-right pb-3 text-gray-500 font-semibold px-3 whitespace-nowrap">Margin</th>
+                <th data-col="actions" class="text-center pb-3 text-gray-500 font-semibold px-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(s.byDoctor || []).map(d => {
+                const dn = d.doctor_name || ''
+                const drillDoc = dn ? (', doctor: \'' + escHtml(dn) + '\'') : ''
+                const drillAll   = 'drillDownConsults({' + drillDoc.slice(2) + '})'
+                const drillAsync = 'drillDownConsults({' + drillDoc.slice(2) + (dn ? ', ' : '') + "visitType: 'ASYNC_TEXT_EMAIL', isOrderly: '0'})"
+                const drillSync  = 'drillDownConsults({' + drillDoc.slice(2) + (dn ? ', ' : '') + "visitType: '_SYNC', isOrderly: '0'})"
+                const drillOrd   = 'drillDownConsults({' + drillDoc.slice(2) + (dn ? ', ' : '') + "isOrderly: '1'})"
+                const drillNS    = 'drillDownConsults({' + drillDoc.slice(2) + (dn ? ', ' : '') + "visitType: 'NO_SHOW'})"
+                const drillOther = 'drillDownConsults({' + drillDoc.slice(2) + (dn ? ', ' : '') + "visitType: '_OTHER'})"
+                const ctInfo = (state.contractors || []).find(c => c.id === d.contractor_id)
+                const isOwnerRow = (ctInfo?.contractor_type || '') === 'owner'
+                return '<tr class="table-row border-b border-gray-50' + (isOwnerRow ? ' bg-amber-50/30' : '') + '">' +
+                  '<td class="py-3 px-3 font-medium text-gray-800">' + (d.doctor_name || '<i class="text-gray-400">Unmatched</i>') + (isOwnerRow ? ' <span class="inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700 ml-1">Owner</span>' : '') + '</td>' +
+                  '<td data-col="cases"   class="py-3 px-3 text-right text-gray-600"><span class="drilldown-link" onclick="' + drillAll + '" title="View all consults for this doctor">' + fmtNum(d.case_count) + '</span></td>' +
+                  '<td data-col="async"   class="py-3 px-3 text-right text-gray-500 text-xs">' + (d.async_count > 0 ? '<span class="drilldown-link" onclick="' + drillAsync + '" title="View Async consults">' + fmtNum(d.async_count) + '</span>' : '—') + '</td>' +
+                  '<td data-col="sync"    class="py-3 px-3 text-right text-gray-500 text-xs">' + (d.sync_count > 0 ? '<span class="drilldown-link" onclick="' + drillSync + '" title="View Sync consults">' + fmtNum(d.sync_count) + '</span>' : '—') + '</td>' +
+                  '<td data-col="orderly" class="py-3 px-3 text-right text-gray-500 text-xs">' + (d.orderly_count > 0 ? '<span class="drilldown-link" onclick="' + drillOrd + '" title="View OrderlyMeds consults">' + fmtNum(d.orderly_count) + '</span>' : '—') + '</td>' +
+                  '<td data-col="noshow"  class="py-3 px-3 text-right text-gray-500 text-xs">' + (d.no_show_count > 0 ? '<span class="drilldown-link" onclick="' + drillNS + '" title="View No Show consults">' + fmtNum(d.no_show_count) + '</span>' : '—') + '</td>' +
+                  '<td data-col="other"   class="py-3 px-3 text-right text-gray-500 text-xs">' + (d.other_count > 0 ? '<span class="drilldown-link" onclick="' + drillOther + '" title="View other consults">' + fmtNum(d.other_count) + '</span>' : '—') + '</td>' +
+                  '<td data-col="cv"      class="py-3 px-3 text-right font-medium text-blue-600"><span class="drilldown-link" onclick="' + drillAll + '" title="View all consults">' + fmt(d.total_carevalidate) + '</span></td>' +
+                  '<td data-col="pay"     class="py-3 px-3 text-right font-medium ' + (isOwnerRow ? 'text-amber-400' : 'text-purple-600') + '">' + (isOwnerRow ? '<span class="text-xs italic">Not paid out</span>' : '<span class="drilldown-link" onclick="' + drillAll + '" title="View all consults">' + fmt(d.total_contractor) + '</span>') + '</td>' +
+                  '<td data-col="comm"    class="py-3 px-3 text-right text-blue-500 text-xs" data-doctor-comm="' + (d.contractor_id || '') + '">—</td>' +
+                  '<td data-col="margin"  class="py-3 px-3 text-right font-medium ' + (d.margin >= 0 ? 'text-green-600' : 'text-red-600') + '" data-doctor-margin="' + (d.contractor_id || '') + '">' + fmt(d.margin) + '</td>' +
+                  '<td data-col="actions" class="py-3 px-3 text-center">' + (d.contractor_id ? '<button onclick="openPaystubModal(\'' + escHtml(state.currentPeriod.period_key) + '\', ' + d.contractor_id + ', \'' + escHtml(d.doctor_name) + '\')" class="text-xs px-3 py-1.5 rounded-lg btn-outline font-medium"><i class="fas fa-file-pdf mr-1"></i>Paystub</button>' : '<span class="text-gray-300 text-xs">No match</span>') + '</td>' +
+                  '</tr>'
+              }).join('')}
+            </tbody>
+            <tfoot>
+              <tr class="border-t-2 border-gray-200 bg-gray-50 font-bold text-sm">
+                <td class="py-3 px-3 text-gray-700">TOTAL</td>
+                <td data-col="cases" class="py-3 px-3 text-right text-gray-700">
+                  <span class="drilldown-link" onclick="drillDownConsults({})" title="View all consults">${fmtNum((s.byDoctor||[]).reduce((a,d)=>a+(d.case_count||0),0))}</span>
+                </td>
+                <td data-col="async" class="py-3 px-3 text-right text-gray-600">
+                  <span class="drilldown-link" onclick="drillDownConsults({visitType: 'ASYNC_TEXT_EMAIL', isOrderly: '0'})" title="View all Async consults">${fmtNum((s.byDoctor||[]).reduce((a,d)=>a+(d.async_count||0),0))}</span>
+                </td>
+                <td data-col="sync" class="py-3 px-3 text-right text-gray-600">
+                  <span class="drilldown-link" onclick="drillDownConsults({isOrderly: '0', visitType: '_SYNC'})" title="View all Sync consults">${fmtNum((s.byDoctor||[]).reduce((a,d)=>a+(d.sync_count||0),0))}</span>
+                </td>
+                <td data-col="orderly" class="py-3 px-3 text-right text-gray-600">
+                  <span class="drilldown-link" onclick="drillDownConsults({isOrderly: '1'})" title="View all OrderlyMeds consults">${fmtNum((s.byDoctor||[]).reduce((a,d)=>a+(d.orderly_count||0),0))}</span>
+                </td>
+                <td data-col="noshow" class="py-3 px-3 text-right text-gray-600">
+                  ${(s.byDoctor||[]).reduce((a,d)=>a+(d.no_show_count||0),0) > 0 ? '<span class="drilldown-link" onclick="drillDownConsults({visitType: \'NO_SHOW\'})" title="View all No Show consults">' + fmtNum((s.byDoctor||[]).reduce((a,d)=>a+(d.no_show_count||0),0)) + '</span>' : '—'}
+                </td>
+                <td data-col="other" class="py-3 px-3 text-right text-gray-600">
+                  ${(s.byDoctor||[]).reduce((a,d)=>a+(d.other_count||0),0) > 0 ? '<span class="drilldown-link" onclick="drillDownConsults({visitType: \'_OTHER\'})" title="View other consults">' + fmtNum((s.byDoctor||[]).reduce((a,d)=>a+(d.other_count||0),0)) + '</span>' : '—'}
+                </td>
+                <td data-col="cv" class="py-3 px-3 text-right text-blue-700">
+                  <span class="drilldown-link" onclick="drillDownConsults({})" title="View all consults">${fmt((s.byDoctor||[]).reduce((a,d)=>a+(d.total_carevalidate||0),0))}</span>
+                </td>
+                <td data-col="pay" class="py-3 px-3 text-right text-purple-700">
+                  <span class="drilldown-link" onclick="drillDownConsults({})" title="View all consults">${fmt((s.byDoctor||[]).reduce((a,d)=>a+(d.total_contractor||0),0))}</span>
+                </td>
+                <td data-col="comm" class="py-3 px-3 text-right text-blue-700" id="dashTotalComm"><span class="text-gray-300">...</span></td>
+                <td data-col="margin" class="py-3 px-3 text-right" id="dashTotalMargin"><span class="text-gray-300">...</span></td>
+                <td data-col="actions"></td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>`
+
+  // Charts
+  renderVisitTypeChart(s.byVisitType || [])
+  renderContractorBars(s.byDoctor || [])
+
+  // Async-load Chris Garcia commission and update dashboard
+  api(`/api/commission/${pk}`).then(comm => {
+    const total = comm.commission_total || 0
+    const el = $('dashChrisComm')
+    if (el) el.textContent = fmt(total)
+
+    // Update net margin = CV - Contractor - Commission
+    const adjMargin = (t.total_carevalidate || 0) - (t.total_contractor || 0) - total
+    const adjPct = (t.total_carevalidate || 0) > 0 ? ((adjMargin / t.total_carevalidate) * 100).toFixed(1) : 0
+    const mEl = $('dashNetMargin')
+    if (mEl) {
+      mEl.textContent = fmt(adjMargin)
+      mEl.className = `text-2xl font-bold ${adjMargin >= 0 ? 'text-green-600' : 'text-red-600'}`
+    }
+    const mlEl = $('dashMarginLabel')
+    if (mlEl) mlEl.textContent = `Net Margin (${adjPct}%)`
+
+    // Per-doctor commission from breakdown array
+    const commByContractor = {}
+    ;(comm.by_contractor || []).forEach(c => { commByContractor[c.contractor_id] = c.commission })
+
+    document.querySelectorAll('[data-doctor-comm]').forEach(cell => {
+      const cid = parseInt(cell.dataset.doctorComm)
+      if (!cid) return
+      const c = commByContractor[cid] || 0
+      cell.textContent = c > 0 ? fmt(c) : '—'
+
+      // Recalculate margin cell
+      const mCell = document.querySelector(`[data-doctor-margin="${cid}"]`)
+      if (!mCell) return
+      const row = cell.closest('tr')
+      if (!row) return
+      const dRow = (s.byDoctor || []).find(d => d.contractor_id === cid)
+      if (!dRow) return
+      const adjRowMargin = (dRow.total_carevalidate || 0) - (dRow.total_contractor || 0) - c
+      mCell.textContent = fmt(adjRowMargin)
+      mCell.className = `py-3 px-3 text-right font-medium ${adjRowMargin >= 0 ? 'text-green-600' : 'text-red-600'}`
+    })
+
+    // Fill totals row
+    const totalCommEl = $('dashTotalComm')
+    if (totalCommEl) {
+      totalCommEl.textContent = fmt(total)
+      totalCommEl.className = 'py-3 px-3 text-right text-blue-700 font-bold'
+    }
+    const totalMarginEl = $('dashTotalMargin')
+    if (totalMarginEl) {
+      totalMarginEl.textContent = fmt(adjMargin)
+      totalMarginEl.className = `py-3 px-3 text-right font-bold ${adjMargin >= 0 ? 'text-green-700' : 'text-red-700'}`
+    }
+  }).catch(() => {
+    const el = $('dashChrisComm')
+    if (el) el.textContent = '—'
+  })
+
+  // Apply saved column visibility after DOM is ready
+  applyDashColVisibility()
+
+}
+
+function renderVisitTypeChart(data) {
+  const ctx = document.getElementById('visitTypeChart')
+  if (!ctx) return
+  const labels = data.map(d => visitTypeLabel(d.visit_type))
+  const values = data.map(d => d.total_cv)
+  const colors = ['#C9A84C','#3b82f6','#8b5cf6','#ef4444','#10b981','#f59e0b']
+  if (window.vtChart) window.vtChart.destroy()
+  window.vtChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: { labels, datasets: [{ data: values, backgroundColor: colors, borderWidth: 2, borderColor: '#fff' }] },
+    options: { responsive: true, plugins: { legend: { position: 'right', labels: { font: { size: 11 }, padding: 12 } } } }
+  })
+}
+
+function renderContractorBars(doctors) {
+  const sorted = [...doctors].sort((a,b) => b.total_carevalidate - a.total_carevalidate)
+  const max = sorted[0]?.total_carevalidate || 1
+  // Legend
+  const legend = `
+    <div class="flex items-center gap-4 mb-3 text-xs text-gray-500">
+      <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#3b82f6"></span>CV Pays Us</span>
+      <span class="flex items-center gap-1.5"><span class="inline-block w-3 h-3 rounded-sm" style="background:#a855f7"></span>We Pay Contractor</span>
+    </div>`
+  $('contractorBars').innerHTML = legend + sorted.map(d => {
+    const cv  = d.total_carevalidate || 0
+    const pay = d.total_contractor   || 0
+    const cvPct  = (cv  / max * 100).toFixed(1)
+    const payPct = (pay / max * 100).toFixed(1)
+    return `
+    <div>
+      <div class="flex justify-between items-baseline text-xs mb-1 gap-2">
+        <span class="font-medium text-gray-700 truncate">${d.doctor_name || 'Unmatched'}</span>
+        <span class="flex gap-2 flex-shrink-0">
+          <span class="font-semibold text-blue-500">${fmt(cv)}</span>
+          <span class="text-gray-300">|</span>
+          <span class="font-semibold text-purple-500">${fmt(pay)}</span>
+        </span>
+      </div>
+      <div class="relative bg-gray-100 rounded-full h-3 overflow-hidden">
+        <div class="absolute left-0 top-0 h-3 rounded-full transition-all" style="width:${cvPct}%;background:#3b82f6;opacity:0.25"></div>
+        <div class="absolute left-0 top-0 h-3 rounded-full transition-all" style="width:${payPct}%;background:#a855f7"></div>
+      </div>
+    </div>`
+  }).join('')
+}
+
+function escHtml(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;') }
+
+// ════════════════════════════════════════════════════
+// UPLOAD PAGE
+// ════════════════════════════════════════════════════
+// ── Upload file queue (multiple files before submitting) ──────────────────────
+let fileQueue = []   // [{file, rows, id}]
+let uploadQueueIdCounter = 0
+
+function renderUpload() {
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December']
+  $('mainContent').innerHTML = `
+    <div class="max-w-2xl mx-auto space-y-5">
+      <!-- Upload card -->
+      <div class="card p-6">
+        <h3 class="font-semibold text-gray-700 mb-1 flex items-center gap-2">
+          <i class="fas fa-upload text-yellow-500"></i> Upload CareValidate Reports
+        </h3>
+        <p class="text-sm text-gray-500 mb-5">You can upload <strong>multiple Excel files for the same month</strong>. All rows from every file are imported exactly as provided.</p>
+
+        <!-- Drop zone -->
+        <div class="upload-zone rounded-xl p-8 text-center cursor-pointer mb-4" id="dropZone" onclick="openFilePicker(event)">
+          <input type="file" id="fileInput" class="hidden" accept=".xlsx,.xls" multiple onchange="handleFiles(this.files)"/>
+          <div class="w-14 h-14 rounded-2xl flex items-center justify-center mx-auto mb-3" style="background:rgba(201,168,76,0.1)">
+            <i class="fas fa-file-excel text-yellow-500 text-2xl"></i>
+          </div>
+          <p class="font-semibold text-gray-700">Drop one or more Excel files here</p>
+          <p class="text-sm text-gray-400 mt-1">or <span class="text-yellow-600 underline">click to browse</span> · .xlsx files only</p>
+        </div>
+
+        <!-- File queue -->
+        <div id="fileQueue" class="${fileQueue.length === 0 ? 'hidden' : ''} space-y-2 mb-4"></div>
+
+        <!-- Period selector -->
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Period Month</label>
+            <select id="uploadMonth" class="w-full">
+              ${monthNames.map((m,i) => `<option value="${i+1}" ${i+1 === new Date().getMonth()+1 ? 'selected' : ''}>${m}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Year</label>
+            <input type="number" id="uploadYear" value="${new Date().getFullYear()}" class="w-full"/>
+          </div>
+        </div>
+
+        <div class="flex gap-3">
+          <button id="uploadBtn" onclick="processUploadQueue()" disabled
+            class="flex-1 btn-primary py-3 rounded-xl font-semibold opacity-50 cursor-not-allowed transition-all">
+            <i class="fas fa-cog mr-2"></i><span id="uploadBtnLabel">Upload Files</span>
+          </button>
+          <button onclick="clearQueue()" id="clearQueueBtn" class="px-4 py-3 rounded-xl border border-gray-200 text-gray-500 hover:bg-gray-50 hidden">
+            <i class="fas fa-times mr-1"></i>Clear
+          </button>
+        </div>
+      </div>
+
+      <!-- Existing periods -->
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-history text-blue-500"></i> Uploaded Periods
+        </h3>
+        <div class="space-y-3" id="periodsList">
+          ${state.periods.length === 0 ? '<p class="text-sm text-gray-400 text-center py-4">No uploads yet</p>' :
+            state.periods.map(p => `
+              <div class="border border-gray-100 rounded-xl overflow-hidden">
+                <!-- Period header -->
+                <div class="flex items-center justify-between px-4 py-3 bg-gray-50">
+                  <div class="flex items-center gap-3">
+                    <i class="fas fa-calendar-alt text-yellow-500"></i>
+                    <div>
+                      <span class="font-semibold text-gray-700">${p.period_label}</span>
+                      <span class="ml-2 text-xs text-gray-400">${fmtNum(p.total_cases)} total cases · ${fmt(p.total_carevalidate_amount)}</span>
+                    </div>
+                    <span class="text-xs px-2 py-0.5 rounded-full bg-yellow-100 text-yellow-700 font-semibold">${p.files.length} file${p.files.length>1?'s':''}</span>
+                  </div>
+                  <div class="flex gap-2">
+                    <button onclick="selectPeriod('${p.period_key}'); navigate('dashboard')" class="text-xs px-3 py-1.5 btn-outline rounded-lg">View</button>
+                    <button onclick="deletePeriod('${p.period_key}','${p.period_label}')" class="text-xs px-3 py-1.5 bg-red-50 text-red-500 rounded-lg hover:bg-red-100">
+                      <i class="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </div>
+                <!-- Individual files -->
+                <div class="divide-y divide-gray-50">
+                  ${p.files.map(f => `
+                    <div class="flex items-center justify-between px-4 py-2.5">
+                      <div class="flex items-center gap-2 min-w-0">
+                        <i class="fas fa-file-excel text-green-400 text-sm flex-shrink-0"></i>
+                        <span class="text-sm text-gray-600 truncate">${f.source_label || f.filename}</span>
+                        <span class="text-xs text-gray-400 flex-shrink-0">${fmtNum(f.total_cases)} cases · ${new Date(f.uploaded_at).toLocaleDateString()}</span>
+                      </div>
+                      <button onclick="deleteFile(${f.id},'${escHtml(f.source_label||f.filename)}')" class="text-xs text-red-400 hover:text-red-600 ml-3 flex-shrink-0">
+                        <i class="fas fa-times"></i>
+                      </button>
+                    </div>`).join('')}
+                </div>
+              </div>`).join('')}
+        </div>
+      </div>
+    </div>`
+
+  // Setup drag-and-drop (no click listener here — handled by inline onclick)
+  const dz = $('dropZone')
+  dz.addEventListener('dragover', e => { e.preventDefault(); dz.classList.add('drag-over') })
+  dz.addEventListener('dragleave', () => dz.classList.remove('drag-over'))
+  dz.addEventListener('drop', e => { e.preventDefault(); dz.classList.remove('drag-over'); handleFiles(e.dataTransfer.files) })
+
+  renderFileQueue()
+}
+
+function renderFileQueue() {
+  const container = $('fileQueue')
+  const btn = $('uploadBtn')
+  const clearBtn = $('clearQueueBtn')
+  const label = $('uploadBtnLabel')
+  if (!container) return
+
+  if (fileQueue.length === 0) {
+    container.classList.add('hidden')
+    if (btn) { btn.disabled = true; btn.classList.add('opacity-50','cursor-not-allowed') }
+    if (clearBtn) clearBtn.classList.add('hidden')
+    return
+  }
+
+  container.classList.remove('hidden')
+  if (clearBtn) clearBtn.classList.remove('hidden')
+  if (btn) { btn.disabled = false; btn.classList.remove('opacity-50','cursor-not-allowed') }
+  if (label) label.textContent = `Upload ${fileQueue.length} File${fileQueue.length>1?'s':''}`
+
+  container.innerHTML = fileQueue.map(item => `
+    <div class="flex items-center gap-3 bg-green-50 border border-green-100 rounded-xl px-4 py-3" id="qitem_${item.id}">
+      <i class="fas fa-file-excel text-green-500"></i>
+      <div class="flex-1 min-w-0">
+        <div class="font-medium text-gray-700 text-sm truncate">${item.file.name}</div>
+        <div class="text-xs text-gray-500">${fmtNum(item.rows.length)} records found</div>
+      </div>
+      <span class="text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full font-semibold" id="qstatus_${item.id}">Ready</span>
+      <button onclick="removeFromQueue(${item.id})" class="text-gray-400 hover:text-red-500 flex-shrink-0">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>`).join('')
+}
+
+function openFilePicker(e) {
+  // prevent double-fire if click came from inside the zone on a child element
+  e.stopPropagation()
+  $('fileInput').click()
+}
+
+async function handleFiles(fileList) {
+  const files = Array.from(fileList)
+  // Reset the input so the same file can be re-added after removal
+  if ($('fileInput')) $('fileInput').value = ''
+
+  for (const file of files) {
+    if (!file.name.match(/\.xlsx?$/i)) { showToast(`${file.name} is not an Excel file`, 'warning'); continue }
+    if (fileQueue.some(q => q.file.name === file.name)) { showToast(`${file.name} already in queue`, 'info'); continue }
+
+    // Show inline spinner inside the drop zone, NOT the full-screen loading overlay
+    // (full-screen overlay blocks FileReader callbacks in some browsers)
+    const dz = $('dropZone')
+    if (dz) dz.innerHTML = `
+      <div class="flex flex-col items-center gap-3 py-2">
+        <div class="spinner"></div>
+        <p class="text-sm text-gray-500">Reading <strong>${file.name}</strong>…</p>
+      </div>`
+
+    try {
+      const rows = await readExcelFile(file)
+      const id = ++uploadQueueIdCounter
+      fileQueue.push({ file, rows, id })
+      showToast(`Added: ${file.name} (${fmtNum(rows.length)} records)`, 'success')
+    } catch(e) {
+      showToast(`Error reading ${file.name}: ${e.message}`, 'error')
+    } finally {
+      // Restore the drop zone
+      renderUpload()
+    }
+  }
+}
+
+function removeFromQueue(id) {
+  fileQueue = fileQueue.filter(q => q.id !== id)
+  renderFileQueue()
+}
+
+function clearQueue() {
+  fileQueue = []
+  if ($('fileInput')) $('fileInput').value = ''
+  renderUpload()
+}
+
+function readExcelFile(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = e => {
+      try {
+        const wb = XLSX.read(e.target.result, { type: 'array', cellDates: true })
+        const sheetName = wb.SheetNames[0]
+        const ws = wb.Sheets[sheetName]
+        const jsonData = XLSX.utils.sheet_to_json(ws, { raw: false, defval: null })
+        const rows = []
+        let flaggedIds = null
+        if (wb.SheetNames.includes('Flagged')) {
+          const flagData = XLSX.utils.sheet_to_json(wb.Sheets['Flagged'], { raw: false, defval: null })
+          flaggedIds = new Set()
+          flagData.forEach(row => {
+            const flag = row['FLAG'] || row['Flag'] || ''
+            if (typeof flag === 'string' && flag.toUpperCase().includes('FLAG')) {
+              flaggedIds.add(row['Case ID'] || '')
+            }
+          })
+        }
+        jsonData.forEach(row => {
+          const caseId = row['Case ID'] || row['case_id'] || ''
+          const visitType = row['Visit Type'] || row['visit_type'] || ''
+          let rawFee = row['Consult Fee'] || row['consult_fee']
+          if (typeof rawFee === 'string' && rawFee.startsWith('=')) rawFee = null
+          if (rawFee !== null) rawFee = parseFloat(rawFee) || null
+          let decisionDate = row['Decision date'] || row['decision_date'] || ''
+          if (decisionDate instanceof Date) decisionDate = decisionDate.toISOString().split('T')[0]
+          rows.push({
+            case_id: caseId,
+            case_id_short: row['Case ID (short)'] || row['case_id_short'] || '',
+            organization_name: row['Organization Name'] || row['organization_name'] || '',
+            patient_name: row['Patient Name'] || row['patient_name'] || '',
+            doctor_name: row['Doctor Name'] || row['doctor_name'] || '',
+            decision_date: decisionDate,
+            decision_status: row['Decision Status'] || row['decision_status'] || 'Approved',
+            visit_type: visitType,
+            raw_fee: rawFee,
+            is_flagged: flaggedIds ? flaggedIds.has(caseId) : false
+          })
+        })
+        resolve(rows)
+      } catch(err) { reject(err) }
+    }
+    reader.onerror = () => reject(new Error('Failed to read file'))
+    reader.readAsArrayBuffer(file)
+  })
+}
+
+const CHUNK_SIZE = 2000  // rows per HTTP request (~600KB each, well under limits)
+
+async function processUploadQueue() {
+  if (fileQueue.length === 0) return
+  const month = parseInt($('uploadMonth').value)
+  const year = parseInt($('uploadYear').value)
+  const monthNames = ['January','February','March','April','May','June','July','August','September','October','November','December']
+  const label = `${monthNames[month-1]} ${year}`
+
+  showLoading(`Uploading ${fileQueue.length} file${fileQueue.length>1?'s':''}…`, true)
+  setProgress(5)
+
+  let lastPeriodKey = null
+  let totalAdded = 0
+
+  for (let i = 0; i < fileQueue.length; i++) {
+    const item = fileQueue[i]
+    const statusEl = $(`qstatus_${item.id}`)
+    if (statusEl) { statusEl.textContent = 'Uploading…'; statusEl.className = 'text-xs px-2 py-1 bg-blue-100 text-blue-700 rounded-full font-semibold' }
+
+    try {
+      const allRows = item.rows
+      const totalChunks = Math.ceil(allRows.length / CHUNK_SIZE) || 1
+      let sessionId = null
+      let fileAdded = 0
+
+      for (let c = 0; c < totalChunks; c++) {
+        const chunk = allRows.slice(c * CHUNK_SIZE, (c + 1) * CHUNK_SIZE)
+        const isLastChunk = (c === totalChunks - 1)
+
+        // Progress within this file
+        const fileProgress = Math.round((c / totalChunks) * 80)
+        const overallProgress = Math.round(((i / fileQueue.length) + (c / totalChunks) / fileQueue.length) * 85) + 5
+        setProgress(overallProgress)
+        if (statusEl) statusEl.textContent = `Chunk ${c+1}/${totalChunks}…`
+
+        let result
+        if (c === 0) {
+          // First chunk: create session
+          result = await api('/api/upload', {
+            method: 'POST',
+            body: JSON.stringify({
+              filename: item.file.name,
+              source_label: item.file.name,
+              period_label: label,
+              period_month: month,
+              period_year: year,
+              rows: chunk,
+              is_last_chunk: isLastChunk
+            })
+          })
+          sessionId = result.session_id
+          lastPeriodKey = result.period_key
+        } else {
+          // Subsequent chunks: append to existing session
+          result = await api('/api/upload/chunk', {
+            method: 'POST',
+            body: JSON.stringify({
+              session_id: sessionId,
+              rows: chunk,
+              is_last_chunk: isLastChunk
+            })
+          })
+        }
+
+        fileAdded += result.new_cases_added || 0
+      }
+
+      totalAdded += fileAdded
+
+      if (statusEl) {
+        statusEl.textContent = `✓ ${fmtNum(fileAdded)} rows imported`
+        statusEl.className = 'text-xs px-2 py-1 bg-green-100 text-green-700 rounded-full font-semibold'
+      }
+    } catch(e) {
+      if (statusEl) { statusEl.textContent = '✗ Error'; statusEl.className = 'text-xs px-2 py-1 bg-red-100 text-red-600 rounded-full font-semibold' }
+      showToast(`Error uploading ${item.file.name}: ${e.message}`, 'error')
+    }
+
+    setProgress(Math.round(((i+1) / fileQueue.length) * 90))
+  }
+
+  // Refresh
+  state.periods = await api('/api/sessions')
+  populateSessionSelector()
+  if (lastPeriodKey) await selectPeriod(lastPeriodKey)
+  setProgress(100)
+
+  showToast(`✅ ${fmtNum(totalAdded)} rows imported for ${label}`, 'success')
+  fileQueue = []
+  hideLoading()
+  navigate('dashboard')
+}
+
+// Delete a single file from a period
+async function deleteFile(sessionId, label) {
+  document.getElementById('deleteFileModal')?.remove()
+  const html = `
+  <div id="deleteFileModal" class="fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="p-6">
+        <div class="flex items-center gap-4 mb-4">
+          <div class="w-12 h-12 rounded-xl bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-file-times text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-lg font-bold text-gray-800">Remove File?</h3>
+            <p class="text-sm text-gray-500 mt-0.5">All cases in this file will be deleted.</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-100 rounded-xl px-4 py-3 mb-5">
+          <p class="text-sm text-red-700 font-medium break-all">${escHtml(label)}</p>
+        </div>
+        <div class="flex justify-end gap-3">
+          <button onclick="document.getElementById('deleteFileModal').remove()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button onclick="executeDeleteFile(${sessionId})" class="px-5 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-semibold transition-colors">
+            <i class="fas fa-trash mr-1.5"></i>Remove File
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>`
+  document.body.insertAdjacentHTML('beforeend', html)
+}
+
+async function executeDeleteFile(sessionId) {
+  document.getElementById('deleteFileModal')?.remove()
+  try {
+    await api(`/api/sessions/${sessionId}`, { method: 'DELETE' })
+    state.periods = await api('/api/sessions')
+    if (state.currentPeriod) {
+      const stillExists = state.periods.find(p => p.period_key === state.currentPeriod.period_key)
+      if (stillExists) {
+        await selectPeriod(state.currentPeriod.period_key)
+      } else {
+        state.currentPeriod = state.periods[0] || null
+        state.currentSummary = null
+      }
+    }
+    populateSessionSelector()
+    showToast('File removed', 'info')
+    renderUpload()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// Delete entire period (all files)
+async function deletePeriod(periodKey, label) {
+  document.getElementById('deletePeriodModal')?.remove()
+  const html = `
+  <div id="deletePeriodModal" class="fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="p-6">
+        <div class="flex items-center gap-4 mb-4">
+          <div class="w-12 h-12 rounded-xl bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-calendar-times text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-lg font-bold text-gray-800">Delete Entire Period?</h3>
+            <p class="text-sm text-gray-500 mt-0.5">All files and cases for this month will be permanently deleted.</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-100 rounded-xl px-4 py-3 mb-5">
+          <p class="text-sm text-red-700 font-medium">${escHtml(label)}</p>
+        </div>
+        <div class="flex justify-end gap-3">
+          <button onclick="document.getElementById('deletePeriodModal').remove()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button onclick="executeDeletePeriod('${escHtml(periodKey)}','${escHtml(label)}')" class="px-5 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-semibold transition-colors">
+            <i class="fas fa-trash mr-1.5"></i>Delete Period
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>`
+  document.body.insertAdjacentHTML('beforeend', html)
+}
+
+async function executeDeletePeriod(periodKey, label) {
+  document.getElementById('deletePeriodModal')?.remove()
+  try {
+    await api(`/api/periods/${periodKey}`, { method: 'DELETE' })
+    state.periods = await api('/api/sessions')
+    if (state.currentPeriod?.period_key === periodKey) {
+      state.currentPeriod = state.periods[0] || null
+      state.currentSummary = null
+    }
+    populateSessionSelector()
+    showToast(`Deleted ${label}`, 'info')
+    renderUpload()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ════════════════════════════════════════════════════
+// CONSULTS TABLE PAGE
+// ════════════════════════════════════════════════════
+let consultsState = { page: 1, data: [], total: 0, search: '', doctor: '', visitType: '', isOrderly: '', organization: '', isFlagged: '', decisionStatus: '', dateFrom: '', dateTo: '', sortBy: 'decision_date', sortDir: 'desc', showNames: false }
+
+// ── HIPAA name-masking for consults ──────────────────────────────────
+function csMaskName(name) {
+  if (consultsState.showNames) return name || ''
+  const words = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '—'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+function csToggleNames() {
+  if (consultsState.showNames) {
+    consultsState.showNames = false
+    sessionStorage.removeItem('cs_names_visible')
+    csUpdateToggleBtn()
+    renderConsultsTable(consultsState.data, consultsState.total, consultsState.page)
+    return
+  }
+  $('csHipaaModal').classList.remove('hidden')
+}
+
+function csConfirmShowNames() {
+  $('csHipaaModal').classList.add('hidden')
+  consultsState.showNames = true
+  sessionStorage.setItem('cs_names_visible', '1')
+  csUpdateToggleBtn()
+  renderConsultsTable(consultsState.data, consultsState.total, consultsState.page)
+}
+
+function csUpdateToggleBtn() {
+  const btn = $('csNamesToggleBtn')
+  if (!btn) return
+  if (consultsState.showNames) {
+    btn.innerHTML = '<i class="fas fa-eye-slash mr-1.5"></i>Hide Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 bg-amber-50 border border-amber-300 text-amber-700 hover:bg-amber-100 text-sm font-medium rounded-xl transition whitespace-nowrap'
+  } else {
+    btn.innerHTML = '<i class="fas fa-eye mr-1.5"></i>Show Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap'
+  }
+}
+
+// drillDownConsults — navigate to consults page pre-filtered
+// opts: { doctor, visitType, isOrderly }
+// Special visitType values:
+//   'SYNC'    → clears visitType filter but sets isOrderly=0 so only non-orderly syncs show (handled server-side via multiple VT options — we show a label instead)
+//   'ORDERLY' → sets isOrderly=1, clears visitType
+function drillDownConsults(opts = {}) {
+  const { doctor = '', visitType = '', isOrderly = '', isFlagged = '', decisionStatus = '' } = opts
+  consultsState = {
+    page: 1, data: [], total: 0,
+    search: '',
+    doctor:         doctor,
+    visitType:      visitType,
+    isOrderly:      isOrderly,
+    organization:   '',
+    isFlagged:      isFlagged,
+    decisionStatus: decisionStatus,
+    dateFrom:       '',
+    dateTo:         '',
+    sortBy: 'decision_date',
+    sortDir: 'desc'
+  }
+  navigate('consults')
+}
+
+async function renderConsults() {
+  consultsState.showNames = false   // reset on each navigation — names must be re-acknowledged per session view
+  if (!state.currentPeriod) { $('mainContent').innerHTML = noDataMsg(); return }
+
+  // Build active-filter banner chips
+  const chips = []
+  if (consultsState.doctor)    chips.push(`<span class="drilldown-chip"><i class="fas fa-user-md mr-1"></i>${escHtml(consultsState.doctor)}<button onclick="clearDrillFilter('doctor')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  const vtChipLabel = { ASYNC_TEXT_EMAIL: 'Async', SYNC_PHONE: 'Sync Phone', SYNC_VIDEO: 'Sync Video', SYNC_IN_PERSON: 'Sync In-Person', NO_SHOW: 'No Show', _SYNC: 'All Sync', _OTHER: 'Other' }
+  if (consultsState.visitType) chips.push(`<span class="drilldown-chip"><i class="fas fa-tag mr-1"></i>${vtChipLabel[consultsState.visitType] || consultsState.visitType}<button onclick="clearDrillFilter('visitType')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  if (consultsState.isOrderly === '1') chips.push(`<span class="drilldown-chip badge-orderly"><i class="fas fa-pills mr-1"></i>OrderlyMeds Only<button onclick="clearDrillFilter('isOrderly')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  if (consultsState.isOrderly === '0') chips.push(`<span class="drilldown-chip"><i class="fas fa-filter mr-1"></i>Non-OrderlyMeds<button onclick="clearDrillFilter('isOrderly')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  if (consultsState.isFlagged === '1') chips.push(`<span class="drilldown-chip" style="background:#fef9c3;color:#92400e;border-color:#fde68a"><i class="fas fa-flag mr-1"></i>Flagged Only<button onclick="clearDrillFilter('isFlagged')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  if (consultsState.isFlagged === '0') chips.push(`<span class="drilldown-chip"><i class="fas fa-flag mr-1 text-gray-400"></i>Not Flagged<button onclick="clearDrillFilter('isFlagged')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  if (consultsState.decisionStatus) chips.push(`<span class="drilldown-chip"><i class="fas fa-check-circle mr-1"></i>${escHtml(consultsState.decisionStatus)}<button onclick="clearDrillFilter('decisionStatus')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  if (consultsState.dateFrom && consultsState.dateTo)
+    chips.push(`<span class="drilldown-chip" style="background:#ede9fe;color:#5b21b6;border-color:#c4b5fd"><i class="fas fa-calendar-alt mr-1"></i>${escHtml(consultsState.dateFrom)} – ${escHtml(consultsState.dateTo)}<button onclick="clearDrillFilter('dateRange')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  else if (consultsState.dateFrom)
+    chips.push(`<span class="drilldown-chip" style="background:#ede9fe;color:#5b21b6;border-color:#c4b5fd"><i class="fas fa-calendar-alt mr-1"></i>From ${escHtml(consultsState.dateFrom)}<button onclick="clearDrillFilter('dateFrom')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+  else if (consultsState.dateTo)
+    chips.push(`<span class="drilldown-chip" style="background:#ede9fe;color:#5b21b6;border-color:#c4b5fd"><i class="fas fa-calendar-alt mr-1"></i>Until ${escHtml(consultsState.dateTo)}<button onclick="clearDrillFilter('dateTo')" class="ml-1.5 hover:text-red-500">&times;</button></span>`)
+
+  // vtFilter select: include _SYNC/_OTHER options when active
+  const vtOptions = [
+    { v: '',               l: 'All Types' },
+    { v: 'ASYNC_TEXT_EMAIL', l: 'Async' },
+    { v: '_SYNC',          l: 'All Sync (Phone/Video/In-Person)' },
+    { v: 'SYNC_PHONE',     l: 'Sync Phone' },
+    { v: 'SYNC_VIDEO',     l: 'Sync Video' },
+    { v: 'SYNC_IN_PERSON', l: 'Sync In-Person' },
+    { v: 'NO_SHOW',        l: 'No Show' },
+    { v: '_OTHER',         l: 'Other' },
+  ]
+
+  $('mainContent').innerHTML = `
+    <div class="card">
+      <!-- Drilldown banner -->
+      ${chips.length > 0 ? `
+      <div class="px-4 pt-3 pb-0 flex flex-wrap items-center gap-2">
+        <span class="text-xs font-semibold text-gray-500 uppercase tracking-wider">Active Filters:</span>
+        ${chips.join('')}
+        <button onclick="clearAllDrillFilters()" class="text-xs text-red-400 hover:text-red-600 ml-1 font-medium">Clear all</button>
+      </div>` : ''}
+      <!-- Filters + Export -->
+      <div class="p-3 md:p-4 border-b border-gray-100">
+        <div class="flex flex-col gap-2">
+          <!-- Top row: search + export button -->
+          <div class="flex gap-2 items-center">
+            <input type="text" id="searchInput" placeholder="Search case ID, org..." class="flex-1" value="${consultsState.search}" oninput="debounceSearch(this.value)"/>
+            <button id="csNamesToggleBtn" onclick="csToggleNames()"
+              class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap">
+              <i class="fas fa-eye mr-1.5"></i>Show Names
+            </button>
+            <button onclick="exportConsultsXlsx(false)" title="Export current filtered view to Excel"
+              class="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border-2 border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors whitespace-nowrap">
+              <i class="fas fa-file-excel"></i><span class="hidden sm:inline">Export</span>
+            </button>
+            <button onclick="exportConsultsXlsx(true)" title="Export ALL records for this period (ignore filters)"
+              class="flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-medium border-2 border-blue-200 text-blue-600 bg-blue-50 hover:bg-blue-100 transition-colors whitespace-nowrap">
+              <i class="fas fa-file-excel"></i><span class="hidden sm:inline">Full Export</span>
+            </button>
+          </div>
+          <div class="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-2">
+            <select id="doctorFilter" onchange="filterConsults()" class="w-full text-sm">
+              <option value="">All Doctors</option>
+            </select>
+            <select id="vtFilter" onchange="filterConsults()" class="w-full text-sm">
+              ${vtOptions.map(o => `<option value="${o.v}" ${consultsState.visitType === o.v ? 'selected' : ''}>${o.l}</option>`).join('')}
+            </select>
+            <select id="orderlyFilter" onchange="filterConsults()" class="w-full text-sm">
+              <option value="" ${consultsState.isOrderly===''?'selected':''}>All Types</option>
+              <option value="1" ${consultsState.isOrderly==='1'?'selected':''}>OrderlyMeds</option>
+              <option value="0" ${consultsState.isOrderly==='0'?'selected':''}>Non-Orderly</option>
+            </select>
+            <select id="flagFilter" onchange="filterConsults()" class="w-full text-sm">
+              <option value="" ${consultsState.isFlagged===''?'selected':''}>All Flags</option>
+              <option value="1" ${consultsState.isFlagged==='1'?'selected':''}>🚩 Flagged</option>
+              <option value="0" ${consultsState.isFlagged==='0'?'selected':''}>Not Flagged</option>
+            </select>
+            <select id="statusFilter" onchange="filterConsults()" class="w-full text-sm">
+              <option value="" ${consultsState.decisionStatus===''?'selected':''}>All Statuses</option>
+              <option value="Approved" ${consultsState.decisionStatus==='Approved'?'selected':''}>Approved</option>
+              <option value="Denied" ${consultsState.decisionStatus==='Denied'?'selected':''}>Denied</option>
+              <option value="Pending" ${consultsState.decisionStatus==='Pending'?'selected':''}>Pending</option>
+            </select>
+            <select id="orgFilter" onchange="filterConsults()" class="w-full text-sm">
+              <option value="">All Orgs</option>
+            </select>
+          </div>
+          <!-- Date range filter row -->
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="text-xs font-medium text-gray-500 whitespace-nowrap"><i class="fas fa-calendar-alt mr-1 text-violet-400"></i>Date Range:</span>
+            <div class="flex items-center gap-1.5">
+              <label class="text-xs text-gray-400 whitespace-nowrap">From</label>
+              <input type="date" id="dateFromFilter" value="${consultsState.dateFrom}" onchange="filterConsults()"
+                class="text-sm border border-gray-200 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400"/>
+            </div>
+            <div class="flex items-center gap-1.5">
+              <label class="text-xs text-gray-400 whitespace-nowrap">To</label>
+              <input type="date" id="dateToFilter" value="${consultsState.dateTo}" onchange="filterConsults()"
+                class="text-sm border border-gray-200 rounded-md px-2 py-1 focus:outline-none focus:ring-2 focus:ring-violet-300 focus:border-violet-400"/>
+            </div>
+            ${consultsState.dateFrom || consultsState.dateTo ? `
+            <button onclick="clearDrillFilter('dateRange')" class="text-xs text-violet-500 hover:text-red-500 font-medium px-2 py-1 rounded border border-violet-200 hover:border-red-200 transition-colors">
+              <i class="fas fa-times mr-1"></i>Clear dates
+            </button>` : ''}
+          </div>
+          <span id="countLabel" class="text-xs text-gray-400"></span>
+        </div>
+      </div>
+      <!-- Table -->
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm" id="consultsTable" style="min-width:780px">
+          <thead class="bg-gray-50" id="consultsHead">
+            <tr id="consultsHeadRow"></tr>
+          </thead>
+          <tbody id="consultsTbody">
+            <tr><td colspan="10" class="text-center py-10"><div class="spinner mx-auto"></div></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <!-- Pagination -->
+      <div class="p-4 border-t border-gray-100 flex items-center justify-between" id="pagination"></div>
+    </div>
+
+    <!-- HIPAA Warning Modal (Consults) -->
+    <div id="csHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-shield-alt text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-gray-900">HIPAA Privacy Notice</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Protected Health Information</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-2">
+          <p class="font-semibold">You are about to reveal patient names on screen.</p>
+          <ul class="list-disc list-inside space-y-1 text-xs">
+            <li>Ensure no unauthorized individuals can view your screen</li>
+            <li>Do not take screenshots or record this screen while names are visible</li>
+            <li>Names will be hidden again when you navigate away from this page</li>
+            <li>Access to this information is logged and auditable</li>
+          </ul>
+        </div>
+        <p class="text-xs text-gray-500 mb-5">By clicking <strong>I Acknowledge</strong> you confirm you are authorized to view this information and accept responsibility for its protection under HIPAA.</p>
+        <div class="flex gap-3">
+          <button onclick="$('csHipaaModal').classList.add('hidden')"
+            class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button onclick="csConfirmShowNames()"
+            class="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-xl transition">
+            <i class="fas fa-eye mr-1.5"></i>I Acknowledge — Show Names
+          </button>
+        </div>
+      </div>
+    </div>`
+
+  await Promise.all([
+    loadConsultsPage(1),
+    loadOrgFilterOptions(),
+    loadDoctorFilterOptions()
+  ])
+  // Restore toggle button state after re-render
+  csUpdateToggleBtn()
+}
+
+function clearDrillFilter(field) {
+  if (field === 'doctor')         consultsState.doctor         = ''
+  if (field === 'visitType')      consultsState.visitType      = ''
+  if (field === 'isOrderly')      consultsState.isOrderly      = ''
+  if (field === 'isFlagged')      consultsState.isFlagged      = ''
+  if (field === 'decisionStatus') consultsState.decisionStatus = ''
+  if (field === 'dateFrom' || field === 'dateRange') consultsState.dateFrom = ''
+  if (field === 'dateTo'   || field === 'dateRange') consultsState.dateTo   = ''
+  renderConsults()
+}
+
+function clearAllDrillFilters() {
+  consultsState.doctor         = ''
+  consultsState.visitType      = ''
+  consultsState.isOrderly      = ''
+  consultsState.isFlagged      = ''
+  consultsState.decisionStatus = ''
+  consultsState.organization   = ''
+  consultsState.search         = ''
+  consultsState.dateFrom       = ''
+  consultsState.dateTo         = ''
+  renderConsults()
+}
+
+async function loadDoctorFilterOptions() {
+  const sel = $('doctorFilter')
+  if (!sel || !state.currentPeriod) return
+  try {
+    const doctors = await api(`/api/consults/doctors?period_key=${state.currentPeriod.period_key}`)
+    const current = consultsState.doctor
+    sel.innerHTML = '<option value="">All Doctors</option>' +
+      doctors.map(d => `<option value="${escHtml(d)}" ${current === d ? 'selected' : ''}>${escHtml(d)}</option>`).join('')
+  } catch(_) {}
+}
+
+async function loadOrgFilterOptions() {
+  const sel = $('orgFilter')
+  if (!sel || !state.currentPeriod) return
+  try {
+    const orgs = await api(`/api/consults/organizations?period_key=${state.currentPeriod.period_key}`)
+    const current = consultsState.organization
+    sel.innerHTML = '<option value="">All Organizations</option>' +
+      orgs.map(o => `<option value="${escHtml(o)}" ${current === o ? 'selected' : ''}>${escHtml(o)}</option>`).join('')
+  } catch(_) {}
+}
+
+let searchTimer = null
+function debounceSearch(val) {
+  clearTimeout(searchTimer)
+  consultsState.search = val
+  searchTimer = setTimeout(() => loadConsultsPage(1), 400)
+}
+
+async function filterConsults() {
+  consultsState.doctor         = $('doctorFilter')?.value    || ''
+  consultsState.visitType      = $('vtFilter')?.value        || ''
+  consultsState.isOrderly      = $('orderlyFilter')?.value   ?? ''
+  consultsState.isFlagged      = $('flagFilter')?.value      ?? ''
+  consultsState.decisionStatus = $('statusFilter')?.value    || ''
+  consultsState.organization   = $('orgFilter')?.value       || ''
+  consultsState.dateFrom       = $('dateFromFilter')?.value  || ''
+  consultsState.dateTo         = $('dateToFilter')?.value    || ''
+  await loadConsultsPage(1)
+}
+
+function setConsultsSort(col) {
+  if (consultsState.sortBy === col) {
+    consultsState.sortDir = consultsState.sortDir === 'asc' ? 'desc' : 'asc'
+  } else {
+    consultsState.sortBy = col
+    consultsState.sortDir = col === 'carevalidate_fee' || col === 'contractor_fee' ? 'desc' : 'asc'
+  }
+  loadConsultsPage(1)
+}
+
+function renderConsultsHeader() {
+  const headRow = $('consultsHeadRow')
+  if (!headRow) return
+  const cols = [
+    { key: 'case_id_short',    label: 'Case ID',         align: 'left',   nowrap: true },
+    { key: 'decision_date',    label: 'Date',            align: 'left',   nowrap: true },
+    { key: 'patient_name',     label: 'Patient',         align: 'left',   nowrap: false },
+    { key: 'organization_name',label: 'Organization',    align: 'left',   nowrap: false },
+    { key: 'doctor_name',      label: 'Doctor',          align: 'left',   nowrap: false },
+    { key: 'visit_type',       label: 'Type',            align: 'left',   nowrap: true },
+    { key: 'carevalidate_fee', label: 'CV Fee',          align: 'right',  nowrap: true },
+    { key: 'contractor_fee',   label: 'Contractor Fee',  align: 'right',  nowrap: true },
+    { key: 'decision_status',  label: 'Status',          align: 'center', nowrap: true },
+    { key: null,               label: 'Actions',         align: 'center', nowrap: true },
+  ]
+  headRow.innerHTML = cols.map(col => {
+    if (!col.key) {
+      return `<th class="text-center px-4 py-3 text-gray-500 font-semibold text-xs whitespace-nowrap">Actions</th>`
+    }
+    const isActive = consultsState.sortBy === col.key
+    const arrow = isActive
+      ? (consultsState.sortDir === 'asc' ? ' <i class="fas fa-arrow-up text-blue-500 ml-1"></i>' : ' <i class="fas fa-arrow-down text-blue-500 ml-1"></i>')
+      : ' <i class="fas fa-sort text-gray-300 ml-1 opacity-0 group-hover:opacity-100"></i>'
+    const alignClass = col.align === 'right' ? 'text-right' : col.align === 'center' ? 'text-center' : 'text-left'
+    const nowrapClass = col.nowrap ? 'whitespace-nowrap' : ''
+    const activeClass = isActive ? 'text-blue-600' : 'text-gray-500'
+    return `<th class="${alignClass} px-4 py-3 font-semibold text-xs ${nowrapClass} ${activeClass} group cursor-pointer select-none hover:bg-gray-100 transition-colors" onclick="setConsultsSort('${col.key}')" title="Sort by ${col.label}">${col.label}${arrow}</th>`
+  }).join('')
+}
+
+async function loadConsultsPage(page) {
+  consultsState.page = page
+  renderConsultsHeader()
+  const params = new URLSearchParams({
+    period_key: state.currentPeriod.period_key,
+    page, limit: 50,
+    sort_by:  consultsState.sortBy,
+    sort_dir: consultsState.sortDir
+  })
+  if (consultsState.search)       params.set('search',          consultsState.search)
+  if (consultsState.doctor)       params.set('doctor_name',     consultsState.doctor)
+  if (consultsState.organization) params.set('organization',    consultsState.organization)
+
+  // _SYNC and _OTHER are handled server-side via IN/NOT IN SQL clauses
+  const vt = consultsState.visitType
+  if (vt) params.set('visit_type', vt)
+  if (consultsState.isOrderly !== '')      params.set('is_orderly',      consultsState.isOrderly)
+  if (consultsState.isFlagged !== '')      params.set('is_flagged',      consultsState.isFlagged)
+  if (consultsState.decisionStatus)        params.set('decision_status', consultsState.decisionStatus)
+  if (consultsState.dateFrom)              params.set('date_from',       consultsState.dateFrom)
+  if (consultsState.dateTo)               params.set('date_to',         consultsState.dateTo)
+
+  try {
+    const result = await api('/api/consults?' + params)
+    const rows = result.data
+    const total = result.total
+
+    consultsState.data = rows
+    consultsState.total = total
+    renderConsultsTable(rows, total, page)
+  } catch(e) { showToast('Error loading consults: ' + e.message, 'error') }
+}
+
+function renderConsultsTable(rows, total, page) {
+  renderConsultsHeader()
+  $('countLabel').textContent = `${fmtNum(total)} records`
+  const tbody = $('consultsTbody')
+  if (!tbody) return
+  tbody.innerHTML = rows.map(r => `
+    <tr class="table-row border-b border-gray-50 ${r.is_flagged ? 'bg-yellow-50' : ''}">
+      <td class="px-4 py-2.5">
+        <span class="font-mono text-xs text-blue-600">${r.case_id_short || r.case_id?.substring(0,8)}</span>
+        ${r.is_flagged ? '<i class="fas fa-flag text-yellow-500 ml-1 text-xs"></i>' : ''}
+      </td>
+      <td class="px-4 py-2.5 text-gray-500 text-xs">${r.decision_date ? r.decision_date.substring(0,10) : ''}</td>
+      <td class="px-4 py-2.5 text-gray-700 ${!consultsState.showNames ? 'font-mono tracking-wider text-gray-400' : ''}">${escHtml(csMaskName(r.patient_name))}</td>
+      <td class="px-4 py-2.5 text-gray-500 text-xs max-w-[140px] truncate">${escHtml(r.organization_name || '')}</td>
+      <td class="px-4 py-2.5 text-gray-700 font-medium">${r.doctor_name ? escHtml(r.doctor_name) : '<span class="text-gray-300">—</span>'}</td>
+      <td class="px-4 py-2.5">${visitTypeBadge(r.visit_type, r.carevalidate_fee, r.is_orderly)}</td>
+      <td class="px-4 py-2.5 text-right font-medium text-blue-600">${fmt(r.carevalidate_fee)}</td>
+      <td class="px-4 py-2.5 text-right font-medium text-purple-600">${fmt(r.contractor_fee)}</td>
+      <td class="px-4 py-2.5 text-center"><span class="status-badge badge-approved">${r.decision_status || 'Approved'}</span></td>
+      <td class="px-4 py-2.5 text-center">
+        <div class="flex items-center justify-center gap-2">
+          <button onclick="openEditConsult(${r.id})" class="text-gray-400 hover:text-blue-600 transition-colors p-1 rounded" title="Edit record">
+            <i class="fas fa-pen text-xs"></i>
+          </button>
+          <button onclick="confirmDeleteConsult(${r.id}, '${(r.case_id_short||r.case_id||'').replace(/[^a-zA-Z0-9 .\-]/g,'')}', '${(csMaskName(r.patient_name)||'').replace(/'/g,'')}')" class="text-gray-300 hover:text-red-500 transition-colors p-1 rounded" title="Delete record">
+            <i class="fas fa-trash text-xs"></i>
+          </button>
+        </div>
+      </td>
+    </tr>`).join('') || '<tr><td colspan="10" class="text-center py-8 text-gray-400">No records found</td></tr>'
+
+  // Pagination
+  const totalPages = Math.ceil(total / 50)
+  const pagination = $('pagination')
+  if (pagination) {
+    pagination.innerHTML = `
+      <span class="text-sm text-gray-500">Page ${page} of ${totalPages} · ${fmtNum(total)} total</span>
+      <div class="flex gap-2">
+        <button onclick="loadConsultsPage(${page-1})" ${page <= 1 ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg border text-sm disabled:opacity-40 hover:bg-gray-50">← Prev</button>
+        <button onclick="loadConsultsPage(${page+1})" ${page >= totalPages ? 'disabled' : ''} class="px-3 py-1.5 rounded-lg border text-sm disabled:opacity-40 hover:bg-gray-50">Next →</button>
+      </div>`
+  }
+}
+
+// ── Export Consult Records to Excel ──────────────────────────────────────────
+// fullExport=true  → all records for current period (no filters applied)
+// fullExport=false → current filtered view (same params as what's on screen)
+// Fetches in chunks of 10 000 rows to handle 200k+ record periods.
+async function exportConsultsXlsx(fullExport = false) {
+  if (!state.currentPeriod) { showToast('No period selected', 'warning'); return }
+  const pk = state.currentPeriod.period_key
+  const periodLabel = (state.currentPeriod.period_label || pk).replace(/[/\\:*?"<>|]/g, '-')
+
+  const baseParams = new URLSearchParams({ period_key: pk, sort_by: 'decision_date', sort_dir: 'asc', limit: '10000' })
+  let filenameSuffix = 'All'
+
+  if (!fullExport) {
+    if (consultsState.search)           { baseParams.set('search',          consultsState.search);        filenameSuffix = 'Filtered' }
+    if (consultsState.doctor)           { baseParams.set('doctor_name',     consultsState.doctor);        filenameSuffix = 'Filtered' }
+    if (consultsState.organization)     { baseParams.set('organization',    consultsState.organization);  filenameSuffix = 'Filtered' }
+    const vt = consultsState.visitType
+    if (vt)                             { baseParams.set('visit_type',      vt);                          filenameSuffix = 'Filtered' }
+    if (consultsState.isOrderly !== '') { baseParams.set('is_orderly',      consultsState.isOrderly);     filenameSuffix = 'Filtered' }
+    if (consultsState.isFlagged !== '') { baseParams.set('is_flagged',      consultsState.isFlagged);     filenameSuffix = 'Filtered' }
+    if (consultsState.decisionStatus)   { baseParams.set('decision_status', consultsState.decisionStatus);filenameSuffix = 'Filtered' }
+    if (consultsState.dateFrom)         { baseParams.set('date_from',       consultsState.dateFrom);      filenameSuffix = 'Filtered' }
+    if (consultsState.dateTo)           { baseParams.set('date_to',         consultsState.dateTo);        filenameSuffix = 'Filtered' }
+  }
+
+  // ── Show progress toast and disable buttons ──────────────────────────────
+  const toastId = `export-toast-${Date.now()}`
+  const updateToast = (msg) => showToast(msg, 'info')
+  updateToast('Starting export… fetching page 1')
+
+  const CHUNK = 10000
+  let allRows = []
+  let page = 1
+  let total = null
+
+  try {
+    while (true) {
+      const params = new URLSearchParams(baseParams)
+      params.set('page', String(page))
+      const result = await api('/api/consults/export?' + params)
+      if (total === null) total = result.total
+      allRows = allRows.concat(result.data || [])
+      const fetched = allRows.length
+      updateToast(`Fetching… ${fmtNum(fetched)} / ${fmtNum(total)} rows`)
+      if (result.data.length < CHUNK || fetched >= total) break
+      page++
+    }
+  } catch(e) { showToast('Export failed: ' + e.message, 'error'); return }
+
+  if (!allRows.length) { showToast('No records to export.', 'warning'); return }
+
+  updateToast(`Building Excel file for ${fmtNum(allRows.length)} rows…`)
+
+  // ── Friendly visit type label ───────────────────────────────────────────
+  const vtLabel = {
+    ASYNC_TEXT_EMAIL: 'Async', SYNC_PHONE: 'Sync Phone',
+    SYNC_VIDEO: 'Sync Video', SYNC_IN_PERSON: 'Sync In-Person', NO_SHOW: 'No Show'
+  }
+
+  // ── Build sheet rows ─────────────────────────────────────────────────────
+  const sheetRows = allRows.map(r => ({
+    'Case ID':        r.case_id_short || (r.case_id || '').substring(0, 8),
+    'Date':           r.decision_date ? r.decision_date.substring(0, 10) : '',
+    'Patient':        consultsState.showNames ? (r.patient_name || '') : csMaskName(r.patient_name),
+    'Organization':   r.organization_name || '',
+    'Doctor':         r.doctor_name   || '',
+    'Contractor':     r.contractor_name || '',
+    'Visit Type':     vtLabel[r.visit_type] || r.visit_type || '',
+    'OrderlyMeds':    r.is_orderly ? 'Yes' : 'No',
+    'CV Fee':         r.carevalidate_fee != null ? Number(r.carevalidate_fee) : '',
+    'Contractor Fee': r.contractor_fee  != null ? Number(r.contractor_fee)  : '',
+    'Status':         r.decision_status || '',
+    'Flagged':        r.is_flagged ? 'Yes' : 'No',
+    'Period':         r.period_label || r.period_key || pk,
+    'EIN / SSN':      r.ein_ssn  || '',
+    'Company':        r.company  || '',
+    'Full Case ID':   r.case_id  || '',
+  }))
+
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.json_to_sheet(sheetRows, {
+    header: ['Case ID','Date','Patient','Organization','Doctor','Contractor',
+             'Visit Type','OrderlyMeds','CV Fee','Contractor Fee','Status',
+             'Flagged','Period','EIN / SSN','Company','Full Case ID']
+  })
+
+  // ── Column widths ────────────────────────────────────────────────────────
+  ws['!cols'] = [
+    { wch: 12 }, { wch: 12 }, { wch: 24 }, { wch: 28 }, { wch: 24 }, { wch: 24 },
+    { wch: 16 }, { wch: 12 }, { wch: 10 }, { wch: 14 }, { wch: 10 },
+    { wch: 8  }, { wch: 14 }, { wch: 16 }, { wch: 20 }, { wch: 36 }
+  ]
+
+  // ── Dollar format on CV Fee (col 8) and Contractor Fee (col 9) ──────────
+  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1')
+  for (let R = 1; R <= range.e.r; R++) {
+    const cvCell = ws[XLSX.utils.encode_cell({ r: R, c: 8 })]
+    const ctCell = ws[XLSX.utils.encode_cell({ r: R, c: 9 })]
+    if (cvCell && cvCell.t === 'n') cvCell.z = '"$"#,##0.00'
+    if (ctCell && ctCell.t === 'n') ctCell.z = '"$"#,##0.00'
+  }
+
+  const date = new Date().toISOString().slice(0, 10)
+  const sheetName = `${periodLabel} ${filenameSuffix}`.substring(0, 31)
+  XLSX.utils.book_append_sheet(wb, ws, sheetName)
+  XLSX.writeFile(wb, `LionMD_Consults_${periodLabel}_${filenameSuffix}_${date}.xlsx`)
+  showToast(`✅ Exported ${fmtNum(allRows.length)} records to Excel`, 'success')
+}
+
+// ════════════════════════════════════════════════════
+// PAYROLL PAGE
+// ════════════════════════════════════════════════════
+function renderPayroll() {
+  if (!state.currentPeriod || !state.currentSummary) { $('mainContent').innerHTML = noDataMsg(); return }
+  const s = state.currentSummary
+  const pk = state.currentPeriod.period_key
+  const chrisInfo = state.contractors.find(c => {
+    const n = (c.name || '').toLowerCase()
+    return n.includes('garcia') && n.includes('chris')
+  })
+
+  $('mainContent').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex justify-between items-center">
+        <p class="text-sm text-gray-500">Payroll for <strong>${state.currentPeriod.period_label}</strong> — click any contractor to view/export paystub</p>
+        <div class="flex gap-3">
+          <button onclick="recalculatePeriods('${escHtml(pk)}')" class="px-4 py-2.5 rounded-xl font-medium text-sm border border-gray-200 hover:bg-gray-50 text-gray-600">
+            <i class="fas fa-sync-alt mr-2"></i>Recalculate Period
+          </button>
+          <button onclick="exportGusto()" class="btn-primary px-5 py-2.5 rounded-xl font-medium text-sm">
+            <i class="fas fa-file-csv mr-2"></i>Export All to Gusto CSV
+          </button>
+        </div>
+      </div>
+
+      <!-- Chris Garcia Commission Card -->
+      <div class="card border-2 border-blue-200 bg-gradient-to-br from-blue-50 to-white p-5">
+        <div class="flex items-start justify-between mb-4">
+          <div class="flex items-center gap-3">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center bg-blue-500 shrink-0">
+              <i class="fas fa-percent text-white text-sm"></i>
+            </div>
+            <div>
+              <div class="font-bold text-gray-800">${chrisInfo ? chrisInfo.name : 'Christopher Garcia'}</div>
+              <div class="text-xs text-gray-400 flex items-center gap-1 mt-0.5">Mgmt Fee Earner · ${contractorTypeBadge('chris_garcia')}</div>
+              <p class="text-xs text-blue-600 mt-1">25% of (CV Pays Us − We Pay − Ringside CV) · Ringside Health CV fees deducted from Ana Lisa Carr's net</p>
+            </div>
+          </div>
+          <button onclick="${chrisInfo ? `openPaystubModal('${escHtml(pk)}', ${chrisInfo.id}, '${escHtml(chrisInfo.name || 'Christopher Garcia')}')` : "showToast('No Chris Garcia contractor found','error')"}"
+            class="px-4 py-2 bg-blue-500 text-white text-xs font-semibold rounded-xl hover:bg-blue-600 transition-colors whitespace-nowrap shrink-0 ml-3">
+            <i class="fas fa-file-invoice-dollar mr-1.5"></i>Payment Statement
+          </button>
+        </div>
+        <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+          <div class="bg-white rounded-xl p-3 text-center border border-blue-100 col-span-2 md:col-span-1">
+            <div class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-1">Total Mgmt Fee</div>
+            <div class="text-2xl font-bold text-blue-600" id="chrisTotal"><span class="spinner inline-block w-5 h-5"></span></div>
+            <div class="text-xs text-gray-400 mt-1">25% of net</div>
+          </div>
+          <div class="bg-white rounded-xl p-3 text-center border border-blue-100">
+            <div class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-1">Total CV</div>
+            <div class="font-bold text-blue-600" id="chrisTotalCV">—</div>
+            <div class="text-xs text-gray-400 mt-1">CV pays us</div>
+          </div>
+          <div class="bg-white rounded-xl p-3 text-center border border-purple-100">
+            <div class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-1">We Pay Out</div>
+            <div class="font-bold text-purple-600" id="chrisTotalPay">—</div>
+            <div class="text-xs text-gray-400 mt-1">to contractors</div>
+          </div>
+          <div class="bg-white rounded-xl p-3 text-center border border-amber-100">
+            <div class="text-xs text-gray-400 font-semibold uppercase tracking-wider mb-1">Ringside Deduction</div>
+            <div class="font-bold text-amber-600" id="chrisRingside">—</div>
+            <div class="text-xs text-gray-400 mt-1" id="chrisRingsideCount">0 consults × $20</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Contractor Cards -->
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+        ${(s.byDoctor || []).filter(d => {
+          if (!d.contractor_id) return false
+          const ct = state.contractors.find(c=>c.id===d.contractor_id)
+          return ct?.contractor_type !== 'chris_garcia' && !((ct?.name||'').toLowerCase().includes('garcia') && (ct?.name||'').toLowerCase().includes('chris'))
+        }).map(d => {
+          const cInfo = state.contractors.find(c=>c.id===d.contractor_id)
+          const cType = cInfo?.contractor_type || 'regular'
+          const isOwner = cType === 'owner'
+          return `
+          <div class="card p-5 hover:shadow-md transition-all cursor-pointer" onclick="openPaystubModal('${escHtml(pk)}', ${d.contractor_id}, '${escHtml(d.doctor_name)}')">
+            <div class="flex items-start justify-between mb-3">
+              <div>
+                <div class="font-semibold text-gray-800">${escHtml(d.doctor_name)}</div>
+                <div class="text-xs text-gray-400 flex items-center gap-2 mt-0.5">
+                  ${escHtml(d.company || 'Lion MD')}
+                  ${contractorTypeBadge(cType)}
+                  ${d.ein_ssn ? '· ' + d.ein_ssn : ''}
+                </div>
+              </div>
+              <div class="w-10 h-10 rounded-xl flex items-center justify-center" style="background:${isOwner ? 'rgba(245,158,11,0.1)' : 'rgba(139,92,246,0.1)'}">
+                <i class="fas fa-user-md ${isOwner ? 'text-amber-500' : 'text-purple-500'}"></i>
+              </div>
+            </div>
+            <div class="grid grid-cols-2 gap-3 mb-3">
+              <div class="bg-gray-50 rounded-lg p-2 text-center">
+                <div class="font-bold text-gray-700">${fmtNum(d.case_count)}</div>
+                <div class="text-xs text-gray-400">Cases</div>
+              </div>
+              <div class="${isOwner ? 'bg-amber-50' : 'bg-purple-50'} rounded-lg p-2 text-center">
+                ${isOwner
+                  ? '<div class="font-semibold text-amber-500 text-xs">Not Paid Out</div><div class="text-xs text-amber-400">Owner</div>'
+                  : '<div class="font-bold text-purple-600">' + fmt(d.total_contractor) + '</div><div class="text-xs text-gray-400">Total Pay</div>'}
+              </div>
+            </div>
+            <div class="flex gap-2 text-xs mb-3 flex-wrap">
+              ${d.async_count > 0 ? '<span class="status-badge badge-async cursor-pointer hover:opacity-75 transition-opacity" onclick="event.stopPropagation(); drillDownConsults({doctor: \'' + escHtml(d.doctor_name) + '\', visitType: \'ASYNC_TEXT_EMAIL\', isOrderly: \'0\'})" title="Drill into these Async consults">' + fmtNum(d.async_count) + ' Async</span>' : ''}
+              ${d.sync_count > 0 ? '<span class="status-badge badge-sync cursor-pointer hover:opacity-75 transition-opacity" onclick="event.stopPropagation(); drillDownConsults({doctor: \'' + escHtml(d.doctor_name) + '\', visitType: \'_SYNC\', isOrderly: \'0\'})" title="Drill into these Sync consults">' + fmtNum(d.sync_count) + ' Sync</span>' : ''}
+              ${d.orderly_count > 0 ? '<span class="status-badge badge-orderly cursor-pointer hover:opacity-75 transition-opacity" onclick="event.stopPropagation(); drillDownConsults({doctor: \'' + escHtml(d.doctor_name) + '\', isOrderly: \'1\'})" title="Drill into these OrderlyMeds consults">' + fmtNum(d.orderly_count) + ' Orderly</span>' : ''}
+              ${d.no_show_count > 0 ? '<span class="status-badge badge-default cursor-pointer hover:opacity-75 transition-opacity" onclick="event.stopPropagation(); drillDownConsults({doctor: \'' + escHtml(d.doctor_name) + '\', visitType: \'NO_SHOW\'})" title="Drill into No Show consults">' + fmtNum(d.no_show_count) + ' No Show</span>' : ''}
+              ${d.other_count > 0 ? '<span class="status-badge badge-default cursor-pointer hover:opacity-75 transition-opacity" onclick="event.stopPropagation(); drillDownConsults({doctor: \'' + escHtml(d.doctor_name) + '\', visitType: \'_OTHER\'})" title="Drill into other consults">' + fmtNum(d.other_count) + ' Other</span>' : ''}
+            </div>
+            <div class="pt-3 border-t border-gray-100">
+              <button onclick="event.stopPropagation(); openPaystubModal('${escHtml(pk)}', ${d.contractor_id}, '${escHtml(d.doctor_name)}')"
+                class="w-full text-xs py-2 btn-outline rounded-lg font-medium">
+                <i class="fas fa-file-pdf mr-1"></i>${isOwner ? 'Activity Summary' : 'Paystub'}
+              </button>
+            </div>
+          </div>`
+        }).join('')}
+      </div>
+
+      ${(s.byDoctor || []).filter(d => !d.contractor_id).length > 0 ? `
+        <div class="card p-4" id="unmatchedCard">
+          <div class="flex items-start justify-between mb-3">
+            <div>
+              <h4 class="text-sm font-semibold text-yellow-700 flex items-center gap-2">
+                <i class="fas fa-exclamation-triangle text-yellow-500"></i>
+                Unmatched Doctors (${(s.byDoctor || []).filter(d => !d.contractor_id).length})
+              </h4>
+              <p class="text-xs text-gray-400 mt-0.5">Match to an existing contractor or add as new — fees recalculate automatically.</p>
+            </div>
+          </div>
+          <div class="space-y-2">
+            ${(s.byDoctor || []).filter(d => !d.contractor_id).map((d, i) => `
+              <div class="flex flex-col sm:flex-row sm:items-center gap-2 p-3 bg-yellow-50 border border-yellow-200 rounded-xl" id="unmatchedRow_${i}">
+                <div class="flex-1 min-w-0">
+                  <span class="font-semibold text-yellow-900 text-sm">${escHtml(d.doctor_name)}</span>
+                  <span class="text-yellow-600 text-xs ml-2">${fmtNum(d.case_count)} cases &middot; ${fmt(d.total_contractor)}</span>
+                </div>
+                <div class="flex items-center gap-2 flex-shrink-0 flex-wrap">
+                  <select id="matchSel_${i}" class="text-xs border border-gray-200 rounded-lg px-2 py-1.5 bg-white" style="min-width:180px">
+                    <option value="">— match to existing —</option>
+                    ${(state.contractors || []).slice().sort((a,b)=>(a.name||'').localeCompare(b.name||'')).map(c =>
+                      `<option value="${c.id}">${escHtml(c.name)}</option>`
+                    ).join('')}
+                  </select>
+                  <button onclick="unmatchedDoMatch('${(d.doctor_name||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")}', ${i}, '${escHtml(pk)}')"
+                    class="text-xs px-3 py-1.5 rounded-lg bg-blue-600 text-white hover:bg-blue-700 font-semibold whitespace-nowrap">
+                    <i class="fas fa-link mr-1"></i>Match
+                  </button>
+                  <button onclick="unmatchedDoQuickAdd('${(d.doctor_name||'').replace(/\\/g,'\\\\').replace(/'/g,"\\'")}', ${i}, '${escHtml(pk)}')"
+                    class="text-xs px-3 py-1.5 rounded-lg bg-green-600 text-white hover:bg-green-700 font-semibold whitespace-nowrap">
+                    <i class="fas fa-user-plus mr-1"></i>Add New
+                  </button>
+                </div>
+              </div>`).join('')}
+          </div>
+        </div>` : ''}
+    </div>
+    ${paystubModalHtml()}`
+
+  // Async-load commission figures into the Chris card
+  api(`/api/commission/${pk}`).then(comm => {
+    const set = (id, val) => { const el = $(id); if (el) el.textContent = val }
+    set('chrisTotal',          fmt(comm.commission_total))
+    set('chrisTotalCV',        fmt(comm.total_cv))
+    set('chrisTotalPay',       fmt(comm.total_contractor))
+    set('chrisRingside',       fmt(comm.ringside_deduction))
+    set('chrisRingsideCount',  `${comm.ringside_count || 0} Ringside consults`)
+  }).catch(() => { const el = $('chrisTotal'); if (el) el.textContent = 'Error' })
+}
+
+// ════════════════════════════════════════════════════
+// EDIT CONSULT MODAL
+// ════════════════════════════════════════════════════
+let editConsultData = null
+
+async function openEditConsult(id) {
+  // Fetch the single consult row from current page data first, fallback to API
+  editConsultData = consultsState.data.find(r => r.id === id) || null
+  if (!editConsultData) {
+    try { editConsultData = await api(`/api/consults/${id}`) } catch(e) {}
+  }
+  if (!editConsultData) return showToast('Could not load record', 'error')
+
+  const r = editConsultData
+  const doctorOptions = state.contractors.map(c =>
+    `<option value="${c.name}" ${c.name === r.doctor_name ? 'selected' : ''}>${c.name}</option>`
+  ).join('')
+
+  const html = `
+  <div id="editConsultModal" class="fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] overflow-auto">
+      <div class="flex items-center justify-between p-5 border-b sticky top-0 bg-white rounded-t-2xl z-10">
+        <div>
+          <h3 class="text-lg font-bold text-gray-800">Edit Consult Record</h3>
+          <p class="text-xs text-gray-400 mt-0.5 font-mono">${r.case_id_short || r.case_id?.substring(0,12) || 'ID: ' + id}</p>
+        </div>
+        <button onclick="closeEditConsult()" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+      <div class="p-5 space-y-4">
+
+        <!-- Row 1: Doctor + Visit Type -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Doctor</label>
+            <select id="ec_doctor" class="w-full">
+              <option value="">— Unassigned —</option>
+              ${doctorOptions}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Visit Type</label>
+            <select id="ec_visit_type" class="w-full" onchange="onEditVisitTypeChange()">
+              <option value="ASYNC_TEXT_EMAIL" ${r.visit_type==='ASYNC_TEXT_EMAIL'?'selected':''}>Async (Text/Email)</option>
+              <option value="SYNC_PHONE" ${r.visit_type==='SYNC_PHONE'?'selected':''}>Sync Phone</option>
+              <option value="SYNC_VIDEO" ${r.visit_type==='SYNC_VIDEO'?'selected':''}>Sync Video</option>
+              <option value="SYNC_IN_PERSON" ${r.visit_type==='SYNC_IN_PERSON'?'selected':''}>Sync In-Person</option>
+              <option value="NO_SHOW" ${r.visit_type==='NO_SHOW'?'selected':''}>No Show</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Row 2: Patient + Organization -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Patient Name</label>
+            <input id="ec_patient" type="text" class="w-full" value="${escHtml(r.patient_name||'')}"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Organization</label>
+            <input id="ec_org" type="text" class="w-full" value="${escHtml(r.organization_name||'')}" oninput="onEditOrgChange()"/>
+          </div>
+        </div>
+
+        <!-- Row 3: Date + Status -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Decision Date</label>
+            <input id="ec_date" type="date" class="w-full" value="${r.decision_date ? r.decision_date.substring(0,10) : ''}"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Decision Status</label>
+            <select id="ec_status" class="w-full">
+              <option value="Approved" ${(r.decision_status||'Approved')==='Approved'?'selected':''}>Approved</option>
+              <option value="Denied" ${r.decision_status==='Denied'?'selected':''}>Denied</option>
+              <option value="Pending" ${r.decision_status==='Pending'?'selected':''}>Pending</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- Row 4: CV Fee + CT Fee -->
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">CareValidate Fee ($)</label>
+            <input id="ec_cv_fee" type="number" step="0.01" min="0" class="w-full font-mono" value="${r.carevalidate_fee ?? 0}"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-500 mb-1">Contractor Fee ($)</label>
+            <input id="ec_ct_fee" type="number" step="0.01" min="0" class="w-full font-mono" value="${r.contractor_fee ?? 0}"/>
+          </div>
+        </div>
+
+        <!-- Row 5: Flags -->
+        <div class="grid grid-cols-2 gap-4">
+          <div class="flex items-center gap-3 bg-purple-50 rounded-lg px-3 py-2.5">
+            <input id="ec_orderly" type="checkbox" class="w-4 h-4 accent-purple-600" ${r.is_orderly ? 'checked' : ''} onchange="onEditOrderlyChange()"/>
+            <label for="ec_orderly" class="text-sm font-medium text-purple-700 cursor-pointer">OrderlyMeds (CV always $17)</label>
+          </div>
+          <div class="flex items-center gap-3 bg-yellow-50 rounded-lg px-3 py-2.5">
+            <input id="ec_flagged" type="checkbox" class="w-4 h-4 accent-yellow-500" ${r.is_flagged ? 'checked' : ''}/>
+            <label for="ec_flagged" class="text-sm font-medium text-yellow-700 cursor-pointer">Flagged for Review</label>
+          </div>
+        </div>
+
+        <!-- Row 6: Notes -->
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 mb-1">Notes</label>
+          <textarea id="ec_notes" rows="2" class="w-full rounded-lg border border-gray-200 px-3 py-2 text-sm resize-none focus:outline-none focus:ring-2 focus:ring-blue-400" placeholder="Optional notes...">${escHtml(r.notes||'')}</textarea>
+        </div>
+
+        <!-- Orderly info banner shown when orderly is checked -->
+        <div id="ec_orderly_banner" class="${r.is_orderly ? '' : 'hidden'} bg-purple-50 border border-purple-200 rounded-lg px-3 py-2 text-xs text-purple-700">
+          <i class="fas fa-info-circle mr-1"></i>
+          <strong>OrderlyMeds:</strong> CV is always <strong>$17</strong>, Contractor fee is always <strong>$10</strong> regardless of visit type.
+        </div>
+
+        <!-- Preset buttons for quick fee assignment -->
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-xs font-semibold text-gray-400 mb-2">Quick Fee Presets</p>
+          <div class="flex flex-wrap gap-2">
+            <button onclick="applyFeePreset(20,10,'ASYNC_TEXT_EMAIL',false)" class="px-3 py-1 rounded-lg bg-blue-100 text-blue-700 text-xs font-semibold hover:bg-blue-200">Async $20/$10</button>
+            <button onclick="applyFeePreset(17,10,'ASYNC_TEXT_EMAIL',true)" class="px-3 py-1 rounded-lg bg-purple-100 text-purple-700 text-xs font-semibold hover:bg-purple-200">Orderly Async $17/$10</button>
+            <button onclick="applyFeePreset(17,10,'SYNC_PHONE',true)" class="px-3 py-1 rounded-lg bg-purple-100 text-purple-700 text-xs font-semibold hover:bg-purple-200">Orderly Sync $17/$10</button>
+            <button onclick="applyFeePreset(50,30,null,false)" class="px-3 py-1 rounded-lg bg-green-100 text-green-700 text-xs font-semibold hover:bg-green-200">Sync $50/$30</button>
+            <button onclick="applyFeePreset(0,0,null,false)" class="px-3 py-1 rounded-lg bg-gray-200 text-gray-600 text-xs font-semibold hover:bg-gray-300">No Show $0/$0</button>
+          </div>
+        </div>
+
+      </div>
+      <div class="flex justify-end gap-3 px-5 py-4 border-t bg-gray-50 rounded-b-2xl sticky bottom-0">
+        <button onclick="closeEditConsult()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-100">Cancel</button>
+        <button onclick="saveEditConsult(${id})" class="btn-primary px-5 py-2 text-sm font-semibold">
+          <i class="fas fa-save mr-1.5"></i>Save Changes
+        </button>
+      </div>
+    </div>
+  </div>`
+
+  document.body.insertAdjacentHTML('beforeend', html)
+}
+
+function closeEditConsult() {
+  document.getElementById('editConsultModal')?.remove()
+  editConsultData = null
+}
+
+function applyFeePreset(cv, ct, vt, orderly) {
+  const cvEl = document.getElementById('ec_cv_fee')
+  const ctEl = document.getElementById('ec_ct_fee')
+  const vtEl = document.getElementById('ec_visit_type')
+  const orEl = document.getElementById('ec_orderly')
+  const banner = document.getElementById('ec_orderly_banner')
+  if (cvEl) cvEl.value = cv
+  if (ctEl) ctEl.value = ct
+  if (vt && vtEl) vtEl.value = vt
+  if (orEl) orEl.checked = orderly
+  if (banner) banner.classList.toggle('hidden', !orderly)
+}
+
+function onEditVisitTypeChange() {
+  const vt = document.getElementById('ec_visit_type')?.value
+  const orderly = document.getElementById('ec_orderly')?.checked
+  if (orderly) {
+    // OrderlyMeds: CV always $17, CT depends on visit type
+    applyOrderlyFees(vt)
+  } else {
+    const rates = state.rates || []
+    const rate = rates.find(r => r.visit_type === vt)
+    if (rate) {
+      const cvEl = document.getElementById('ec_cv_fee')
+      const ctEl = document.getElementById('ec_ct_fee')
+      if (cvEl) cvEl.value = rate.carevalidate_rate
+      if (ctEl) ctEl.value = rate.contractor_rate
+    }
+  }
+}
+
+function applyOrderlyFees(vt) {
+  const cvEl = document.getElementById('ec_cv_fee')
+  const ctEl = document.getElementById('ec_ct_fee')
+  if (cvEl) cvEl.value = 17  // CV always $17 for OrderlyMeds
+  if (ctEl) ctEl.value = 10  // CT always $10 for OrderlyMeds regardless of visit type
+}
+
+function onEditOrgChange() {
+  const org = document.getElementById('ec_org')?.value || ''
+  const orEl = document.getElementById('ec_orderly')
+  const banner = document.getElementById('ec_orderly_banner')
+  if (org.toLowerCase().includes('orderly')) {
+    if (orEl) orEl.checked = true
+    if (banner) banner.classList.remove('hidden')
+    const vt = document.getElementById('ec_visit_type')?.value
+    applyOrderlyFees(vt)
+  } else {
+    // Don't uncheck automatically — user may have set it manually
+  }
+}
+
+function onEditOrderlyChange() {
+  const orderly = document.getElementById('ec_orderly')?.checked
+  const banner = document.getElementById('ec_orderly_banner')
+  if (banner) banner.classList.toggle('hidden', !orderly)
+  const vt = document.getElementById('ec_visit_type')?.value
+  if (orderly) {
+    applyOrderlyFees(vt)
+  } else {
+    onEditVisitTypeChange()
+  }
+}
+
+async function saveEditConsult(id) {
+  const payload = {
+    doctor_name:       document.getElementById('ec_doctor')?.value || null,
+    patient_name:      document.getElementById('ec_patient')?.value || null,
+    organization_name: document.getElementById('ec_org')?.value || null,
+    visit_type:        document.getElementById('ec_visit_type')?.value || null,
+    decision_date:     document.getElementById('ec_date')?.value || null,
+    decision_status:   document.getElementById('ec_status')?.value || 'Approved',
+    carevalidate_fee:  parseFloat(document.getElementById('ec_cv_fee')?.value) || 0,
+    contractor_fee:    parseFloat(document.getElementById('ec_ct_fee')?.value) || 0,
+    is_orderly:        document.getElementById('ec_orderly')?.checked ? 1 : 0,
+    is_flagged:        document.getElementById('ec_flagged')?.checked ? 1 : 0,
+    notes:             document.getElementById('ec_notes')?.value || null,
+    is_override:       1
+  }
+
+  try {
+    await api(`/api/consults/${id}`, { method: 'PUT', body: JSON.stringify(payload) })
+    closeEditConsult()
+    showToast('Record updated successfully', 'success')
+    // Reload consults table and refresh all stale data
+    await loadConsultsPage(consultsState.page)
+    await refreshAfterConsultUpdate()
+  } catch(e) {
+    showToast('Error saving: ' + e.message, 'error')
+  }
+}
+
+// ════════════════════════════════════════════════════
+// DELETE CONSULT
+// ════════════════════════════════════════════════════
+function confirmDeleteConsult(id, caseId, patientName) {
+  // Remove any existing modal
+  document.getElementById('deleteConsultModal')?.remove()
+
+  const label = [caseId, patientName].filter(Boolean).join(' · ') || 'this record'
+  const html = `
+  <div id="deleteConsultModal" class="fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="p-6">
+        <div class="flex items-center gap-4 mb-4">
+          <div class="w-12 h-12 rounded-xl bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-trash text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-lg font-bold text-gray-800">Delete Record?</h3>
+            <p class="text-sm text-gray-500 mt-0.5">This cannot be undone.</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-100 rounded-xl px-4 py-3 mb-5">
+          <p class="text-sm text-red-700 font-medium break-all">${escHtml(label)}</p>
+        </div>
+        <div class="flex justify-end gap-3">
+          <button onclick="document.getElementById('deleteConsultModal').remove()" class="px-4 py-2 rounded-lg border border-gray-200 text-sm text-gray-600 hover:bg-gray-100">Cancel</button>
+          <button onclick="executeDeleteConsult(${id})" class="px-5 py-2 rounded-lg bg-red-500 hover:bg-red-600 text-white text-sm font-semibold transition-colors">
+            <i class="fas fa-trash mr-1.5"></i>Delete
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>`
+  document.body.insertAdjacentHTML('beforeend', html)
+}
+
+async function executeDeleteConsult(id) {
+  document.getElementById('deleteConsultModal')?.remove()
+  try {
+    await api(`/api/consults/${id}`, { method: 'DELETE' })
+    showToast('Record deleted', 'success')
+    // If we just deleted the last item on a page > 1, go back one page
+    const newTotal = (consultsState.total || 1) - 1
+    const maxPage = Math.max(1, Math.ceil(newTotal / 50))
+    const targetPage = Math.min(consultsState.page, maxPage)
+    await loadConsultsPage(targetPage)
+    await refreshAfterConsultUpdate()
+  } catch(e) {
+    showToast('Error deleting: ' + e.message, 'error')
+  }
+}
+
+
+async function refreshAfterConsultUpdate() {
+  if (!state.currentPeriod) return
+  const pk = state.currentPeriod.period_key
+
+  // 1. Always refresh the in-memory summary
+  state.currentSummary = await api(`/api/summary/period/${pk}`)
+
+  // 2. If the dashboard is visible, re-render it silently in place
+  if (state.currentPage === 'dashboard') {
+    renderDashboard()
+  }
+
+  // 3. If the payroll page is visible, re-render it too
+  if (state.currentPage === 'payroll') {
+    renderPayroll()
+  }
+
+  // 4. If a paystub modal is open with data, refresh it
+  const modal = $('paystubModal')
+  if (modal && !modal.classList.contains('hidden') && currentPaystubData) {
+    const { session, contractor } = currentPaystubData
+    const periodKey = session?.period_key || pk
+    const contractorId = contractor?.id
+    if (contractorId) {
+      try {
+        currentPaystubData = await api(`/api/paystub/period/${periodKey}/${contractorId}`)
+        renderPaystubContent(currentPaystubData)
+      } catch(_) {}
+    }
+  }
+}
+
+// ════════════════════════════════════════════════════
+// PAYSTUB MODAL
+// ════════════════════════════════════════════════════
+function paystubModalHtml() {
+  return `
+  <div id="paystubModal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-auto">
+      <div class="flex items-center justify-between p-6 border-b sticky top-0 bg-white rounded-t-2xl z-10">
+        <div>
+          <h2 class="text-xl font-bold text-gray-800" id="paystubDoctorName">Paystub</h2>
+          <p class="text-sm text-gray-500" id="paystubPeriod"></p>
+        </div>
+        <div class="flex gap-3">
+          <button onclick="regeneratePaystub()" class="px-4 py-2.5 rounded-xl font-medium text-sm border border-gray-200 hover:bg-gray-50 text-gray-600">
+            <i class="fas fa-sync-alt mr-2"></i>Regenerate
+          </button>
+          <button onclick="downloadPaystub()" class="btn-primary px-5 py-2.5 rounded-xl font-medium text-sm">
+            <i class="fas fa-file-pdf mr-2"></i>Download PDF
+          </button>
+          <button onclick="$('paystubModal').classList.add('hidden')" class="px-4 py-2 text-gray-500 hover:bg-gray-100 rounded-xl">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+      </div>
+      <div id="paystubContent" class="p-6">
+        <div class="flex justify-center py-10"><div class="spinner"></div></div>
+      </div>
+    </div>
+  </div>`
+}
+
+  let currentPaystubData = null
+  let currentPaystubMeta = { periodKey: null, contractorId: null, doctorName: null }
+
+async function openPaystubModal(sessionId, contractorId, doctorName) {
+  // Ensure modal exists in DOM (dashboard doesn't render payroll page first)
+  if (!$('paystubModal')) {
+    const div = document.createElement('div')
+    div.innerHTML = paystubModalHtml()
+    document.body.appendChild(div.firstElementChild)
+  }
+  currentPaystubMeta = { periodKey: sessionId, contractorId, doctorName }
+  $('paystubModal').classList.remove('hidden')
+  $('paystubDoctorName').textContent = doctorName
+  $('paystubPeriod').textContent = state.currentPeriod?.period_label || ''
+  $('paystubContent').innerHTML = '<div class="flex justify-center py-10"><div class="spinner"></div></div>'
+  try {
+    currentPaystubData = await api(`/api/paystub/period/${sessionId}/${contractorId}`)
+    renderPaystubContent(currentPaystubData)
+  } catch(e) {
+    $('paystubContent').innerHTML = `<p class="text-red-500 text-center py-8">${e.message}</p>`
+  }
+}
+
+async function regeneratePaystub() {
+  const { periodKey, contractorId, doctorName } = currentPaystubMeta
+  if (!periodKey || !contractorId) return
+  // Run recalculate for this period only, then reload paystub
+  showToast('Recalculating fees...', 'info')
+  try {
+    await api('/api/recalculate', { method: 'POST', body: JSON.stringify({ period_key: periodKey }) })
+    currentPaystubData = await api(`/api/paystub/period/${periodKey}/${contractorId}`)
+    renderPaystubContent(currentPaystubData)
+    // Refresh summary
+    state.currentSummary = await api(`/api/summary/period/${periodKey}`)
+    state.periods = await api('/api/sessions')
+    populateSessionSelector()
+    showToast('Paystub regenerated with current rates!', 'success')
+  } catch(e) {
+    showToast('Error regenerating: ' + e.message, 'error')
+  }
+}
+
+function renderPaystubContent(data) {
+  const { contractor, session, summary, consults, commission } = data
+
+  // ── Christopher Garcia: show commission statement instead of normal paystub ──
+  const cname2 = (contractor?.name || '').toLowerCase()
+  if (commission && cname2.includes('garcia') && cname2.includes('chris')) {
+    const comm = commission
+    const fmt2 = n => '$' + (n||0).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2})
+    const pct  = n => (n*100).toLocaleString('en-US', {minimumFractionDigits:4, maximumFractionDigits:4}) + '%'
+    $('paystubContent').innerHTML = `
+    <div id="paystubPrintArea">
+      <!-- Header -->
+      <div class="flex justify-between items-start mb-6 pb-6 border-b">
+        <div>
+          <div class="text-2xl font-bold text-gray-800 mb-1">
+            <span style="color:var(--lion-gold)">LION</span> MD
+          </div>
+          <div class="text-sm text-gray-500">Payment Statement — Independent Contractor</div>
+        </div>
+        <div class="text-right">
+          <div class="font-bold text-gray-700">${session?.period_label || ''}</div>
+          <div class="text-xs text-gray-400">Issued: ${new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })}</div>
+        </div>
+      </div>
+
+      <!-- Contractor + Commission Total -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div class="bg-gray-50 rounded-xl p-4">
+          <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Contractor</div>
+          <div class="font-bold text-gray-800 text-lg">${escHtml(contractor.name || '')}</div>
+          <div class="text-sm text-gray-600">${escHtml(contractor.company || 'Lion MD')}</div>
+          ${contractor.ein_ssn ? `<div class="text-sm text-gray-500 mt-1">EIN/SSN: ${contractor.ein_ssn}</div>` : ''}
+          ${contractor.email   ? `<div class="text-xs text-gray-400">${escHtml(contractor.email)}</div>` : ''}
+        </div>
+        <div class="bg-blue-50 rounded-xl p-4">
+          <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Total Mgmt Fee</div>
+          <div class="text-3xl font-bold text-blue-600 mb-1">${fmt2(comm.commission_total)}</div>
+          <div class="text-xs text-gray-500">25% × (CV Pays Us − We Pay Contractors − Ringside CV) per contractor</div>
+        </div>
+      </div>
+
+      <!-- Commission Formula Breakdown -->
+      <div class="mb-6">
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Mgmt Fee Calculation</div>
+        <div class="bg-gray-50 rounded-xl p-4 space-y-2 text-sm">
+          <div class="flex justify-between">
+            <span class="text-gray-500">Total CV Pays Us</span>
+            <span class="font-semibold text-blue-600">+ ${fmt2(comm.total_cv)}</span>
+          </div>
+          <div class="flex justify-between">
+            <span class="text-gray-500">Total We Pay Contractors</span>
+            <span class="font-semibold text-purple-600">− ${fmt2(comm.total_contractor)}</span>
+          </div>
+          ${(comm.ringside_deduction || 0) > 0 ? `
+          <div class="flex justify-between">
+            <span class="text-gray-500">Ringside Health CV fees (Ana Lisa Carr — ${comm.ringside_count} consults)</span>
+            <span class="font-semibold text-amber-600">− ${fmt2(comm.ringside_deduction)}</span>
+          </div>` : ''}
+          <div class="flex justify-between border-t border-gray-200 pt-2">
+            <span class="text-gray-600 font-medium">Net base (before 25%)</span>
+            <span class="font-bold text-gray-800">${fmt2(comm.net_base - (comm.ringside_deduction || 0))}</span>
+          </div>
+          <div class="flex justify-between text-xs text-gray-500 italic">
+            <span>× 25%</span>
+            <span></span>
+          </div>
+          <div class="flex justify-between bg-blue-50 rounded-lg px-3 py-2 border border-blue-100">
+            <span class="text-blue-700 font-semibold">Total Mgmt Fee</span>
+            <span class="font-bold text-blue-700">${fmt2(comm.commission_total)}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Per-Contractor Detail -->
+      <div>
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Per-Contractor Detail</div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold rounded-l-xl">Contractor</th>
+                <th class="text-center px-3 py-2 text-gray-500 font-semibold">Type</th>
+                <th class="text-right px-3 py-2 text-gray-500 font-semibold">CV Pays Us</th>
+                <th class="text-right px-3 py-2 text-gray-500 font-semibold">We Pay</th>
+                <th class="text-right px-3 py-2 text-gray-500 font-semibold">Formula</th>
+                <th class="text-right px-3 py-2 text-gray-500 font-semibold rounded-r-xl">Mgmt Fee</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(comm.by_contractor || []).map(row => {
+                const cv  = row.cv_total        || 0
+                const pay = row.contractor_total || 0
+                const net = cv - pay
+                const rd  = row.ringside_deduction || 0
+                // Build formula cell
+                let formulaHtml
+                if (rd > 0) {
+                  // Ana Lisa: show Ringside CV subtracted from net before ×25%
+                  formulaHtml = `
+                    <div class="text-xs text-gray-500">(${fmt2(cv)} &minus; ${fmt2(pay)} &minus; ${fmt2(rd)}) &times; 25%</div>
+                    <div class="text-xs text-amber-600">Ringside CV deducted from net first</div>`
+                } else {
+                  formulaHtml = `<div class="text-xs text-gray-500">(${fmt2(cv)} &minus; ${fmt2(pay)}) &times; 25%</div>`
+                }
+                return `<tr class="border-b border-gray-50 hover:bg-gray-50">
+                  <td class="px-3 py-2 font-medium text-gray-700">${escHtml(row.contractor_name)}</td>
+                  <td class="px-3 py-2 text-center">${contractorTypeBadge(row.contractor_type)}</td>
+                  <td class="px-3 py-2 text-right text-blue-600">${fmt2(cv)}</td>
+                  <td class="px-3 py-2 text-right text-purple-600">${fmt2(pay)}</td>
+                  <td class="px-3 py-2 text-right text-gray-600 leading-snug">${formulaHtml}</td>
+                  <td class="px-3 py-2 text-right font-bold text-blue-600">${fmt2(row.commission)}</td>
+                </tr>`
+              }).join('')}
+            </tbody>
+            <tfoot>
+              <tr class="bg-blue-50 font-bold">
+                <td class="px-3 py-2 text-gray-700" colspan="5">Total Mgmt Fee</td>
+                <td class="px-3 py-2 text-right text-blue-700 text-sm">${fmt2(comm.commission_total)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      <div class="mt-6 pt-4 border-t text-xs text-gray-400 text-center">
+        Mgmt Fee = 25% × (CV Pays Us − We Pay Contractor) for every contractor.
+        Ana Lisa Carr only: Ringside Health CV fees are subtracted from her net BEFORE applying the 25% rate.
+        Period: ${session?.period_label || ''}.
+      </div>
+    </div>`
+    return
+  }
+  const c = contractor || {}
+  const sum = summary || {}
+  $('paystubContent').innerHTML = `
+    <div id="paystubPrintArea">
+      <!-- Header -->
+      <div class="flex justify-between items-start mb-6 pb-6 border-b">
+        <div>
+          <div class="text-2xl font-bold text-gray-800 mb-1">
+            <span style="color:var(--lion-gold)">LION</span> MD
+          </div>
+          <div class="text-sm text-gray-500">Independent Contractor Payment Statement</div>
+        </div>
+        <div class="text-right">
+          <div class="font-bold text-gray-700">${session?.period_label || ''}</div>
+          <div class="text-xs text-gray-400">Issued: ${new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })}</div>
+        </div>
+      </div>
+
+      <!-- Contractor Info -->
+      <div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-6">
+        <div class="bg-gray-50 rounded-xl p-4">
+          <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Contractor</div>
+          <div class="font-bold text-gray-800 text-lg">${escHtml(c.name || '')}</div>
+          <div class="text-sm text-gray-600">${escHtml(c.company || 'Lion MD')}</div>
+          ${c.ein_ssn ? `<div class="text-sm text-gray-500 mt-1">EIN/SSN: ${c.ein_ssn}</div>` : ''}
+          ${c.email ? `<div class="text-xs text-gray-400">${escHtml(c.email)}</div>` : ''}
+        </div>
+        <div class="bg-purple-50 rounded-xl p-4">
+          <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Payment Summary</div>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <div class="text-2xl font-bold text-purple-600">${fmt(sum.total_pay)}</div>
+              <div class="text-xs text-gray-500">Total Payment</div>
+            </div>
+            <div>
+              <div class="text-2xl font-bold text-gray-700">${fmtNum(sum.total_cases)}</div>
+              <div class="text-xs text-gray-500">Total Approved Cases</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Breakdown -->
+      <div class="grid grid-cols-3 sm:grid-cols-3 gap-2 md:gap-3 mb-6">
+        ${sum.async_count > 0 ? `
+          <div class="bg-purple-50 border border-purple-100 rounded-xl p-3 text-center">
+            <div class="font-bold text-purple-600 text-lg">${fmtNum(sum.async_count)}</div>
+            <div class="text-xs text-gray-500 font-medium">Async Cases</div>
+            <div class="text-sm font-semibold text-purple-700 mt-1">${fmt(sum.async_pay)}</div>
+          </div>` : ''}
+        ${sum.sync_count > 0 ? `
+          <div class="bg-blue-50 border border-blue-100 rounded-xl p-3 text-center">
+            <div class="font-bold text-blue-600 text-lg">${fmtNum(sum.sync_count)}</div>
+            <div class="text-xs text-gray-500 font-medium">Sync Cases</div>
+            <div class="text-sm font-semibold text-blue-700 mt-1">${fmt(sum.sync_pay)}</div>
+          </div>` : ''}
+        ${sum.orderly_count > 0 ? `
+          <div class="bg-rose-50 border border-rose-100 rounded-xl p-3 text-center">
+            <div class="font-bold text-rose-600 text-lg">${fmtNum(sum.orderly_count)}</div>
+            <div class="text-xs text-gray-500 font-medium">OrderlyMeds</div>
+            <div class="text-sm font-semibold text-rose-700 mt-1">${fmt(sum.orderly_pay)}</div>
+          </div>` : ''}
+        ${sum.no_show_count > 0 ? `
+          <div class="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+            <div class="font-bold text-gray-500 text-lg">${fmtNum(sum.no_show_count)}</div>
+            <div class="text-xs text-gray-500 font-medium">No Show</div>
+            <div class="text-sm font-semibold text-gray-400 mt-1">$0.00</div>
+          </div>` : ''}
+        ${sum.other_count > 0 ? `
+          <div class="bg-gray-50 border border-gray-200 rounded-xl p-3 text-center">
+            <div class="font-bold text-gray-500 text-lg">${fmtNum(sum.other_count)}</div>
+            <div class="text-xs text-gray-500 font-medium">Other</div>
+            <div class="text-sm font-semibold text-gray-400 mt-1">$0.00</div>
+          </div>` : ''}}
+      </div>
+
+      <!-- Consult Detail Table -->
+      <div>
+        <div class="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Consult Detail</div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-xs">
+            <thead class="bg-gray-50 rounded-xl">
+              <tr>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold rounded-l-xl">Case ID</th>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold">Date</th>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold">Patient <span class="font-normal text-gray-400">(initials)</span></th>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold">Organization</th>
+                <th class="text-left px-3 py-2 text-gray-500 font-semibold">Type</th>
+                <th class="text-right px-3 py-2 text-gray-500 font-semibold rounded-r-xl">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${(consults || []).map(r => `
+                <tr class="border-b border-gray-50">
+                  <td class="px-3 py-2 font-mono text-blue-600">${r.case_id_short || r.case_id?.substring(0,8)}</td>
+                  <td class="px-3 py-2 text-gray-500">${(r.decision_date||'').substring(0,10)}</td>
+                  <td class="px-3 py-2 font-mono text-gray-500 tracking-wider">${(r.patient_name||'').trim().split(/\s+/).filter(Boolean).map(w=>w[0].toUpperCase()+'.').join('')||'—'}</td>
+                  <td class="px-3 py-2 text-gray-500 max-w-[120px] truncate">${escHtml(r.organization_name || '')}</td>
+                  <td class="px-3 py-2">${visitTypeBadge(r.visit_type, r.carevalidate_fee, r.is_orderly)}</td>
+                  <td class="px-3 py-2 text-right font-semibold text-purple-600">${fmt(r.contractor_fee)}</td>
+                </tr>`).join('')}
+            </tbody>
+            <tfoot>
+              <tr class="border-t-2 border-gray-200">
+                <td colspan="5" class="px-3 py-3 font-bold text-gray-700 text-right">Total</td>
+                <td class="px-3 py-3 text-right font-bold text-purple-600 text-base">${fmt(sum.total_pay)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      <!-- Footer -->
+      <div class="mt-6 pt-4 border-t text-xs text-gray-400 text-center">
+        This is an official payment statement from Lion MD's, PLLC. For questions contact your payroll administrator.
+      </div>
+    </div>`
+}
+
+async function downloadPaystub() {
+  if (!currentPaystubData) return
+  const { contractor, session, summary, commission } = currentPaystubData
+  const { jsPDF } = window.jspdf
+
+  // ── Christopher Garcia: commission statement PDF via print window ──
+  const cnamePdf = (contractor?.name || '').toLowerCase()
+  if (commission && cnamePdf.includes('garcia') && cnamePdf.includes('chris')) {
+    // Grab the already-rendered HTML from the modal preview
+    const printArea = document.getElementById('paystubPrintArea')
+    if (!printArea) { showToast('Preview not loaded yet', 'warning'); return }
+
+    // Pull in all stylesheet links from the current page
+    const styleLinks = Array.from(document.querySelectorAll('link[rel="stylesheet"]'))
+      .map(l => `<link rel="stylesheet" href="${l.href}">`)
+      .join('\n')
+    // Also pull all <style> tags
+    const styleTags = Array.from(document.querySelectorAll('style'))
+      .map(s => `<style>${s.innerHTML}</style>`)
+      .join('\n')
+
+    const printWin = window.open('', '_blank', 'width=900,height=700')
+    printWin.document.write(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>${(contractor?.name || 'Payment Statement')} — ${session?.period_label || ''}</title>
+  ${styleLinks}
+  ${styleTags}
+  <link href="https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"><\/script>
+  <style>
+    @page { size: letter portrait; margin: 18mm 16mm; }
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: white; }
+    @media print {
+      body { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+      .no-print { display: none !important; }
+    }
+  </style>
+</head>
+<body class="p-6">
+  <div class="no-print" style="margin-bottom:16px">
+    <button onclick="window.print()" style="background:#1a1a2e;color:#fff;border:none;padding:10px 24px;border-radius:8px;font-size:14px;cursor:pointer;margin-right:8px">
+      🖨️ Print / Save as PDF
+    </button>
+    <button onclick="window.close()" style="background:#eee;color:#333;border:none;padding:10px 24px;border-radius:8px;font-size:14px;cursor:pointer">
+      ✕ Close
+    </button>
+  </div>
+  ${printArea.outerHTML}
+</body>
+</html>`)
+    printWin.document.close()
+    printWin.focus()
+    showToast('Print window opened — use "Save as PDF" in the print dialog', 'success')
+    return
+  }
+
+  // ── Regular contractor paystub PDF ──
+  const logoDataUrl = await new Promise(resolve => {
+    const img = new Image()
+    img.crossOrigin = 'anonymous'
+    img.onload = () => {
+      const c = document.createElement('canvas')
+      c.width = img.naturalWidth; c.height = img.naturalHeight
+      c.getContext('2d').drawImage(img, 0, 0)
+      resolve(c.toDataURL('image/png'))
+    }
+    img.onerror = () => resolve(null)
+    img.src = '/static/lion-logo.png'
+  })
+
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' })
+  const pageW = doc.internal.pageSize.getWidth()
+
+  // Header bar
+  doc.setFillColor(26, 26, 46)
+  doc.rect(0, 0, pageW, 30, 'F')
+
+  // Logo in header
+  if (logoDataUrl) {
+    doc.addImage(logoDataUrl, 'PNG', 10, 3, 24, 24)
+  }
+
+  doc.setTextColor(201, 168, 76)
+  doc.setFontSize(22)
+  doc.setFont('helvetica', 'bold')
+  doc.text("LION MD's, PLLC", 38, 18)
+  doc.setTextColor(200, 200, 200)
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'normal')
+  doc.text('Independent Contractor Payment Statement', 38, 25)
+  doc.setTextColor(255, 255, 255)
+  doc.text(session?.period_label || '', pageW - 15, 18, { align: 'right' })
+  doc.setFontSize(8)
+  doc.text('Issued: ' + new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' }), pageW - 15, 25, { align: 'right' })
+
+  // Contractor info
+  doc.setTextColor(50, 50, 50)
+  doc.setFontSize(12)
+  doc.setFont('helvetica', 'bold')
+  doc.text(contractor?.name || '', 15, 42)
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(9)
+  doc.setTextColor(100, 100, 100)
+  doc.text(contractor?.company || "Lion MD's, PLLC", 15, 48)
+  if (contractor?.ein_ssn) doc.text('EIN/SSN: ' + contractor.ein_ssn, 15, 54)
+
+  // Summary box
+  doc.setFillColor(247, 244, 255)
+  doc.roundedRect(pageW - 90, 36, 75, 30, 3, 3, 'F')
+  doc.setTextColor(139, 92, 246)
+  doc.setFontSize(18)
+  doc.setFont('helvetica', 'bold')
+  doc.text(fmt(summary?.total_pay), pageW - 52, 49, { align: 'center' })
+  doc.setFontSize(8)
+  doc.setFont('helvetica', 'normal')
+  doc.setTextColor(100, 100, 100)
+  doc.text('Total Payment', pageW - 52, 56, { align: 'center' })
+  doc.text(`${fmtNum(summary?.total_cases)} Cases`, pageW - 52, 61, { align: 'center' })
+
+  // Breakdown line
+  let yPos = 72
+  const rows = []
+  if (summary?.async_count > 0) rows.push([`${fmtNum(summary.async_count)} Async Text/Email`, `${fmtNum(summary.async_count)} × rate`, fmt(summary.async_pay)])
+  if (summary?.sync_count > 0) rows.push([`${fmtNum(summary.sync_count)} Sync (Phone/Video)`, `${fmtNum(summary.sync_count)} × rate`, fmt(summary.sync_pay)])
+  if (summary?.orderly_count > 0) rows.push([`${fmtNum(summary.orderly_count)} OrderlyMeds`, `${fmtNum(summary.orderly_count)} × rate`, fmt(summary.orderly_pay)])
+  if (summary?.no_show_count > 0) rows.push([`${fmtNum(summary.no_show_count)} No Show`, `${fmtNum(summary.no_show_count)} × $0`, '$0.00'])
+  if (summary?.other_count > 0) rows.push([`${fmtNum(summary.other_count)} Other`, `${fmtNum(summary.other_count)} × $0`, '$0.00'])
+
+  if (rows.length > 0) {
+    doc.autoTable({
+      startY: yPos,
+      head: [['Service Type', 'Quantity', 'Amount']],
+      body: rows,
+      foot: [['', 'TOTAL', fmt(summary?.total_pay)]],
+      theme: 'grid',
+      headStyles: { fillColor: [26, 26, 46], textColor: [201, 168, 76], fontStyle: 'bold', fontSize: 9 },
+      footStyles: { fillColor: [245, 245, 245], textColor: [80, 80, 80], fontStyle: 'bold', fontSize: 10 },
+      styles: { fontSize: 9, cellPadding: 3 },
+      columnStyles: { 2: { halign: 'right', fontStyle: 'bold', textColor: [139, 92, 246] } },
+      margin: { left: 15, right: 15 },
+      tableWidth: pageW - 30
+    })
+    yPos = doc.lastAutoTable.finalY + 10
+  }
+
+  // Detail table — mask patient names to initials for HIPAA compliance
+  const maskInitials = name => {
+    const words = (name || '').trim().split(/\s+/).filter(Boolean)
+    return words.length ? words.map(w => w[0].toUpperCase() + '.').join('') : '—'
+  }
+  const detailRows = (currentPaystubData.consults || []).map(r => [
+    r.case_id_short || r.case_id?.substring(0, 8),
+    (r.decision_date || '').substring(0, 10),
+    maskInitials(r.patient_name),
+    r.organization_name,
+    visitTypeLabel(r.visit_type),
+    fmt(r.contractor_fee)
+  ])
+
+  doc.autoTable({
+    startY: yPos,
+    head: [['Case ID', 'Date', 'Patient', 'Organization', 'Type', 'Amount']],
+    body: detailRows,
+    theme: 'striped',
+    headStyles: { fillColor: [240, 240, 245], textColor: [80, 80, 80], fontStyle: 'bold', fontSize: 8 },
+    styles: { fontSize: 7, cellPadding: 2 },
+    columnStyles: { 5: { halign: 'right', fontStyle: 'bold', textColor: [139, 92, 246] } },
+    margin: { left: 15, right: 15 },
+    tableWidth: pageW - 30
+  })
+
+  // Footer
+  const totalPages = doc.internal.getNumberOfPages()
+  for (let i = 1; i <= totalPages; i++) {
+    doc.setPage(i)
+    doc.setFillColor(26, 26, 46)
+    doc.rect(0, doc.internal.pageSize.getHeight() - 12, pageW, 12, 'F')
+    doc.setTextColor(150, 150, 150)
+    doc.setFontSize(7)
+    doc.text("Lion MD's, PLLC · Payroll Portal · Confidential", 15, doc.internal.pageSize.getHeight() - 4)
+    doc.text(`Page ${i} of ${totalPages}`, pageW - 15, doc.internal.pageSize.getHeight() - 4, { align: 'right' })
+  }
+
+  const fileName = `${contractor?.name?.replace(/\s+/g, '_')}_${session?.period_label?.replace(/\s+/g, '_')}_Paystub.pdf`
+  doc.save(fileName)
+  showToast('PDF downloaded!', 'success')
+}
+
+// ════════════════════════════════════════════════════
+// CONTRACTORS PAGE
+// ════════════════════════════════════════════════════
+// Detect duplicate contractor groups (same name, multiple active records)
+function detectDuplicateGroups(contractors) {
+  const byName = {}
+  contractors.forEach(c => {
+    const key = (c.name || '').trim().toLowerCase()
+    if (!byName[key]) byName[key] = []
+    byName[key].push(c)
+  })
+  return Object.values(byName).filter(group => group.length > 1)
+}
+
+// ── Role group badge helper ──────────────────────────────────────
+function roleGroupBadge(rg) {
+  if (rg === 'NP')         return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-700">NP</span>`
+  if (rg === 'Physician')  return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-700">MD</span>`
+  if (rg === 'Contractor') return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">Contractor</span>`
+  return ''
+}
+
+// ── Grouped contractors table (shared by admin + onboarding views) ─
+function renderContractorGroupedTable(contractors, duplicateIds = new Set(), clickFn = null) {
+  const groups = [
+    { key: 'NP',         label: 'NPs / ARNPs / PAs',   icon: 'fa-user-nurse',   color: 'bg-blue-50 text-blue-700 border-blue-200' },
+    { key: 'Physician',  label: 'Physicians',            icon: 'fa-stethoscope',  color: 'bg-purple-50 text-purple-700 border-purple-200' },
+    { key: 'Contractor', label: 'Contractors',           icon: 'fa-briefcase',    color: 'bg-gray-50 text-gray-600 border-gray-200' },
+    { key: '',           label: 'Other / Unassigned',   icon: 'fa-user',         color: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+  ]
+
+  const byGroup = {}
+  groups.forEach(g => { byGroup[g.key] = [] })
+  contractors.forEach(c => {
+    const k = (c.role_group || '')
+    if (byGroup[k] !== undefined) byGroup[k].push(c)
+    else byGroup[''].push(c)
+  })
+
+  const tableHead = `
+    <thead class="bg-gray-50">
+      <tr>
+        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Name</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Group</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Company</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Email</th>
+        <th class="text-center px-5 py-3 text-gray-500 font-semibold text-xs">Actions</th>
+      </tr>
+    </thead>`
+
+  return groups.filter(g => byGroup[g.key].length > 0).map(g => {
+    const list = byGroup[g.key]
+    const rows = list.map(c => {
+      const isDup = duplicateIds.has(c.id)
+      // Always make rows clickable — opens the full profile panel
+      const avatarHtml = c.photo_data
+        ? `<img src="data:${c.photo_mime||'image/jpeg'};base64,${c.photo_data}" class="w-8 h-8 rounded-full object-cover flex-shrink-0 border border-yellow-300" alt="">`
+        : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style="background:var(--lion-gold)">${(c.name || '?')[0].toUpperCase()}</div>`
+      return `
+        <tr class="table-row border-b border-gray-50 ${isDup ? 'bg-amber-50/40' : ''} hover:bg-yellow-50/40 cursor-pointer transition-colors" onclick="obOpenContractorDetail(${c.id})">
+          <td class="px-5 py-3 font-semibold text-gray-800">
+            <div class="flex items-center gap-3">
+              ${avatarHtml}
+              <div>
+                ${escHtml(c.name)}
+                ${isDup ? '<span class="ml-1 text-xs text-amber-500 font-normal"><i class="fas fa-clone"></i> dup</span>' : ''}
+                <div class="text-xs text-gray-400 font-normal">ID #${c.id}</div>
+              </div>
+            </div>
+          </td>
+          <td class="px-5 py-3">${roleGroupBadge(c.role_group || '')}</td>
+          <td class="px-5 py-3 text-gray-600">${escHtml(c.company || '—')}</td>
+          <td class="px-5 py-3 text-gray-500 text-xs">${escHtml(c.email || '—')}</td>
+          <td class="px-5 py-3 text-center" onclick="event.stopPropagation()">
+            <div class="flex gap-2 justify-center flex-wrap">
+              <button onclick="obOpenContractorDetail(${c.id})" class="text-xs px-3 py-1.5 btn-primary rounded-lg" title="View full profile">
+                <i class="fas fa-id-card mr-1"></i>Profile
+              </button>
+              <button onclick="openContractorModal(${JSON.stringify(c).replace(/"/g,'&quot;')})" class="text-xs px-3 py-1.5 btn-outline rounded-lg">
+                <i class="fas fa-edit mr-1"></i>Edit
+              </button>
+              ${isDup ? `<button onclick="openMergeModal(${JSON.stringify(state.contractors.filter(x=>x.name.trim().toLowerCase()===c.name.trim().toLowerCase())).replace(/"/g,'&quot;')})" class="text-xs px-3 py-1.5 rounded-lg bg-amber-50 text-amber-600 hover:bg-amber-100 border border-amber-300">
+                <i class="fas fa-compress-arrows-alt mr-1"></i>Merge
+              </button>` : ''}
+              <button onclick="toggleContractorActive(${c.id}, true, '${escHtml(c.name)}')" title="Deactivate" class="w-8 h-8 flex items-center justify-center bg-gray-50 text-gray-400 rounded-lg hover:bg-red-50 hover:text-red-500 border border-gray-200 transition-colors">
+                <i class="fas fa-user-slash text-xs"></i>
+              </button>
+              <button onclick="permanentDeleteContractor(${c.id}, '${escHtml(c.name).replace(/'/g,'&#39;')}'); event.stopPropagation()" title="Permanently delete" class="w-8 h-8 flex items-center justify-center bg-gray-50 text-gray-400 rounded-lg hover:bg-red-100 hover:text-red-700 border border-gray-200 transition-colors">
+                <i class="fas fa-trash text-xs"></i>
+              </button>
+            </div>
+          </td>
+        </tr>`
+    }).join('')
+
+    return `
+      <div class="card overflow-hidden mb-4">
+        <div class="flex items-center gap-2 px-5 py-3 border-b border-gray-100 ${g.color} bg-opacity-40">
+          <i class="fas ${g.icon} text-sm"></i>
+          <span class="font-bold text-sm">${g.label}</span>
+          <span class="ml-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-white/60">${list.length}</span>
+        </div>
+        <table class="w-full text-sm">
+          ${tableHead}
+          <tbody>${rows}</tbody>
+        </table>
+      </div>`
+  }).join('')
+}
+
+// ── Inactive contractors section ─────────────────────────────────────────────
+function renderInactiveContractorsSection() {
+  const inactive = state.inactiveContractors || []
+  if (inactive.length === 0) return ''
+
+  const rows = inactive.map(c => {
+    const avatarHtml = c.photo_data
+      ? `<img src="data:${c.photo_mime||'image/jpeg'};base64,${c.photo_data}" class="w-8 h-8 rounded-full object-cover flex-shrink-0 opacity-60" alt="">`
+      : `<div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0 bg-gray-400">${(c.name||'?')[0].toUpperCase()}</div>`
+    return `
+    <tr class="border-b border-gray-50 bg-gray-50/60 opacity-75 hover:opacity-100 hover:bg-yellow-50/30 cursor-pointer transition-all" onclick="obOpenContractorDetail(${c.id})">
+      <td class="px-5 py-3">
+        <div class="flex items-center gap-3">
+          ${avatarHtml}
+          <div>
+            <p class="font-semibold text-gray-500">${escHtml(c.name)}</p>
+            <p class="text-xs text-gray-400">ID #${c.id}</p>
+          </div>
+        </div>
+      </td>
+      <td class="px-5 py-3">${roleGroupBadge(c.role_group || '')}</td>
+      <td class="px-5 py-3 text-gray-400">${escHtml(c.company || '—')}</td>
+      <td class="px-5 py-3 font-mono text-xs text-gray-400">${escHtml(c.ein_ssn || '—')}</td>
+      <td class="px-5 py-3 text-gray-400 text-xs">${escHtml(c.email || '—')}</td>
+      <td class="px-5 py-3 text-center" onclick="event.stopPropagation()">
+        <div class="flex gap-2 justify-center">
+          <button onclick="obOpenContractorDetail(${c.id})"
+            class="text-xs px-3 py-1.5 btn-primary rounded-lg">
+            <i class="fas fa-id-card mr-1"></i>Profile
+          </button>
+          <button onclick="openContractorModal(${JSON.stringify(c).replace(/"/g,'&quot;')})"
+            class="text-xs px-3 py-1.5 btn-outline rounded-lg">
+            <i class="fas fa-edit mr-1"></i>Edit
+          </button>
+          <button onclick="toggleContractorActive(${c.id}, false, '${escHtml(c.name)}')"
+            class="text-xs px-3 py-1.5 bg-green-50 text-green-600 rounded-lg hover:bg-green-100 border border-green-200 transition-colors">
+            <i class="fas fa-user-check mr-1"></i>Reactivate
+          </button>
+          <button onclick="permanentDeleteContractor(${c.id}, '${escHtml(c.name).replace(/'/g,'&#39;')}'); event.stopPropagation()"
+            class="w-8 h-8 flex items-center justify-center bg-gray-50 text-gray-400 rounded-lg hover:bg-red-100 hover:text-red-700 border border-gray-200 transition-colors" title="Permanently delete">
+            <i class="fas fa-trash text-xs"></i>
+          </button>
+        </div>
+      </td>
+    </tr>`
+  }).join('')
+
+  return `
+    <div class="card overflow-hidden">
+      <div class="flex items-center gap-2 px-5 py-3 border-b border-gray-100 bg-gray-50 text-gray-500">
+        <i class="fas fa-user-slash text-sm text-gray-400"></i>
+        <span class="font-bold text-sm text-gray-500">Inactive</span>
+        <span class="ml-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-white border border-gray-200 text-gray-500">${inactive.length}</span>
+        <span class="ml-auto text-xs text-gray-400">History preserved · not included in payroll</span>
+      </div>
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr>
+            <th class="text-left px-5 py-3 text-gray-400 font-semibold text-xs">Name</th>
+            <th class="text-left px-5 py-3 text-gray-400 font-semibold text-xs">Group</th>
+            <th class="text-left px-5 py-3 text-gray-400 font-semibold text-xs">Company</th>
+            <th class="text-left px-5 py-3 text-gray-400 font-semibold text-xs">EIN / SSN</th>
+            <th class="text-left px-5 py-3 text-gray-400 font-semibold text-xs">Email</th>
+            <th class="text-center px-5 py-3 text-gray-400 font-semibold text-xs">Actions</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`
+}
+
+// ── Load both active + inactive contractors into state ───────────────────────
+async function reloadContractors() {
+  const [all, licData] = await Promise.all([
+    api('/api/contractors/all'),
+    api('/api/licensing/dashboard').catch(() => ({ licenses: [] })),
+  ])
+  state.contractors         = all.filter(c => c.is_active)
+  state.inactiveContractors = all.filter(c => !c.is_active)
+  state.allLicenses         = licData.licenses || []
+}
+
+function renderContractors() {
+  const duplicateGroups = detectDuplicateGroups(state.contractors)
+  const duplicateIds = new Set(duplicateGroups.flatMap(g => g.map(c => c.id)))
+  const hasDuplicates = duplicateGroups.length > 0
+
+  $('mainContent').innerHTML = `
+    <div class="space-y-4">
+      <div class="flex justify-between items-center flex-wrap gap-3">
+        <div>
+          <p class="text-sm text-gray-500">${state.contractors.length} active · ${(state.inactiveContractors||[]).length} inactive</p>
+          ${hasDuplicates ? `<p class="text-xs text-amber-600 font-medium mt-0.5"><i class="fas fa-exclamation-triangle mr-1"></i>${duplicateGroups.length} duplicate group${duplicateGroups.length>1?'s':''} found — merge recommended</p>` : ''}
+        </div>
+        <div class="flex gap-2 flex-wrap">
+          ${hasDuplicates ? `<button onclick="openMergeWizard()" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-amber-400 text-amber-700 bg-amber-50 hover:bg-amber-100 transition-colors">
+            <i class="fas fa-compress-arrows-alt mr-2"></i>Merge Duplicates (${duplicateGroups.length})
+          </button>` : ''}
+          <button onclick="exportContractorsXlsx()" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-emerald-300 text-emerald-700 bg-emerald-50 hover:bg-emerald-100 transition-colors">
+            <i class="fas fa-file-excel mr-2"></i>Export XLSX
+          </button>
+          <button onclick="exportProviderSpreadsheet()" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-violet-300 text-violet-700 bg-violet-50 hover:bg-violet-100 transition-colors">
+            <i class="fas fa-table mr-2"></i>Provider Sheet
+          </button>
+          <button onclick="runContractorMigration()" id="migrateBtn" class="px-4 py-2.5 rounded-xl font-medium text-sm border-2 border-indigo-300 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition-colors">
+            <i class="fas fa-sync-alt mr-2"></i>Sync Names &amp; Groups
+          </button>
+          <button onclick="openContractorModal()" class="btn-primary px-5 py-2.5 rounded-xl font-medium text-sm">
+            <i class="fas fa-plus mr-2"></i>Add Contractor
+          </button>
+        </div>
+      </div>
+
+      ${hasDuplicates ? `
+      <div class="card p-4 border-2 border-amber-200 bg-amber-50/50">
+        <div class="flex items-center gap-2 mb-3">
+          <i class="fas fa-clone text-amber-500"></i>
+          <h4 class="font-semibold text-amber-800">Duplicate Contractors Detected</h4>
+        </div>
+        <div class="space-y-2">
+          ${duplicateGroups.map(group => `
+            <div class="flex items-center justify-between bg-white rounded-xl px-4 py-3 border border-amber-200">
+              <div>
+                <span class="font-semibold text-gray-800">${escHtml(group[0].name)}</span>
+                <span class="ml-2 text-xs text-gray-400">${group.length} records · IDs: ${group.map(c=>'#'+c.id).join(', ')}</span>
+                <div class="flex gap-2 mt-1 flex-wrap">
+                  ${group.map(c => `<span class="text-xs px-2 py-0.5 rounded bg-gray-100 text-gray-600">#${c.id} — ${escHtml(c.company||'no company')} ${c.ein_ssn?'· '+escHtml(c.ein_ssn):''}</span>`).join('')}
+                </div>
+              </div>
+              <button onclick="openMergeModal(${JSON.stringify(group).replace(/"/g,'&quot;')})"
+                class="shrink-0 ml-3 px-3 py-1.5 rounded-lg text-xs font-semibold bg-amber-500 text-white hover:bg-amber-600 transition-colors">
+                <i class="fas fa-compress-arrows-alt mr-1"></i>Merge
+              </button>
+            </div>`).join('')}
+        </div>
+      </div>` : ''}
+
+      ${renderContractorGroupedTable(state.contractors, duplicateIds)}
+      ${renderInactiveContractorsSection()}
+    </div>
+
+    <!-- Contractor Add/Edit Modal -->
+    <div id="contractorModal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md flex flex-col" style="max-height:92vh">
+        <h3 class="text-lg font-bold text-gray-800 px-6 pt-6 pb-4 flex-shrink-0" id="contractorModalTitle">Add Contractor</h3>
+        <div class="space-y-4 overflow-y-auto flex-1 px-6 pb-2">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Group</label>
+            <select id="ctRoleGroup" class="w-full" onchange="$('ctExternalCpaSection').classList.toggle('hidden', this.value!=='Physician')">
+              <option value="">— Unassigned —</option>
+              <option value="NP">NP / ARNP / PA</option>
+              <option value="Physician">Physician</option>
+              <option value="Contractor">Contractor</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Contractor Type *</label>
+            <select id="ctType" class="w-full">
+              <option value="regular">Regular</option>
+              <option value="owner">Owner</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Gusto Type *</label>
+            <select id="ctGustoType" class="w-full" onchange="toggleGustoFields()">
+              <option value="Individual">Individual</option>
+              <option value="Business">Business</option>
+            </select>
+          </div>
+          <div id="ctIndividualFields" class="space-y-4">
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs font-semibold text-gray-600 mb-1.5">First Name *</label>
+                <input type="text" id="ctFirstName" class="w-full" placeholder="Jane"/>
+              </div>
+              <div>
+                <label class="block text-xs font-semibold text-gray-600 mb-1.5">Last Name *</label>
+                <input type="text" id="ctLastName" class="w-full" placeholder="Smith"/>
+              </div>
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Full Name (Display)</label>
+            <input type="text" id="ctName" class="w-full" placeholder="Dr. Jane Smith"/>
+          </div>
+          <div id="ctBusinessFields" class="hidden">
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Business Name *</label>
+            <input type="text" id="ctBusinessName" class="w-full" placeholder="Avidity Health LLC"/>
+            <p class="text-xs text-gray-400 mt-1">For Business type, use Company field for business name</p>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Company / Practice</label>
+            <input type="text" id="ctCompany" class="w-full" placeholder="Lion MD"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5" id="ctEinLabel">SSN (last 4, e.g. *1234)</label>
+            <input type="text" id="ctEin" class="w-full" placeholder="*1234"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+              <i class="fas fa-briefcase mr-1 text-blue-400"></i>Work Email
+              <span class="ml-1 font-normal text-gray-400">(portal login)</span>
+            </label>
+            <input type="email" id="ctWorkEmail" class="w-full" placeholder="jane.smith@lionmd.com"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+              <i class="fas fa-envelope mr-1 text-gray-400"></i>Personal Email
+            </label>
+            <input type="email" id="ctEmail" class="w-full" placeholder="jane@gmail.com"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+              <i class="fas fa-phone mr-1 text-gray-400"></i>Phone
+            </label>
+            <input type="tel" id="ctPhone" class="w-full" placeholder="(555) 123-4567"/>
+          </div>
+          <!-- Provider profile fields -->
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1.5">Date of Birth</label>
+              <input type="date" id="ctDob" class="w-full"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1.5">Start Date</label>
+              <input type="date" id="ctStartDate" class="w-full"/>
+            </div>
+            <div class="col-span-2">
+              <label class="block text-xs font-semibold text-gray-600 mb-1.5">Languages Spoken</label>
+              <input type="text" id="ctLanguages" class="w-full" placeholder="e.g. English, Spanish"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1.5">Min BMI</label>
+              <input type="number" id="ctBmiMin" step="0.1" min="0" max="100" class="w-full" placeholder="e.g. 18.5"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1.5">Max BMI</label>
+              <input type="number" id="ctBmiMax" step="0.1" min="0" max="200" class="w-full" placeholder="e.g. 60.0"/>
+            </div>
+          </div>
+          <!-- External CPA notes — visible only for Physicians -->
+          <div id="ctExternalCpaSection" class="hidden">
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+              <i class="fas fa-handshake mr-1 text-indigo-400"></i>External CPA Agreements
+              <span class="ml-1 font-normal text-gray-400">(outside of LionMD)</span>
+            </label>
+            <textarea id="ctExternalCpaNotes" class="w-full text-sm" rows="3"
+              placeholder="e.g. CA: supervising 2 NPs at Acme Clinic&#10;TX: 3 agreements at external practice"></textarea>
+            <p class="text-xs text-gray-400 mt-1">List any CPA agreements with other organizations so we can track capacity limits.</p>
+          </div>
+          <input type="hidden" id="ctId"/>
+        </div>
+        <div class="flex gap-3 px-6 py-4 border-t border-gray-100 flex-shrink-0">
+          <button onclick="saveContractor()" class="flex-1 btn-primary py-3 rounded-xl font-semibold">Save</button>
+          <button onclick="$('contractorModal').classList.add('hidden')" class="flex-1 py-3 rounded-xl border border-gray-200 text-gray-600 font-medium hover:bg-gray-50">Cancel</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Merge Modal -->
+    <div id="mergeModal" class="fixed inset-0 modal-backdrop z-50 hidden flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg p-6">
+        <div class="flex items-center gap-3 mb-5">
+          <div class="w-10 h-10 rounded-xl bg-amber-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-compress-arrows-alt text-amber-600"></i>
+          </div>
+          <div>
+            <h3 class="text-lg font-bold text-gray-800">Merge Duplicate Contractors</h3>
+            <p class="text-xs text-gray-500">All consults will be re-pointed to the record you keep. Paystubs will reflect the merged data.</p>
+          </div>
+        </div>
+        <div id="mergeModalBody"></div>
+        <div class="flex gap-3 mt-5">
+          <button onclick="executeMerge()" class="flex-1 py-3 rounded-xl font-semibold text-white" style="background:#f59e0b">
+            <i class="fas fa-compress-arrows-alt mr-2"></i>Merge Now
+          </button>
+          <button onclick="$('mergeModal').classList.add('hidden')" class="flex-1 py-3 rounded-xl border border-gray-200 text-gray-600 font-medium hover:bg-gray-50">Cancel</button>
+        </div>
+      </div>
+    </div>`
+}
+
+// ── Export contractors to XLSX grouped by NP / Physician / Contractor ────────
+function exportContractorsXlsx() {
+  const contractors = state.contractors || []
+  if (!contractors.length) { showToast('No contractors to export.', 'warning'); return }
+
+  const groups = [
+    { key: 'NP',         label: 'NPs & ARNPs' },
+    { key: 'Physician',  label: 'Physicians'   },
+    { key: 'Contractor', label: 'Contractors'  },
+    { key: '',           label: 'Unassigned'   },
+  ]
+
+  const wb = XLSX.utils.book_new()
+
+  // ── Sheet 1: All Contractors (master list) ────────────────────────────────
+  const allRows = []
+  groups.forEach(g => {
+    const list = contractors.filter(c => (c.role_group || '') === g.key)
+    if (!list.length) return
+    // Section header row
+    allRows.push({ Group: `— ${g.label} —`, Name: '', Company: '', 'EIN / SSN': '', Email: '', Type: '' })
+    list.forEach(c => allRows.push({
+      Group:      g.label,
+      Name:       c.name        || '',
+      Company:    c.company     || '',
+      'EIN / SSN': c.ein_ssn   || '',
+      Email:      c.email       || '',
+      Type:       c.contractor_type === 'owner' ? 'Owner' : 'Regular',
+    }))
+    // Blank spacer
+    allRows.push({ Group: '', Name: '', Company: '', 'EIN / SSN': '', Email: '', Type: '' })
+  })
+
+  const wsMaster = XLSX.utils.json_to_sheet(allRows, {
+    header: ['Group', 'Name', 'Company', 'EIN / SSN', 'Email', 'Type'],
+    skipHeader: false,
+  })
+
+  // Column widths
+  wsMaster['!cols'] = [
+    { wch: 18 },  // Group
+    { wch: 30 },  // Name
+    { wch: 30 },  // Company
+    { wch: 14 },  // EIN/SSN
+    { wch: 32 },  // Email
+    { wch: 10 },  // Type
+  ]
+  XLSX.utils.book_append_sheet(wb, wsMaster, 'All Contractors')
+
+  // ── Sheets 2-4: One sheet per group ─────────────────────────────────────
+  groups.forEach(g => {
+    const list = contractors.filter(c => (c.role_group || '') === g.key)
+    if (!list.length) return
+    const rows = list.map((c, i) => ({
+      '#':           i + 1,
+      Name:          c.name        || '',
+      Company:       c.company     || '',
+      'EIN / SSN':   c.ein_ssn    || '',
+      Email:         c.email       || '',
+      Type:          c.contractor_type === 'owner' ? 'Owner' : 'Regular',
+    }))
+    const ws = XLSX.utils.json_to_sheet(rows, {
+      header: ['#', 'Name', 'Company', 'EIN / SSN', 'Email', 'Type'],
+    })
+    ws['!cols'] = [
+      { wch: 4  },  // #
+      { wch: 30 },  // Name
+      { wch: 30 },  // Company
+      { wch: 14 },  // EIN/SSN
+      { wch: 32 },  // Email
+      { wch: 10 },  // Type
+    ]
+    XLSX.utils.book_append_sheet(wb, ws, g.label)
+  })
+
+  // ── Sheet: Inactive ──────────────────────────────────────────────────────
+  const inactive = state.inactiveContractors || []
+  if (inactive.length) {
+    const inactiveRows = inactive.map((c, i) => ({
+      '#':           i + 1,
+      Name:          c.name        || '',
+      Group:         c.role_group  || '',
+      Company:       c.company     || '',
+      'EIN / SSN':   c.ein_ssn    || '',
+      Email:         c.email       || '',
+      Type:          c.contractor_type === 'owner' ? 'Owner' : 'Regular',
+    }))
+    const wsInactive = XLSX.utils.json_to_sheet(inactiveRows, {
+      header: ['#', 'Name', 'Group', 'Company', 'EIN / SSN', 'Email', 'Type'],
+    })
+    wsInactive['!cols'] = [
+      { wch: 4  }, { wch: 30 }, { wch: 14 }, { wch: 30 }, { wch: 14 }, { wch: 32 }, { wch: 10 },
+    ]
+    XLSX.utils.book_append_sheet(wb, wsInactive, 'Inactive')
+  }
+
+  // ── Download ─────────────────────────────────────────────────────────────
+  const date = new Date().toISOString().slice(0, 10)   // YYYY-MM-DD
+  XLSX.writeFile(wb, `LionMD_Contractors_${date}.xlsx`)
+  showToast(`Exported ${contractors.length} active${inactive.length ? ' + ' + inactive.length + ' inactive' : ''} contractors to Excel.`, 'success')
+}
+
+// ── Export Provider Spreadsheet — one row per provider with all key fields ───
+// Fields: Full Name, DOB, Email, NPI, States Licensed, DEA Number(s),
+//         Languages Spoken, Max BMI, Min BMI, Start Date
+async function exportProviderSpreadsheet() {
+  showLoading('Building provider spreadsheet…')
+  try {
+    const data = await api('/api/admin/contractors/export-all')
+    const contractors = data.contractors || []
+    const licenses    = data.licenses    || []
+    if (!contractors.length) { hideLoading(); showToast('No active providers found.', 'warning'); return }
+
+    // Index licenses by contractor_id
+    const licMap = {}
+    licenses.forEach(l => {
+      if (!licMap[l.contractor_id]) licMap[l.contractor_id] = []
+      licMap[l.contractor_id].push(l)
+    })
+
+    const rows = contractors.map(ct => {
+      const ctLics = licMap[ct.id] || []
+      const stateLics = ctLics.filter(l => l.license_type !== 'DEA')
+      const deaLics   = ctLics.filter(l => l.license_type === 'DEA')
+
+      // States Licensed: "CA (NP) · FL (NP) · NY (MD)"
+      const statesStr = stateLics
+        .map(l => l.state + (l.license_type ? ' (' + l.license_type + ')' : ''))
+        .join(' · ') || ''
+
+      // DEA Numbers: "FL: MD9179614 · TX: BX1234567"
+      const deaStr = deaLics
+        .map(l => (l.state ? l.state + ': ' : '') + (l.license_number || ''))
+        .join(' · ') || ''
+
+      const fullName = [ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.name || ''
+
+      return {
+        'Full Name':       fullName,
+        'DOB':             ct.dob        || '',
+        'Email':           ct.email      || '',
+        'NPI':             ct.npi        || '',
+        'States Licensed': statesStr,
+        'DEA Number(s)':   deaStr,
+        'Languages':       ct.languages  || '',
+        'Min BMI':         ct.bmi_min    !== null && ct.bmi_min  !== undefined ? ct.bmi_min  : '',
+        'Max BMI':         ct.bmi_max    !== null && ct.bmi_max  !== undefined ? ct.bmi_max  : '',
+        'Start Date':      ct.start_date || '',
+      }
+    })
+
+    const HEADERS = ['Full Name','DOB','Email','NPI','States Licensed','DEA Number(s)','Languages','Min BMI','Max BMI','Start Date']
+    const wb = XLSX.utils.book_new()
+    const ws = XLSX.utils.json_to_sheet(rows, { header: HEADERS, skipHeader: false })
+
+    // Column widths
+    ws['!cols'] = [
+      { wch: 28 },  // Full Name
+      { wch: 14 },  // DOB
+      { wch: 32 },  // Email
+      { wch: 14 },  // NPI
+      { wch: 40 },  // States Licensed
+      { wch: 36 },  // DEA Number(s)
+      { wch: 22 },  // Languages
+      { wch: 10 },  // Min BMI
+      { wch: 10 },  // Max BMI
+      { wch: 14 },  // Start Date
+    ]
+
+    // Bold the header row
+    const range = XLSX.utils.decode_range(ws['!ref'] || 'A1')
+    for (let C = range.s.c; C <= range.e.c; C++) {
+      const cellAddr = XLSX.utils.encode_cell({ r: 0, c: C })
+      if (ws[cellAddr]) {
+        ws[cellAddr].s = { font: { bold: true }, fill: { fgColor: { rgb: 'EDE9FE' } } }
+      }
+    }
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Providers')
+
+    const date = new Date().toISOString().slice(0, 10)
+    XLSX.writeFile(wb, `LionMD_Provider_Sheet_${date}.xlsx`)
+    showToast(`Exported ${rows.length} providers to spreadsheet.`, 'success')
+  } catch(e) {
+    showToast('Export failed: ' + e.message, 'error')
+  } finally {
+    hideLoading()
+  }
+}
+
+// ── Run bulk data migration: rename contractors + assign role_group ──────────
+async function runContractorMigration() {
+  const btn = $('migrateBtn')
+  if (!btn) return
+  const orig = btn.innerHTML
+  btn.disabled = true
+  btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Running…'
+  try {
+    const res = await api('/api/admin/contractors/migrate', { method: 'POST' })
+    if (res.ok) {
+      showToast(`✅ Migration complete — ${res.updated} contractors updated${res.amy_gaines_added ? ', Amy Gaines added' : ''}.`, 'success')
+      await reloadContractors()
+      renderContractors()
+    } else {
+      showToast('Migration failed: ' + (res.error || 'Unknown error'), 'error')
+    }
+  } catch(e) {
+    showToast('Migration error: ' + e.message, 'error')
+  } finally {
+    btn.disabled = false
+    btn.innerHTML = orig
+  }
+}
+
+// Store current merge group for executeMerge
+let _mergeGroup = []
+
+function openMergeWizard() {
+  const groups = detectDuplicateGroups(state.contractors)
+  if (groups.length === 0) return
+  // Open the first group — user can close and open others individually
+  openMergeModal(groups[0])
+}
+
+function openMergeModal(group) {
+  _mergeGroup = Array.isArray(group) ? group : JSON.parse(typeof group === 'string' ? group : JSON.stringify(group))
+
+  // Pick the best default "keep": prefer record with EIN/SSN, then lowest ID
+  const sorted = [..._mergeGroup].sort((a, b) => {
+    const aHasEin = a.ein_ssn && a.ein_ssn.trim() ? 1 : 0
+    const bHasEin = b.ein_ssn && b.ein_ssn.trim() ? 1 : 0
+    if (bHasEin !== aHasEin) return bHasEin - aHasEin
+    return a.id - b.id
+  })
+  const defaultKeep = sorted[0].id
+
+  const html = `
+    <p class="text-sm text-gray-600 mb-3">Select which record to <strong>keep</strong>. All consult history from the others will be merged into it and their records deactivated.</p>
+    <div class="space-y-2 mb-4" id="mergeRadioGroup">
+      ${_mergeGroup.map((c, i) => `
+        <label class="flex items-start gap-3 p-3 rounded-xl border-2 cursor-pointer transition-colors merge-option ${c.id === defaultKeep ? 'border-amber-400 bg-amber-50' : 'border-gray-200 hover:border-gray-300'}"
+          onclick="selectMergeKeep(${c.id})">
+          <input type="radio" name="mergeKeep" value="${c.id}" ${c.id === defaultKeep ? 'checked' : ''} class="mt-1 accent-amber-500"/>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="font-semibold text-gray-800">${escHtml(c.name)}</span>
+              ${contractorTypeBadge(c.contractor_type || 'regular')}
+              <span class="text-xs text-gray-400">ID #${c.id}</span>
+              ${c.id === defaultKeep ? '<span class="text-xs bg-amber-500 text-white px-2 py-0.5 rounded-full">Recommended</span>' : ''}
+            </div>
+            <div class="text-xs text-gray-500 mt-1 space-y-0.5">
+              ${c.company ? `<div><i class="fas fa-building w-3 mr-1 text-gray-400"></i>${escHtml(c.company)}</div>` : ''}
+              ${c.ein_ssn ? `<div><i class="fas fa-id-card w-3 mr-1 text-gray-400"></i>${escHtml(c.ein_ssn)}</div>` : '<div class="text-gray-300 italic">No EIN/SSN</div>'}
+              ${c.email ? `<div><i class="fas fa-envelope w-3 mr-1 text-gray-400"></i>${escHtml(c.email)}</div>` : ''}
+            </div>
+          </div>
+        </label>`).join('')}
+    </div>
+    <div class="bg-blue-50 border border-blue-200 rounded-xl px-4 py-3 text-xs text-blue-700">
+      <i class="fas fa-info-circle mr-1"></i>
+      <strong>What happens:</strong> All consults linked to the other record(s) are re-assigned to the kept record and fees are recalculated. The merged records are archived (not deleted). Paystubs and dashboard totals update immediately.
+    </div>`
+
+  $('mergeModalBody').innerHTML = html
+  $('mergeModal').classList.remove('hidden')
+}
+
+function selectMergeKeep(id) {
+  document.querySelectorAll('.merge-option').forEach(el => {
+    const radio = el.querySelector('input[type=radio]')
+    const isThis = Number(radio.value) === Number(id)
+    radio.checked = isThis
+    el.classList.toggle('border-amber-400', isThis)
+    el.classList.toggle('bg-amber-50', isThis)
+    el.classList.toggle('border-gray-200', !isThis)
+  })
+}
+
+async function executeMerge() {
+  const radio = document.querySelector('input[name="mergeKeep"]:checked')
+  if (!radio) { showToast('Select a record to keep', 'warning'); return }
+  const keepId = Number(radio.value)
+  const mergeIds = _mergeGroup.map(c => c.id).filter(id => id !== keepId)
+  const keepRecord = _mergeGroup.find(c => c.id === keepId)
+  const name = keepRecord?.name || 'this contractor'
+
+  $('mergeModal').classList.add('hidden')
+  showLoading(`Merging ${name}… re-pointing all consults and recalculating fees…`)
+  try {
+    const result = await api('/api/contractors/merge', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ keep_id: keepId, merge_ids: mergeIds })
+    })
+    // Reload contractors list
+    await reloadContractors()
+    hideLoading()
+    showToast(`Merged! ${result.consults_moved.toLocaleString()} consults re-pointed to "${name}". Paystubs updated.`, 'success')
+    renderContractors()
+    // Refresh current summary if dashboard is active
+    if (state.currentPeriod) {
+      state.currentSummary = await api(`/api/summary/period/${state.currentPeriod.period_key}`)
+    }
+  } catch(e) {
+    hideLoading()
+    showToast('Merge failed: ' + e.message, 'error')
+  }
+}
+
+function toggleGustoFields() {
+  const isBusiness = $('ctGustoType').value === 'Business'
+  $('ctIndividualFields').classList.toggle('hidden', isBusiness)
+  $('ctBusinessFields').classList.toggle('hidden', !isBusiness)
+  $('ctEinLabel').textContent = isBusiness ? 'EIN (last 4, e.g. *1234)' : 'SSN (last 4, e.g. *1234)'
+}
+
+function openContractorModal(contractor = null) {
+  $('contractorModalTitle').textContent = contractor ? 'Edit Contractor' : 'Add Contractor'
+  $('ctId').value = contractor?.id || ''
+  $('ctRoleGroup').value = contractor?.role_group || ''
+  $('ctType').value = contractor?.contractor_type || 'regular'
+  $('ctGustoType').value = contractor?.gusto_type || 'Individual'
+  $('ctFirstName').value = contractor?.first_name || ''
+  $('ctLastName').value = contractor?.last_name || ''
+  $('ctName').value = contractor?.name || ''
+  $('ctBusinessName').value = (contractor?.gusto_type === 'Business' ? (contractor?.company || '') : '')
+  $('ctCompany').value = contractor?.company || ''
+  $('ctEin').value = contractor?.ein_ssn || ''
+  $('ctWorkEmail').value = contractor?.work_email || ''
+  $('ctEmail').value = contractor?.email || ''
+  $('ctPhone').value = contractor?.phone || ''
+  $('ctExternalCpaNotes').value = contractor?.external_cpa_notes || ''
+  $('ctDob').value = contractor?.dob || ''
+  $('ctStartDate').value = contractor?.start_date || ''
+  $('ctLanguages').value = contractor?.languages || ''
+  $('ctBmiMin').value = contractor?.bmi_min !== null && contractor?.bmi_min !== undefined ? contractor.bmi_min : ''
+  $('ctBmiMax').value = contractor?.bmi_max !== null && contractor?.bmi_max !== undefined ? contractor.bmi_max : ''
+  // Show CPA notes section only for Physicians
+  const isPhys = (contractor?.role_group || '') === 'Physician'
+  $('ctExternalCpaSection').classList.toggle('hidden', !isPhys)
+  toggleGustoFields()
+  $('contractorModal').classList.remove('hidden')
+}
+
+async function saveContractor() {
+  const id = $('ctId').value
+  const gustoType = $('ctGustoType').value
+  const firstName = $('ctFirstName').value.trim()
+  const lastName = $('ctLastName').value.trim()
+  let displayName = $('ctName').value.trim()
+  // Auto-fill display name if empty
+  if (!displayName && gustoType === 'Individual' && (firstName || lastName)) {
+    displayName = [firstName, lastName].filter(Boolean).join(' ')
+  } else if (!displayName && gustoType === 'Business') {
+    displayName = $('ctCompany').value.trim() || $('ctBusinessName').value.trim()
+  }
+  const data = {
+    name: displayName,
+    first_name: firstName,
+    last_name: lastName,
+    company: gustoType === 'Business' ? ($('ctBusinessName').value.trim() || $('ctCompany').value.trim()) : $('ctCompany').value.trim(),
+    ein_ssn: $('ctEin').value.trim(),
+    work_email: $('ctWorkEmail').value.trim(),
+    email: $('ctEmail').value.trim(),
+    phone: $('ctPhone').value.trim(),
+    contractor_type: $('ctType').value,
+    gusto_type: gustoType,
+    role_group: $('ctRoleGroup').value,
+    external_cpa_notes: $('ctExternalCpaNotes').value.trim(),
+    dob: $('ctDob').value.trim(),
+    start_date: $('ctStartDate').value.trim(),
+    languages: $('ctLanguages').value.trim(),
+    bmi_min: $('ctBmiMin').value !== '' ? $('ctBmiMin').value : null,
+    bmi_max: $('ctBmiMax').value !== '' ? $('ctBmiMax').value : null,
+  }
+  if (!data.name) { showToast('Name is required', 'warning'); return }
+  try {
+    if (id) {
+      await api(`/api/contractors/${id}`, { method: 'PUT', body: JSON.stringify({ ...data, is_active: 1 }) })
+    } else {
+      await api('/api/contractors', { method: 'POST', body: JSON.stringify(data) })
+    }
+    await reloadContractors()
+    $('contractorModal').classList.add('hidden')
+    showToast('Contractor saved!', 'success')
+    renderContractors()
+    // Refresh the profile panel if it's open for this contractor
+    if (id && ctDetailState.contractorId === parseInt(id)) {
+      obOpenContractorDetail(parseInt(id))
+    }
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function toggleContractorActive(id, currentlyActive, name) {
+  const action = currentlyActive ? 'deactivate' : 'reactivate'
+  if (!confirm(`${currentlyActive ? 'Deactivate' : 'Reactivate'} contractor "${name}"?\n\nAll payroll history will be preserved.`)) return
+  await api(`/api/contractors/${id}/toggle-active`, { method: 'PATCH', body: JSON.stringify({ is_active: currentlyActive ? 0 : 1 }) })
+  await reloadContractors()
+  showToast(`Contractor ${currentlyActive ? 'deactivated' : 'reactivated'}.`, currentlyActive ? 'info' : 'success')
+  renderContractors()
+}
+
+function permanentDeleteContractor(id, name) {
+  // Ensure the modal is in the DOM — it lives inside renderClientPayments template,
+  // so if user is on the Contractors page we inject a lightweight standalone copy.
+  if (!$('permDeleteModal')) {
+    document.body.insertAdjacentHTML('beforeend', `
+      <div id="permDeleteModal" class="hidden fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
+        <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+          <div class="flex items-center gap-3 mb-4">
+            <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+              <i class="fas fa-trash text-red-500 text-lg"></i>
+            </div>
+            <div>
+              <h3 class="text-base font-bold text-gray-900">Permanently Delete</h3>
+              <p class="text-xs text-gray-400 mt-0.5">This action cannot be undone</p>
+            </div>
+          </div>
+          <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-1.5">
+            <p class="font-semibold">You are about to permanently delete:</p>
+            <p class="font-bold text-red-900 text-base" id="permDeleteItemName"></p>
+            <p id="permDeleteWarningText" class="text-xs mt-2"></p>
+          </div>
+          <p class="text-xs text-gray-500 mb-5">Type <strong id="permDeleteConfirmWord" class="font-mono text-gray-800"></strong> to confirm:</p>
+          <input id="permDeleteInput" type="text" placeholder="Type to confirm…"
+            oninput="permDeleteCheckInput()"
+            class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-5 focus:ring-2 focus:ring-red-500 focus:outline-none font-mono">
+          <div class="flex gap-3">
+            <button onclick="permDeleteClose()"
+              class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">Cancel</button>
+            <button id="permDeleteConfirmBtn" onclick="permDeleteConfirm()" disabled
+              class="flex-1 px-4 py-2.5 bg-red-600 text-white text-sm font-bold rounded-xl transition opacity-40 cursor-not-allowed">
+              <i class="fas fa-trash mr-1.5"></i>Delete Forever
+            </button>
+          </div>
+        </div>
+      </div>`)
+  }
+  permDeleteOpen({
+    itemName: name,
+    warningText: 'All associated documents, portal access, and consult history links will be permanently removed. This cannot be recovered.',
+    confirmWord: 'DELETE',
+    onConfirm: async () => {
+      try {
+        await api(`/api/contractors/${id}/permanent`, { method: 'DELETE' })
+        showToast(`Contractor "${name}" permanently deleted.`, 'success')
+        await reloadContractors()
+        renderContractors()
+      } catch(e) { showToast('Error: ' + e.message, 'error') }
+    }
+  })
+}
+
+// ════════════════════════════════════════════════════
+// RATES PAGE
+// ════════════════════════════════════════════════════
+function renderRates() {
+  const types = [
+    { key: 'regular', label: 'Regular', color: 'gray' },
+    { key: 'owner',   label: 'Owner',   color: 'amber' }
+  ]
+  const visitTypes = [
+    { key: 'ASYNC_TEXT_EMAIL', label: 'Async (Text/Email)' },
+    { key: 'SYNC_PHONE',       label: 'Sync Phone' },
+    { key: 'SYNC_VIDEO',       label: 'Sync Video' },
+    { key: 'SYNC_IN_PERSON',   label: 'Sync In-Person' },
+    { key: 'ORDERLY',          label: 'OrderlyMeds' },
+    { key: 'NO_SHOW',          label: 'No Show' }
+  ]
+
+  // Build lookup for type rates
+  const trMap = {}
+  ;(state.typeRates || []).forEach(r => {
+    if (!trMap[r.contractor_type]) trMap[r.contractor_type] = {}
+    trMap[r.contractor_type][r.visit_type] = r.contractor_rate
+  })
+
+  $('mainContent').innerHTML = `
+    <div class="max-w-4xl space-y-5">
+
+      <!-- Info + Recalculate banner -->
+      <div class="card p-4 flex items-start justify-between gap-4">
+        <div class="flex items-start gap-3">
+          <i class="fas fa-info-circle text-blue-400 mt-0.5 flex-shrink-0"></i>
+          <p class="text-sm text-gray-600">
+            <strong>CareValidate Rate</strong> = what CareValidate pays Lion MD per case. &nbsp;·&nbsp;
+            <strong>Contractor Rate</strong> = what Lion MD pays each contractor type per case.
+            Rates apply to <em>new</em> uploads automatically.
+          </p>
+        </div>
+        <div class="flex-shrink-0">
+          <button onclick="recalculatePeriods()" id="recalcBtn"
+            class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold whitespace-nowrap">
+            <i class="fas fa-sync-alt mr-2"></i>Recalculate All Periods
+          </button>
+        </div>
+      </div>
+
+      <!-- CareValidate rates (what CV pays us) -->
+      <div class="card overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between">
+          <div>
+            <h3 class="font-semibold text-gray-700">CareValidate Rates (CV → Lion MD)</h3>
+            <p class="text-xs text-gray-400 mt-0.5">What CareValidate pays Lion MD per case type</p>
+          </div>
+        </div>
+        <div class="rate-grid-row grid px-4 md:px-5 py-2 bg-gray-50 border-b border-gray-100" style="grid-template-columns:1fr 140px 80px;gap:12px;">
+          <span class="text-xs font-semibold text-gray-400 uppercase">Visit Type</span>
+          <span class="text-xs font-semibold text-gray-400 uppercase">CV Pays Us</span>
+          <span></span>
+        </div>
+        ${state.rates.map(r => `
+          <div class="rate-grid-row grid items-center px-4 md:px-5 py-3 border-b border-gray-50 hover:bg-gray-50" id="rate_${r.id}" style="grid-template-columns:1fr 140px 80px;gap:12px;">
+            <div>
+              <div class="font-semibold text-gray-800 text-sm">${r.label || visitTypeLabel(r.visit_type)}</div>
+              <div class="text-xs text-gray-400 font-mono">${r.visit_type}</div>
+            </div>
+            <div class="relative">
+              <span class="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">$</span>
+              <input type="number" id="cv_${r.id}" value="${r.carevalidate_rate}" step="0.01" min="0" class="w-full" style="padding-left:1.6rem"/>
+            </div>
+            <button onclick="saveRate(${r.id})" class="btn-primary px-3 py-1.5 rounded-lg text-xs font-semibold">Save</button>
+          </div>`).join('')}
+      </div>
+
+      <!-- Contractor Type Rates -->
+      <div class="card overflow-hidden">
+        <div class="px-5 py-4 border-b border-gray-100">
+          <h3 class="font-semibold text-gray-700">Contractor Payout Rates (Lion MD → Contractor)</h3>
+          <p class="text-xs text-gray-400 mt-0.5">Each contractor type can have different payout rates per visit type</p>
+        </div>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Visit Type</th>
+                ${types.map(t => `<th class="text-center px-4 py-3 text-xs font-semibold">
+                  <span class="px-2 py-1 rounded-full bg-${t.color}-100 text-${t.color}-700">${t.label}</span>
+                </th>`).join('')}
+                <th class="px-4 py-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              ${visitTypes.map(vt => `
+                <tr class="border-b border-gray-50 hover:bg-gray-50">
+                  <td class="px-5 py-3">
+                    <div class="font-medium text-gray-800">${vt.label}</div>
+                    <div class="text-xs text-gray-400 font-mono">${vt.key}</div>
+                  </td>
+                  ${types.map(t => `
+                    <td class="px-4 py-3 text-center">
+                      <div class="relative inline-block w-24">
+                        <span class="absolute left-2 top-1/2 -translate-y-1/2 text-gray-400 text-sm pointer-events-none">$</span>
+                        <input type="number" id="tr_${t.key}_${vt.key}"
+                          value="${trMap[t.key]?.[vt.key] ?? 0}"
+                          step="0.01" min="0"
+                          class="w-full text-center font-mono" style="padding-left:1.4rem"/>
+                      </div>
+                    </td>`).join('')}
+                  <td class="px-4 py-3">
+                    <button onclick="saveTypeRate('${vt.key}')" class="btn-outline px-3 py-1 rounded-lg text-xs font-semibold">Save Row</button>
+                  </td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- OrderlyMeds note -->
+      <div class="card p-4 bg-amber-50 border border-amber-200">
+        <div class="flex items-start gap-3">
+          <i class="fas fa-lightbulb text-amber-500 mt-0.5 flex-shrink-0"></i>
+          <div class="text-sm text-amber-700">
+            <strong>OrderlyMeds Note:</strong> If the organization name contains "OrderlyMeds", the consult uses a flat rate of <strong>CV $17 / CT $10</strong> regardless of visit type (async, sync, or no-show).
+          </div>
+        </div>
+      </div>
+
+    </div>`
+}
+
+async function saveRate(id) {
+  const cv = parseFloat($(`cv_${id}`).value)
+  const rate = state.rates.find(r => r.id === id)
+  try {
+    await api(`/api/rates/${id}`, { method: 'PUT', body: JSON.stringify({ carevalidate_rate: cv, contractor_rate: cv, label: rate?.label }) })
+    state.rates = await api('/api/rates')
+    showToast('CV rate saved!', 'success')
+    renderRates()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function saveTypeRate(visitType) {
+  const types = ['regular', 'owner']
+  try {
+    for (const t of types) {
+      const val = parseFloat(document.getElementById(`tr_${t}_${visitType}`)?.value || '0')
+      await api('/api/contractor-type-rates', { method: 'PUT', body: JSON.stringify({ contractor_type: t, visit_type: visitType, contractor_rate: val }) })
+    }
+    state.typeRates = await api('/api/contractor-type-rates').catch(() => [])
+    showToast(`${visitType} rates saved for all types!`, 'success')
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function recalculatePeriods(periodKey) {
+  const btn = $('recalcBtn')
+  const targetPeriod = periodKey || state.currentPeriod?.period_key || null
+  const scopeLabel = targetPeriod ? `period ${targetPeriod}` : 'all periods'
+  if (!confirm(`Recalculate fees for ${scopeLabel} using current rates?\n\nThis will update all consult fees that have not been manually overridden.`)) return
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Recalculating...' }
+  try {
+    const body = targetPeriod ? { period_key: targetPeriod } : {}
+    const res = await api('/api/recalculate', { method: 'POST', body: JSON.stringify(body) })
+    showToast(`✅ Recalculated ${res.updated?.toLocaleString()} consults across ${res.sessions} sessions`, 'success')
+    // Reload summary and re-render whatever is on screen
+    await refreshAfterConsultUpdate()
+    state.periods = await api('/api/sessions')
+    populateSessionSelector()
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error')
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-sync-alt mr-2"></i>Recalculate All Periods' }
+  }
+}
+
+
+// ════════════════════════════════════════════════════
+// UNMATCHED DOCTORS — MATCH / QUICK-ADD HANDLERS
+// ════════════════════════════════════════════════════
+async function unmatchedDoMatch(doctorName, rowIdx, periodKey) {
+  const sel = $('matchSel_' + rowIdx)
+  const contractorId = sel?.value
+  if (!contractorId) { showToast('Please select a contractor to match to', 'warning'); return }
+  const row = $('unmatchedRow_' + rowIdx)
+  if (row) row.style.opacity = '0.5'
+  try {
+    const res = await api('/api/doctors/match', {
+      method: 'POST',
+      body: JSON.stringify({ doctor_name: doctorName, contractor_id: parseInt(contractorId), period_key: periodKey })
+    })
+    showToast(`Matched! ${res.updated} consult(s) updated.`, 'success')
+    if (row) row.remove()
+    // Hide the whole card if no unmatched rows remain
+    const remaining = document.querySelectorAll('[id^="unmatchedRow_"]')
+    if (remaining.length === 0) { const card = $('unmatchedCard'); if (card) card.remove() }
+    await reloadContractors()
+    state.currentSummary = await api(`/api/summary/period/${periodKey}`)
+    renderDashboard()
+  } catch(e) {
+    if (row) row.style.opacity = '1'
+    showToast('Error: ' + e.message, 'error')
+  }
+}
+
+async function unmatchedDoQuickAdd(doctorName, rowIdx, periodKey) {
+  if (!confirm(`Add "${doctorName}" as a new contractor and assign all their consults?`)) return
+  const row = $('unmatchedRow_' + rowIdx)
+  if (row) row.style.opacity = '0.5'
+  try {
+    const res = await api('/api/doctors/quick-add', {
+      method: 'POST',
+      body: JSON.stringify({ doctor_name: doctorName, period_key: periodKey })
+    })
+    showToast(`Added ${res.name} as new contractor!`, 'success')
+    if (row) row.remove()
+    // Hide the whole card if no unmatched rows remain
+    const remaining = document.querySelectorAll('[id^="unmatchedRow_"]')
+    if (remaining.length === 0) { const card = $('unmatchedCard'); if (card) card.remove() }
+    await reloadContractors()
+    state.currentSummary = await api(`/api/summary/period/${periodKey}`)
+    renderDashboard()
+  } catch(e) {
+    if (row) row.style.opacity = '1'
+    showToast('Error: ' + e.message, 'error')
+  }
+}
+
+// ════════════════════════════════════════════════════
+async function renderCVDashboard() {
+  if (!state.currentPeriod) {
+    $('mainContent').innerHTML = noDataMsg(); return
+  }
+  let cvData
+  try {
+    cvData = await api(`/api/cv-summary/period/${state.currentPeriod.period_key}`)
+  } catch(e) { $('mainContent').innerHTML = `<p class="text-red-500">${e.message}</p>`; return }
+
+  const t = cvData.total || {}
+  const isCV = state.role === 'carevalidate'
+  const contractors = cvData.byContractor || []
+
+  // Column totals
+  const colTotals = contractors.reduce((acc, r) => {
+    acc.cases       += r.total_cases   || 0
+    acc.async_cases += r.async_cases   || 0
+    acc.async_cv    += r.async_cv      || 0
+    acc.sync_cases  += r.sync_cases    || 0
+    acc.sync_cv     += r.sync_cv       || 0
+    acc.orderly_cases += r.orderly_cases || 0
+    acc.orderly_cv  += r.orderly_cv    || 0
+    acc.total_cv    += r.total_cv      || 0
+    return acc
+  }, { cases:0, async_cases:0, async_cv:0, sync_cases:0, sync_cv:0, orderly_cases:0, orderly_cv:0, total_cv:0 })
+
+  $('mainContent').innerHTML = `
+    <div class="space-y-6">
+      ${isCV ? `
+        <div class="bg-blue-600 rounded-2xl p-6 text-white">
+          <div class="flex items-center gap-4 mb-2">
+            <div class="w-14 h-14 rounded-xl flex-shrink-0 overflow-hidden" style="background:rgba(255,255,255,0.15)">
+              <img src="/static/lion-logo.png" alt="Lion MD" class="w-full h-full object-cover"/>
+            </div>
+            <div>
+              <h2 class="text-xl font-bold">CareValidate Invoice Summary</h2>
+              <p class="opacity-80 text-sm">${state.currentPeriod.period_label}</p>
+            </div>
+          </div>
+        </div>` : `
+        <div class="bg-gray-100 rounded-xl p-4 border border-dashed border-yellow-400">
+          <p class="text-sm text-yellow-700"><i class="fas fa-eye mr-2"></i>This is the <strong>CareValidate view</strong> — only showing what CareValidate owes Lion MD</p>
+        </div>`}
+
+      <!-- Summary Stats Row -->
+      <div class="grid grid-cols-2 lg:grid-cols-4 gap-3">
+        <div class="card p-5 text-center">
+          <div class="text-3xl font-bold mb-1" style="color:var(--lion-gold)">${fmt(t.total_owed)}</div>
+          <div class="text-xs text-gray-500 font-semibold uppercase tracking-wider">Total CV Owes Lion MD</div>
+          <div class="text-xs text-gray-400 mt-1">${fmtNum(t.total_cases)} total cases</div>
+        </div>
+        <div class="card p-5 text-center">
+          <div class="text-2xl font-bold text-blue-600 mb-1">${fmt(colTotals.async_cv)}</div>
+          <div class="text-xs text-gray-500 font-semibold uppercase tracking-wider">Async (Text/Email)</div>
+          <div class="text-xs text-gray-400 mt-1">${fmtNum(colTotals.async_cases)} cases</div>
+        </div>
+        <div class="card p-5 text-center">
+          <div class="text-2xl font-bold text-purple-600 mb-1">${fmt(colTotals.sync_cv)}</div>
+          <div class="text-xs text-gray-500 font-semibold uppercase tracking-wider">Sync (Phone/Video/In-Person)</div>
+          <div class="text-xs text-gray-400 mt-1">${fmtNum(colTotals.sync_cases)} cases</div>
+        </div>
+        <div class="card p-5 text-center">
+          <div class="text-2xl font-bold text-amber-600 mb-1">${fmt(colTotals.orderly_cv)}</div>
+          <div class="text-xs text-gray-500 font-semibold uppercase tracking-wider">OrderlyMeds</div>
+          <div class="text-xs text-gray-400 mt-1">${fmtNum(colTotals.orderly_cases)} cases</div>
+        </div>
+      </div>
+
+      <!-- Contractor Breakdown Table -->
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-table text-blue-500"></i> CV Breakdown by Contractor
+          <span class="text-xs text-gray-400 font-normal ml-1">${contractors.length} contractors</span>
+        </h3>
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm" style="min-width:820px">
+            <thead class="bg-gray-50">
+              <tr class="border-b border-gray-200">
+                <th class="text-left py-3 px-4 text-gray-500 font-semibold">Contractor</th>
+                <th class="text-center py-3 px-3 text-gray-400 font-semibold text-xs">Type</th>
+                <th class="text-right py-3 px-3 text-gray-500 font-semibold whitespace-nowrap">Cases</th>
+                <th class="text-right py-3 px-3 text-blue-500 font-semibold whitespace-nowrap">Async Cases</th>
+                <th class="text-right py-3 px-3 text-blue-600 font-semibold whitespace-nowrap">Async CV</th>
+                <th class="text-right py-3 px-3 text-purple-500 font-semibold whitespace-nowrap">Sync Cases</th>
+                <th class="text-right py-3 px-3 text-purple-600 font-semibold whitespace-nowrap">Sync CV</th>
+                <th class="text-right py-3 px-3 text-amber-500 font-semibold whitespace-nowrap">Orderly Cases</th>
+                <th class="text-right py-3 px-3 text-amber-600 font-semibold whitespace-nowrap">Orderly CV</th>
+                <th class="text-right py-3 px-3 text-gray-700 font-semibold whitespace-nowrap">Total CV</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${contractors.map(r => `
+                <tr class="table-row border-b border-gray-50">
+                  <td class="py-3 px-4 font-medium text-gray-800">${r.contractor_name || '<i class="text-gray-400">Unknown</i>'}</td>
+                  <td class="py-3 px-3 text-center">${contractorTypeBadge(r.contractor_type || 'regular')}</td>
+                  <td class="py-3 px-3 text-right text-gray-600">${fmtNum(r.total_cases)}</td>
+                  <td class="py-3 px-3 text-right text-gray-500 text-xs">${fmtNum(r.async_cases)}</td>
+                  <td class="py-3 px-3 text-right font-medium text-blue-600">${fmt(r.async_cv)}</td>
+                  <td class="py-3 px-3 text-right text-gray-500 text-xs">${fmtNum(r.sync_cases)}</td>
+                  <td class="py-3 px-3 text-right font-medium text-purple-600">${fmt(r.sync_cv)}</td>
+                  <td class="py-3 px-3 text-right text-gray-500 text-xs">${fmtNum(r.orderly_cases)}</td>
+                  <td class="py-3 px-3 text-right font-medium text-amber-600">${fmt(r.orderly_cv)}</td>
+                  <td class="py-3 px-3 text-right font-bold text-gray-800">${fmt(r.total_cv)}</td>
+                </tr>`).join('')}
+            </tbody>
+            <tfoot class="bg-gray-50 border-t-2 border-gray-300">
+              <tr>
+                <td class="py-3 px-4 font-bold text-gray-700" colspan="2">TOTAL</td>
+                <td class="py-3 px-3 text-right font-bold text-gray-700">${fmtNum(colTotals.cases)}</td>
+                <td class="py-3 px-3 text-right font-bold text-blue-600">${fmtNum(colTotals.async_cases)}</td>
+                <td class="py-3 px-3 text-right font-bold text-blue-600">${fmt(colTotals.async_cv)}</td>
+                <td class="py-3 px-3 text-right font-bold text-purple-600">${fmtNum(colTotals.sync_cases)}</td>
+                <td class="py-3 px-3 text-right font-bold text-purple-600">${fmt(colTotals.sync_cv)}</td>
+                <td class="py-3 px-3 text-right font-bold text-amber-600">${fmtNum(colTotals.orderly_cases)}</td>
+                <td class="py-3 px-3 text-right font-bold text-amber-600">${fmt(colTotals.orderly_cv)}</td>
+                <td class="py-3 px-3 text-right font-bold text-gray-800">${fmt(colTotals.total_cv)}</td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+
+      <!-- Period selector -->
+      ${state.periods.length > 1 ? `
+        <div class="card p-5">
+          <h3 class="font-semibold text-gray-700 mb-3">All Periods</h3>
+          <div class="grid grid-cols-2 md:grid-cols-3 gap-3">
+            ${state.periods.map(p => `
+              <button onclick="selectPeriod('${p.period_key}')" class="p-3 rounded-xl text-left border-2 ${state.currentPeriod.period_key === p.period_key ? 'border-yellow-400 bg-yellow-50' : 'border-gray-100 hover:border-gray-300'} transition-all">
+                <div class="font-semibold text-gray-700 text-sm">${p.period_label}</div>
+                <div class="text-xs text-gray-400 mt-0.5">${fmt(p.total_carevalidate_amount)} · ${fmtNum(p.total_cases)} cases</div>
+              </button>`).join('')}
+          </div>
+        </div>` : ''}
+    </div>`
+}
+
+// ════════════════════════════════════════════════════
+// DASHBOARD PDF EXPORT
+// ════════════════════════════════════════════════════
+async function exportDashboardPDF() {
+  if (!state.currentPeriod || !state.currentSummary) {
+    showToast('Please select a period first', 'warning'); return
+  }
+  showLoading('Generating dashboard PDF…')
+  try {
+    const { jsPDF } = window.jspdf
+    const s = state.currentSummary
+    const t = s.totals || {}
+    const pk = state.currentPeriod.period_key
+    const periodLabel = state.currentPeriod.period_label || pk
+
+    // Fetch commission data
+    let commData = { commission_total: 0, by_contractor: [] }
+    try { commData = await api(`/api/commission/${pk}`) } catch(_) {}
+    const commTotal = commData.commission_total || 0
+    const commByC = {}
+    ;(commData.by_contractor || []).forEach(c => { commByC[c.contractor_id] = c.commission })
+
+    // ── Page setup: US Letter 8.5×11 in = 215.9×279.4 mm ──
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' })
+    const PW = doc.internal.pageSize.getWidth()   // 215.9
+    const PH = doc.internal.pageSize.getHeight()  // 279.4
+    const ML = 12, MR = 12  // left/right margins
+
+    // ── Logo pre-load ──
+    const logoDataUrl = await new Promise(resolve => {
+      const img = new Image()
+      img.crossOrigin = 'anonymous'
+      img.onload = () => {
+        const c = document.createElement('canvas')
+        c.width = img.naturalWidth; c.height = img.naturalHeight
+        c.getContext('2d').drawImage(img, 0, 0)
+        resolve(c.toDataURL('image/png'))
+      }
+      img.onerror = () => resolve(null)
+      img.src = '/static/lion-logo.png'
+    })
+
+    // ── Header bar ──
+    doc.setFillColor(26, 26, 46)
+    doc.rect(0, 0, PW, 26, 'F')
+    if (logoDataUrl) doc.addImage(logoDataUrl, 'PNG', ML, 2, 22, 22)
+    doc.setTextColor(201, 168, 76)
+    doc.setFontSize(16)
+    doc.setFont('helvetica', 'bold')
+    doc.text("LION MD's, PLLC", ML + 26, 13)
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(180, 180, 180)
+    doc.text('Payroll Dashboard Report', ML + 26, 20)
+    doc.setTextColor(255, 255, 255)
+    doc.setFontSize(9)
+    doc.setFont('helvetica', 'bold')
+    doc.text(periodLabel, PW - MR, 13, { align: 'right' })
+    doc.setFontSize(7)
+    doc.setFont('helvetica', 'normal')
+    doc.setTextColor(180, 180, 180)
+    doc.text('Generated: ' + new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' }), PW - MR, 20, { align: 'right' })
+
+    // ── KPI summary row ──
+    let y = 32
+    const adjMargin = (t.total_carevalidate || 0) - (t.total_contractor || 0) - commTotal
+    const adjPct = (t.total_carevalidate || 0) > 0 ? ((adjMargin / t.total_carevalidate) * 100).toFixed(1) : 0
+    const kpis = [
+      { label: 'Total Approved Cases', value: fmtNum(t.total_cases),       color: [201,168,76] },
+      { label: 'CV Owes Us',         value: fmt(t.total_carevalidate),   color: [59,130,246] },
+      { label: 'We Owe Contractors', value: fmt(t.total_contractor),     color: [139,92,246] },
+      { label: 'Chris Mgmt Fee',     value: fmt(commTotal),              color: [59,130,246] },
+      { label: `Net Margin (${adjPct}%)`, value: fmt(adjMargin),        color: adjMargin >= 0 ? [22,163,74] : [220,38,38] },
+    ]
+    const kpiW = (PW - ML - MR) / kpis.length
+    kpis.forEach((k, i) => {
+      const kx = ML + i * kpiW
+      doc.setFillColor(248, 249, 252)
+      doc.roundedRect(kx, y, kpiW - 2, 18, 2, 2, 'F')
+      doc.setTextColor(...k.color)
+      doc.setFontSize(10)
+      doc.setFont('helvetica', 'bold')
+      doc.text(k.value, kx + (kpiW - 2) / 2, y + 9, { align: 'center' })
+      doc.setTextColor(100, 100, 100)
+      doc.setFontSize(6)
+      doc.setFont('helvetica', 'normal')
+      doc.text(k.label, kx + (kpiW - 2) / 2, y + 15, { align: 'center' })
+    })
+    y += 23
+
+    // ── Payroll Summary by Doctor ──
+    const doctors = s.byDoctor || []
+    if (doctors.length > 0) {
+      doc.setFontSize(8)
+      doc.setFont('helvetica', 'bold')
+      doc.setTextColor(50, 50, 50)
+      doc.text('Payroll Summary by Doctor', ML, y + 4)
+
+      const totalCV   = doctors.reduce((a, d) => a + (d.total_carevalidate || 0), 0)
+      const totalPay  = doctors.reduce((a, d) => a + (d.total_contractor  || 0), 0)
+      const totalCases= doctors.reduce((a, d) => a + (d.case_count        || 0), 0)
+      const totalAsync= doctors.reduce((a, d) => a + (d.async_count       || 0), 0)
+      const totalSync = doctors.reduce((a, d) => a + (d.sync_count        || 0), 0)
+      const totalOrd  = doctors.reduce((a, d) => a + (d.orderly_count     || 0), 0)
+      const totalNoShow = doctors.reduce((a, d) => a + (d.no_show_count   || 0), 0)
+      const totalOther  = doctors.reduce((a, d) => a + (d.other_count     || 0), 0)
+
+      // ── Build column list respecting dashColVisibility (Actions col excluded from PDF) ──
+      // Relative weight: Doctor always gets 3 units; count cols 1 unit each; money cols 1.6 units each
+      const PDF_COL_DEFS = [
+        { key: 'cases',   label: 'Cases',       halign:'right', weight:1,   textColor:null },
+        { key: 'async',   label: 'Async',       halign:'right', weight:1,   textColor:null },
+        { key: 'sync',    label: 'Sync',        halign:'right', weight:1,   textColor:null },
+        { key: 'orderly', label: 'Orderly',     halign:'right', weight:1,   textColor:null },
+        { key: 'noshow',  label: 'No Show',     halign:'right', weight:1,   textColor:null },
+        { key: 'other',   label: 'Other',       halign:'right', weight:1,   textColor:null },
+        { key: 'cv',      label: 'CV Pays Us',  halign:'right', weight:1.6, textColor:[30,80,180] },
+        { key: 'pay',     label: 'We Pay',      halign:'right', weight:1.6, textColor:[100,40,160] },
+        { key: 'comm',    label: 'Chris Mgmt Fee', halign:'right', weight:1.6, textColor:[30,80,180] },
+        { key: 'margin',  label: 'Margin',      halign:'right', weight:1.6, textColor:null },
+      ]
+      // Filter to only visible columns
+      const visiblePdfCols = PDF_COL_DEFS.filter(c => dashColVisibility[c.key] !== false)
+      // Track which col index is 'margin' (for green/red coloring)
+      const marginPdfIdx = visiblePdfCols.findIndex(c => c.key === 'margin')
+
+      // ── Compute widths so they fill the full available table width ──
+      const tableW = PW - ML - MR  // e.g. 191.9 mm
+      const doctorWeight = 3
+      const totalWeight = doctorWeight + visiblePdfCols.reduce((s, c) => s + c.weight, 0)
+      const unitW = tableW / totalWeight
+      const doctorW = Math.floor(unitW * doctorWeight * 10) / 10
+      // Assign each data col its proportional width; last col gets any remaining mm to avoid rounding gap
+      const dataWidths = visiblePdfCols.map((c, i) => {
+        if (i === visiblePdfCols.length - 1) {
+          const used = doctorW + visiblePdfCols.slice(0, i).reduce((s, c2, j) => s + Math.floor(unitW * c2.weight * 10) / 10, 0)
+          return Math.round((tableW - used) * 10) / 10
+        }
+        return Math.floor(unitW * c.weight * 10) / 10
+      })
+
+      const getColVal = (key, d, comm) => {
+        switch(key) {
+          case 'cases':   return fmtNum(d.case_count)
+          case 'async':   return fmtNum(d.async_count)
+          case 'sync':    return fmtNum(d.sync_count)
+          case 'orderly': return fmtNum(d.orderly_count)
+          case 'noshow':  return d.no_show_count > 0 ? fmtNum(d.no_show_count) : '—'
+          case 'other':   return d.other_count > 0 ? fmtNum(d.other_count) : '—'
+          case 'cv':      return fmt(d.total_carevalidate)
+          case 'pay':     return fmt(d.total_contractor)
+          case 'comm':    return comm > 0 ? fmt(comm) : '—'
+          case 'margin':  return fmt((d.total_carevalidate || 0) - (d.total_contractor || 0) - comm)
+          default:        return '—'
+        }
+      }
+      const getTotalVal = (key) => {
+        const totalComm2 = commTotal
+        const totalMargin2 = totalCV - totalPay - totalComm2
+        switch(key) {
+          case 'cases':   return fmtNum(totalCases)
+          case 'async':   return fmtNum(totalAsync)
+          case 'sync':    return fmtNum(totalSync)
+          case 'orderly': return fmtNum(totalOrd)
+          case 'noshow':  return totalNoShow > 0 ? fmtNum(totalNoShow) : '—'
+          case 'other':   return totalOther > 0 ? fmtNum(totalOther) : '—'
+          case 'cv':      return fmt(totalCV)
+          case 'pay':     return fmt(totalPay)
+          case 'comm':    return fmt(totalComm2)
+          case 'margin':  return fmt(totalMargin2)
+          default:        return '—'
+        }
+      }
+
+      const docRows = doctors.map(d => {
+        const comm = commByC[d.contractor_id] || 0
+        return [d.doctor_name || 'Unmatched', ...visiblePdfCols.map(c => getColVal(c.key, d, comm))]
+      })
+      // Totals footer row
+      const totalComm = commTotal
+      const totalMargin = (totalCV) - (totalPay) - totalComm
+      docRows.push(['TOTAL', ...visiblePdfCols.map(c => getTotalVal(c.key))])
+
+      // Build columnStyles dynamically using computed widths
+      const colStyles = { 0: { cellWidth: doctorW, halign: 'left' } }
+      visiblePdfCols.forEach((c, i) => {
+        const s = { halign: c.halign, cellWidth: dataWidths[i] }
+        if (c.textColor) s.textColor = c.textColor
+        colStyles[i + 1] = s
+      })
+
+      doc.autoTable({
+        startY: y + 6,
+        head: [['Doctor / Contractor', ...visiblePdfCols.map(c => c.label)]],
+        body: docRows.slice(0, docRows.length - 1),
+        foot: [docRows[docRows.length - 1]],
+        theme: 'striped',
+        headStyles: { fillColor:[26,26,46], textColor:[201,168,76], fontStyle:'bold', fontSize:7, cellPadding:2 },
+        footStyles: { fillColor:[235,235,245], textColor:[40,40,80], fontStyle:'bold', fontSize:7, cellPadding:2 },
+        styles: { fontSize:7, cellPadding:2, overflow:'ellipsize' },
+        columnStyles: colStyles,
+        margin: { left: ML, right: MR },
+        tableWidth: tableW,
+        didParseCell: (data) => {
+          // Color margin cells green/red
+          if (marginPdfIdx >= 0 && data.column.index === marginPdfIdx + 1 && data.section !== 'head') {
+            const raw = parseFloat((data.cell.raw || '').toString().replace(/[$,]/g,''))
+            if (!isNaN(raw)) data.cell.styles.textColor = raw >= 0 ? [22,163,74] : [220,38,38]
+          }
+        }
+      })
+      y = doc.lastAutoTable.finalY + 4
+    }
+
+    // ── Footer on every page ──
+    const totalPages = doc.internal.getNumberOfPages()
+    for (let i = 1; i <= totalPages; i++) {
+      doc.setPage(i)
+      doc.setFillColor(26, 26, 46)
+      doc.rect(0, PH - 10, PW, 10, 'F')
+      doc.setTextColor(140, 140, 160)
+      doc.setFontSize(6)
+      doc.setFont('helvetica', 'normal')
+      doc.text("Lion MD's, PLLC · Payroll Dashboard · Confidential", ML, PH - 3)
+      doc.text(`Page ${i} of ${totalPages}`, PW - MR, PH - 3, { align: 'right' })
+    }
+
+    const safePeriod = periodLabel.replace(/\s+/g, '_')
+    doc.save(`LionMD_Dashboard_${safePeriod}.pdf`)
+    hideLoading()
+    showToast('Dashboard PDF downloaded!', 'success')
+  } catch(e) {
+    hideLoading()
+    showToast('PDF export failed: ' + e.message, 'error')
+    console.error(e)
+  }
+}
+
+// ════════════════════════════════════════════════════
+// DASHBOARD EXCEL EXPORT
+// ════════════════════════════════════════════════════
+async function exportDashboardExcel() {
+  if (!state.currentPeriod || !state.currentSummary) {
+    showToast('Please select a period first', 'warning'); return
+  }
+  showLoading('Generating Excel file…')
+  try {
+    const XLSX = window.XLSX
+    const s = state.currentSummary
+    const t = s.totals || {}
+    const pk = state.currentPeriod.period_key
+    const periodLabel = state.currentPeriod.period_label || pk
+    const doctors = s.byDoctor || []
+
+    // ── Fetch commission data (same as PDF) ──
+    let commData = { commission_total: 0, by_contractor: [] }
+    try { commData = await api(`/api/commission/${pk}`) } catch(_) {}
+    const commTotal = commData.commission_total || 0
+    const commByC = {}
+    ;(commData.by_contractor || []).forEach(c => { commByC[c.contractor_id] = c.commission })
+
+    // ── Build same visible column list as PDF ──
+    const PDF_COL_DEFS = [
+      { key: 'cases',   label: 'Cases',          halign: 'right' },
+      { key: 'async',   label: 'Async',          halign: 'right' },
+      { key: 'sync',    label: 'Sync',           halign: 'right' },
+      { key: 'orderly', label: 'Orderly',        halign: 'right' },
+      { key: 'noshow',  label: 'No Show',        halign: 'right' },
+      { key: 'other',   label: 'Other',          halign: 'right' },
+      { key: 'cv',      label: 'CV Pays Us',     halign: 'right', money: true },
+      { key: 'pay',     label: 'We Pay',         halign: 'right', money: true },
+      { key: 'comm',    label: 'Chris Mgmt Fee', halign: 'right', money: true },
+      { key: 'margin',  label: 'Margin',         halign: 'right', money: true },
+    ]
+    const visibleCols = PDF_COL_DEFS.filter(c => dashColVisibility[c.key] !== false)
+
+    // Helpers — raw numbers for proper Excel cell types
+    const rawVal = (key, d, comm) => {
+      switch(key) {
+        case 'cases':   return d.case_count    || 0
+        case 'async':   return d.async_count   || 0
+        case 'sync':    return d.sync_count    || 0
+        case 'orderly': return d.orderly_count || 0
+        case 'noshow':  return d.no_show_count || 0
+        case 'other':   return d.other_count   || 0
+        case 'cv':      return d.total_carevalidate || 0
+        case 'pay':     return d.total_contractor   || 0
+        case 'comm':    return comm || 0
+        case 'margin':  return (d.total_carevalidate || 0) - (d.total_contractor || 0) - (comm || 0)
+        default:        return ''
+      }
+    }
+    const totalCV    = doctors.reduce((a, d) => a + (d.total_carevalidate || 0), 0)
+    const totalPay   = doctors.reduce((a, d) => a + (d.total_contractor   || 0), 0)
+    const totalCases = doctors.reduce((a, d) => a + (d.case_count        || 0), 0)
+    const totalAsync = doctors.reduce((a, d) => a + (d.async_count       || 0), 0)
+    const totalSync  = doctors.reduce((a, d) => a + (d.sync_count        || 0), 0)
+    const totalOrd   = doctors.reduce((a, d) => a + (d.orderly_count     || 0), 0)
+    const totalNoShow= doctors.reduce((a, d) => a + (d.no_show_count     || 0), 0)
+    const totalOther = doctors.reduce((a, d) => a + (d.other_count       || 0), 0)
+    const totalMargin= totalCV - totalPay - commTotal
+
+    const rawTotalVal = (key) => {
+      switch(key) {
+        case 'cases':   return totalCases
+        case 'async':   return totalAsync
+        case 'sync':    return totalSync
+        case 'orderly': return totalOrd
+        case 'noshow':  return totalNoShow
+        case 'other':   return totalOther
+        case 'cv':      return totalCV
+        case 'pay':     return totalPay
+        case 'comm':    return commTotal
+        case 'margin':  return totalMargin
+        default:        return ''
+      }
+    }
+
+    const wb = XLSX.utils.book_new()
+    const ws_data = []
+
+    // ── Row 1: Report title ──
+    ws_data.push([`Lion MD's, PLLC — Payroll Dashboard`])
+    // ── Row 2: Period + generated date ──
+    ws_data.push([`Period: ${periodLabel}`, '', '', '', '', '', '', '', '', '', `Generated: ${new Date().toLocaleDateString('en-US', { year:'numeric', month:'long', day:'numeric' })}`])
+    // ── Row 3: blank ──
+    ws_data.push([])
+
+    // ── KPI row (same 5 KPIs as PDF) ──
+    const adjMargin = (t.total_carevalidate || 0) - (t.total_contractor || 0) - commTotal
+    const adjPct = (t.total_carevalidate || 0) > 0 ? ((adjMargin / t.total_carevalidate) * 100).toFixed(1) : 0
+    ws_data.push(['KPI SUMMARY'])
+    ws_data.push(['Total Approved Cases', 'CV Owes Us', 'We Owe Contractors', 'Chris Mgmt Fee', `Net Margin (${adjPct}%)`])
+    ws_data.push([t.total_cases || 0, t.total_carevalidate || 0, t.total_contractor || 0, commTotal, adjMargin])
+    // ── Row blank ──
+    ws_data.push([])
+
+    // ── Section header ──
+    ws_data.push(['Payroll Summary by Doctor'])
+
+    // ── Column headers ──
+    ws_data.push(['Doctor / Contractor', ...visibleCols.map(c => c.label)])
+
+    // ── Data rows ──
+    const dataStartRow = ws_data.length + 1  // 1-indexed for Excel
+    for (const d of doctors) {
+      const comm = commByC[d.contractor_id] || 0
+      ws_data.push([d.doctor_name || 'Unmatched', ...visibleCols.map(c => rawVal(c.key, d, comm))])
+    }
+
+    // ── Totals row ──
+    const totalRowIdx = ws_data.length  // 0-indexed in ws_data, will be +1 in Excel
+    ws_data.push(['TOTAL', ...visibleCols.map(c => rawTotalVal(c.key))])
+
+    const ws = XLSX.utils.aoa_to_sheet(ws_data)
+
+    // ── Column widths ──
+    ws['!cols'] = [
+      { wch: 30 },  // Doctor name
+      ...visibleCols.map(c => ({ wch: c.money ? 16 : 10 }))
+    ]
+
+    // ── Cell styles via SheetJS (cell-level formatting) ──
+    // SheetJS CE supports number formats but not fill/font color natively.
+    // We set z (number format) for money and count columns, and bold for headers/totals.
+    const totalCols = 1 + visibleCols.length  // Doctor col + data cols
+
+    const R = (r, c) => XLSX.utils.encode_cell({ r, c })
+    const setStyle = (addr, patch) => {
+      if (!ws[addr]) return
+      ws[addr].s = { ...(ws[addr].s || {}), ...patch }
+    }
+
+    const boldFont        = { bold: true }
+    const headerFill      = { patternType: 'solid', fgColor: { rgb: '1A1A2E' } }
+    const headerFont      = { bold: true, color: { rgb: 'C9A84C' } }
+    const footerFill      = { patternType: 'solid', fgColor: { rgb: 'EBEBF5' } }
+    const footerFont      = { bold: true, color: { rgb: '282850' } }
+    const kpiHeaderFill   = { patternType: 'solid', fgColor: { rgb: 'F0F4FF' } }
+    const titleFont       = { bold: true, sz: 14, color: { rgb: '1A1A2E' } }
+    const sectionFont     = { bold: true, sz: 10, color: { rgb: '323232' } }
+    const moneyFmt        = '"$"#,##0.00'
+    const intFmt          = '#,##0'
+    const alignRight      = { horizontal: 'right' }
+    const alignLeft       = { horizontal: 'left' }
+
+    // Row 0: title
+    if (ws[R(0,0)]) ws[R(0,0)].s = { font: titleFont }
+
+    // Row 3 (index 3): "KPI SUMMARY" label
+    if (ws[R(3,0)]) ws[R(3,0)].s = { font: sectionFont }
+
+    // Row 4 (index 4): KPI column headers
+    for (let c = 0; c < 5; c++) {
+      const a = R(4, c)
+      if (ws[a]) ws[a].s = { font: boldFont, fill: kpiHeaderFill, alignment: alignRight }
+    }
+
+    // Row 5 (index 5): KPI values — col 0 is int, cols 1-4 are money
+    if (ws[R(5,0)]) { ws[R(5,0)].s = { numFmt: intFmt, alignment: alignRight }; ws[R(5,0)].z = intFmt }
+    for (let c = 1; c < 5; c++) {
+      const a = R(5, c)
+      if (ws[a]) { ws[a].z = moneyFmt; ws[a].s = { numFmt: moneyFmt, alignment: alignRight } }
+    }
+
+    // Row 7 (index 7): "Payroll Summary by Doctor"
+    if (ws[R(7,0)]) ws[R(7,0)].s = { font: sectionFont }
+
+    // Row 8 (index 8): column header row
+    const headerRowIdx = 8
+    for (let c = 0; c < totalCols; c++) {
+      const a = R(headerRowIdx, c)
+      if (ws[a]) ws[a].s = { font: headerFont, fill: headerFill, alignment: c === 0 ? alignLeft : alignRight }
+    }
+
+    // Data rows (index 9 … dataStartRow + doctors.length - 1)
+    for (let r = 0; r < doctors.length; r++) {
+      const rowIdx = headerRowIdx + 1 + r
+      // Doctor name col
+      const nameAddr = R(rowIdx, 0)
+      if (ws[nameAddr]) ws[nameAddr].s = { alignment: alignLeft }
+      // Data cols
+      visibleCols.forEach((col, ci) => {
+        const a = R(rowIdx, ci + 1)
+        if (!ws[a]) return
+        if (col.money) {
+          ws[a].z = moneyFmt
+          ws[a].s = { numFmt: moneyFmt, alignment: alignRight }
+          // Margin: color positive green, negative red
+          if (col.key === 'margin') {
+            const v = ws[a].v
+            const color = (typeof v === 'number' && v >= 0) ? '16A34A' : 'DC2626'
+            ws[a].s = { numFmt: moneyFmt, alignment: alignRight, font: { color: { rgb: color } } }
+          }
+        } else {
+          ws[a].z = intFmt
+          ws[a].s = { numFmt: intFmt, alignment: alignRight }
+        }
+      })
+    }
+
+    // Totals row
+    const totRowIdx = headerRowIdx + 1 + doctors.length
+    for (let c = 0; c < totalCols; c++) {
+      const a = R(totRowIdx, c)
+      if (!ws[a]) continue
+      const col = visibleCols[c - 1]
+      const isMoney = col?.money
+      const fmt2 = isMoney ? moneyFmt : (c > 0 ? intFmt : undefined)
+      const marginColor = (col?.key === 'margin')
+        ? ((ws[a].v || 0) >= 0 ? '16A34A' : 'DC2626')
+        : null
+      ws[a].s = {
+        font: marginColor
+          ? { bold: true, color: { rgb: marginColor } }
+          : { ...footerFont },
+        fill: footerFill,
+        alignment: c === 0 ? alignLeft : alignRight,
+        ...(fmt2 ? { numFmt: fmt2 } : {})
+      }
+      if (fmt2) ws[a].z = fmt2
+    }
+
+    // ── Freeze top rows through column header row ──
+    ws['!freeze'] = { xSplit: 1, ySplit: headerRowIdx + 1 }
+
+    // ── Merge title cell across all cols ──
+    ws['!merges'] = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: totalCols - 1 } },
+      { s: { r: 3, c: 0 }, e: { r: 3, c: 4 } },
+      { s: { r: 7, c: 0 }, e: { r: 7, c: totalCols - 1 } },
+    ]
+
+    XLSX.utils.book_append_sheet(wb, ws, 'Dashboard')
+
+    const safePeriod = periodLabel.replace(/\s+/g, '_')
+    XLSX.writeFile(wb, `LionMD_Dashboard_${safePeriod}.xlsx`)
+    hideLoading()
+    showToast('Excel file downloaded!', 'success')
+  } catch(e) {
+    hideLoading()
+    showToast('Excel export failed: ' + e.message, 'error')
+    console.error(e)
+  }
+}
+
+// ════════════════════════════════════════════════════
+// GUSTO EXPORT
+// ════════════════════════════════════════════════════
+async function exportGusto() {
+  if (!state.currentPeriod) { showToast('Please select a period first', 'warning'); return }
+  showLoading('Generating Gusto export...')
+  try {
+    const data = await api(`/api/export/gusto/period/${state.currentPeriod.period_key}`)
+
+    // Exact 13-column format matching Gusto upload template
+    const rows = [
+      ['contractor_type', 'first_name', 'last_name', 'Name', 'ssn', 'business_name', 'ein', 'memo', 'hours_worked', 'wage', 'reimbursement', 'bonus', 'invoice_number']
+    ]
+
+    // Get the month/year label for memo (e.g. "January 2026")
+    const periodLabel = state.currentPeriod.period_label || ''
+
+    // Helper: escape a CSV field (quote if contains comma, quote, or newline)
+    function csvField(val) {
+      const s = val === null || val === undefined ? '' : String(val)
+      return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+    }
+
+    data.forEach(row => {
+      // Skip owners — they are not paid through Gusto
+      if ((row.contractor_type || 'regular') === 'owner') return
+
+      const gustoType = row.gusto_type || 'Individual'
+      const wage = row.total_pay || 0
+      const totalCases = row.total_cases || 0
+
+      // memo:           "January 2026 - 3,315 cases"
+      // invoice_number: "January 2026"
+      // Both blank if wage is 0.
+      const casesFormatted = totalCases.toLocaleString('en-US')
+      const memo          = wage > 0 ? `${periodLabel} - ${casesFormatted} cases` : ''
+      const invoiceNumber = wage > 0 ? periodLabel : ''
+
+      if (gustoType === 'Business') {
+        rows.push([
+          'Business',                                    // contractor_type
+          '',                                            // first_name
+          '',                                            // last_name
+          '',                                            // Name
+          '',                                            // ssn
+          row.company || row.contractor_name || '',      // business_name
+          row.ein_ssn || '',                             // ein
+          memo,                                          // memo
+          '',                                            // hours_worked
+          wage,                                          // wage
+          '',                                            // reimbursement
+          '',                                            // bonus
+          invoiceNumber                                  // invoice_number
+        ])
+      } else {
+        let firstName = row.first_name || ''
+        let lastName = row.last_name || ''
+        if (!firstName && !lastName && row.contractor_name) {
+          const parts = row.contractor_name.trim().split(' ')
+          firstName = parts[0] || ''
+          lastName = parts.slice(1).join(' ') || ''
+        }
+        const displayName = (firstName || lastName) ? `${firstName} ${lastName}`.trim() : (row.contractor_name || '')
+        rows.push([
+          'Individual',                                  // contractor_type
+          firstName,                                     // first_name
+          lastName,                                      // last_name
+          displayName,                                   // Name
+          row.ein_ssn || '',                             // ssn
+          '',                                            // business_name
+          '',                                            // ein
+          memo,                                          // memo
+          '',                                            // hours_worked
+          wage,                                          // wage
+          '',                                            // reimbursement
+          '',                                            // bonus
+          invoiceNumber                                  // invoice_number
+        ])
+      }
+    })
+
+    // Build CSV string
+    const csv = rows.map(r => r.map(csvField).join(',')).join('\r\n')
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `LionMD_Gusto_${state.currentPeriod.period_label.replace(/\s+/g,'_')}.csv`
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+
+    showToast('Gusto CSV exported!', 'success')
+  } catch(e) { showToast('Export failed: ' + e.message, 'error') }
+  finally { hideLoading() }
+}
+
+// ════════════════════════════════════════════════════
+// ONBOARDING MODULE
+// ════════════════════════════════════════════════════
+
+const OB_STATUSES = [
+  { key: 'new',                 label: 'New',                icon: 'fa-star',              color: 'bg-blue-100 text-blue-700',    dot: 'bg-blue-400' },
+  { key: 'contacted',           label: 'Contacted',          icon: 'fa-envelope',          color: 'bg-purple-100 text-purple-700', dot: 'bg-purple-400' },
+  { key: 'interview_scheduled', label: 'Interview Scheduled',icon: 'fa-calendar-check',    color: 'bg-yellow-100 text-yellow-700', dot: 'bg-yellow-400' },
+  { key: 'interviewed',         label: 'Interviewed',        icon: 'fa-comments',          color: 'bg-orange-100 text-orange-700', dot: 'bg-orange-400' },
+  { key: 'hired',               label: 'Hired',              icon: 'fa-check-circle',      color: 'bg-green-100 text-green-700',  dot: 'bg-green-500' },
+  { key: 'rejected',            label: 'Rejected',           icon: 'fa-times-circle',      color: 'bg-red-100 text-red-600',     dot: 'bg-red-400' },
+]
+
+const OB_DOC_TYPES = [
+  { key: 'resume',        label: 'Resume / CV' },
+  { key: 'contract',      label: 'Signed Contract' },
+  { key: 'w9',            label: 'W-9 Form' },
+  { key: 'license',       label: 'Medical License' },
+  { key: 'dea',           label: 'DEA Certificate' },
+  { key: 'malpractice',   label: 'Malpractice Insurance' },
+  { key: 'npi',           label: 'NPI Letter' },
+  { key: 'id',            label: 'Government ID' },
+  { key: 'other',         label: 'Other' },
+]
+
+function obStatusInfo(key) {
+  return OB_STATUSES.find(s => s.key === key) || OB_STATUSES[0]
+}
+
+function obStatusBadge(key) {
+  const s = obStatusInfo(key)
+  return `<span class="status-badge ${s.color} whitespace-nowrap"><i class="fas ${s.icon} mr-1"></i>${s.label}</span>`
+}
+
+// ── State ────────────────────────────────────────────────────────
+let obState = {
+  mainTab: 'kanban',        // 'kanban' | 'onboarded' | 'calendar'
+  view: 'pipeline',         // 'pipeline' | 'detail' | 'templates' | 'availability' | 'add'
+  candidates: [],
+  allContractors: [],       // all active payroll contractors from /api/contractors
+  contractorsSearch: '',    // search within Contractors tab
+  selectedId: null,
+  selectedCandidate: null,
+  filterStatus: 'all',
+  search: '',
+  templates: [],
+  availability: [],
+  stats: null,
+  calendarData: null,       // fetched from /api/onboarding/calendar
+  calendarMonth: null,      // Date object for current calendar month view
+  detailTab: 'overview',    // 'overview' | 'resume' | 'documents' | 'meetings' | 'contract'
+}
+
+async function renderOnboarding() {
+  $('mainContent').innerHTML = `<div id="obRoot" class="p-4 md:p-6"></div>`
+  const loaders = [obLoadStats(), obLoadCandidates()]
+  // Always pre-load contractors list so Contractors tab is instant
+  loaders.push(obLoadAllContractors())
+  await Promise.all(loaders)
+  obSyncNav(obState.mainTab)
+  obRenderView()
+}
+
+async function obLoadStats() {
+  try { obState.stats = await api('/api/onboarding/stats') } catch(_) {}
+}
+
+async function obLoadCandidates() {
+  try {
+    const params = new URLSearchParams()
+    if (obState.filterStatus !== 'all') params.set('status', obState.filterStatus)
+    if (obState.search) params.set('search', obState.search)
+    obState.candidates = await api('/api/onboarding/candidates?' + params)
+  } catch(_) { obState.candidates = [] }
+}
+
+async function obLoadCalendar() {
+  try { obState.calendarData = await api('/api/onboarding/calendar') } catch(_) { obState.calendarData = null }
+}
+
+async function obLoadAllContractors() {
+  try { obState.allContractors = await api('/api/contractors') } catch(_) { obState.allContractors = [] }
+}
+
+// Sync sidebar nav highlight to match the active onboarding sub-tab
+function obSyncNav(tab) {
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const map = { kanban: 'onboarding', onboarded: 'contractors', calendar: 'calendar' }
+  const navId = map[tab] || 'onboarding'
+  const el = $(`nav_${navId}`)
+  if (el) el.classList.add('active')
+}
+
+// Switch main top-level tab
+async function obSwitchMainTab(tab) {
+  obState.mainTab = tab
+  obSyncNav(tab)
+
+  // If the onboarding page hasn't been rendered yet (obRoot missing),
+  // do a full render which will load data and call obRenderView() at the end.
+  if (!$('obRoot')) {
+    await renderOnboarding()
+    return
+  }
+
+  if (tab === 'calendar' && !obState.calendarData) {
+    showLoading('Loading calendar…')
+    await obLoadCalendar()
+    hideLoading()
+  }
+  if (tab === 'onboarded') {
+    // Load hired candidates + full active contractors list in parallel
+    const saved = obState.filterStatus
+    obState.filterStatus = 'hired'
+    await Promise.all([
+      obLoadCandidates(),
+      obLoadAllContractors(),
+    ])
+    obState.filterStatus = saved
+  }
+  if (tab === 'kanban') {
+    obState.view = 'pipeline'
+    obState.filterStatus = 'all'
+    await obLoadCandidates()
+  }
+  obRenderView()
+}
+
+function obRenderView() {
+  const root = $('obRoot')
+  if (!root) return
+
+  // Detail / add / templates / availability views take full screen (no tabs)
+  if (obState.view === 'detail') { root.innerHTML = obDetailHTML(); obBindEvents(); return }
+  if (obState.view === 'add')    { root.innerHTML = obAddFormHTML(); obBindEvents(); return }
+  if (obState.view === 'templates')   { root.innerHTML = obTemplatesHTML(); obBindEvents(); return }
+  if (obState.view === 'availability') { root.innerHTML = obAvailabilityHTML(); obBindEvents(); return }
+
+  // Main 3-tab shell
+  const tabs = [
+    { key: 'kanban',    icon: 'fa-columns',    label: 'Pipeline' },
+    { key: 'onboarded', icon: 'fa-user-md',    label: 'Contractors' },
+    { key: 'calendar',  icon: 'fa-calendar-alt', label: 'Calendar & Deadlines' },
+  ]
+  root.innerHTML = `
+    <!-- Top-level tab bar -->
+    <div class="flex items-center gap-0 border-b border-gray-200 mb-5 overflow-x-auto">
+      ${tabs.map(t => `
+        <button onclick="obSwitchMainTab('${t.key}')"
+          class="flex items-center gap-2 px-5 py-3 text-sm font-semibold whitespace-nowrap border-b-2 -mb-px transition-colors
+                 ${obState.mainTab === t.key
+                   ? 'border-yellow-500 text-yellow-700'
+                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'}">
+          <i class="fas ${t.icon}"></i>${t.label}
+        </button>
+      `).join('')}
+    </div>
+    <!-- Tab content -->
+    <div id="obTabContent">
+      ${obState.mainTab === 'kanban'    ? obPipelineHTML() : ''}
+      ${obState.mainTab === 'onboarded' ? obOnboardedHTML() : ''}
+      ${obState.mainTab === 'calendar'  ? obCalendarHTML() : ''}
+    </div>
+  `
+  obBindEvents()
+}
+
+// ── Kanban Board (Pipeline View) ─────────────────────────────────
+function obPipelineHTML() {
+  const s = obState.stats || {}
+  const byStatus = {}
+  ;(s.by_status || []).forEach(r => { byStatus[r.status] = r.count })
+  const total = s.total || 0
+  const inPipe = total - (s.hired||0) - (s.rejected||0)
+
+  return `
+  <!-- Top bar -->
+  <div class="flex flex-wrap items-center gap-2 mb-4">
+    <div>
+      <h2 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-user-plus" style="color:var(--lion-gold)"></i> Contractor Onboarding
+      </h2>
+    </div>
+    <!-- KPI pills -->
+    <div class="flex gap-2 ml-0 md:ml-2 flex-wrap">
+      <span class="text-xs bg-gray-100 text-gray-600 rounded-full px-3 py-1 font-semibold">
+        <i class="fas fa-users mr-1"></i>${total} total
+      </span>
+      <span class="text-xs bg-blue-100 text-blue-700 rounded-full px-3 py-1 font-semibold">
+        <i class="fas fa-stream mr-1"></i>${inPipe} active
+      </span>
+      <span class="text-xs bg-green-100 text-green-700 rounded-full px-3 py-1 font-semibold">
+        <i class="fas fa-check-circle mr-1"></i>${s.hired||0} hired
+      </span>
+      <span class="text-xs bg-red-100 text-red-500 rounded-full px-3 py-1 font-semibold">
+        <i class="fas fa-times-circle mr-1"></i>${s.rejected||0} rejected
+      </span>
+    </div>
+    <!-- Search -->
+    <div class="relative ml-auto" style="min-width:180px">
+      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs"></i>
+      <input type="text" id="obSearch" placeholder="Search…" value="${escHtml(obState.search)}"
+        class="w-full pl-8 pr-3 py-1.5 text-sm border border-gray-200 rounded-xl bg-white"
+        oninput="obOnSearch(this.value)">
+    </div>
+    <!-- Actions -->
+    <div class="relative" id="obMoreMenuWrap">
+      <button onclick="obToggleMoreMenu()" class="btn-outline px-3 py-1.5 rounded-xl text-sm font-medium">
+        <i class="fas fa-ellipsis-h mr-1"></i>More
+      </button>
+      <div id="obMoreMenu" class="hidden absolute right-0 mt-1 w-44 bg-white border border-gray-200 rounded-xl shadow-lg z-30 py-1">
+        <button onclick="obGoAvailability()" class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          <i class="fas fa-clock mr-2 text-gray-400"></i>Availability
+        </button>
+        <button onclick="obGoTemplates()" class="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-50">
+          <i class="fas fa-file-contract mr-2 text-gray-400"></i>Contracts
+        </button>
+      </div>
+    </div>
+    <button onclick="obGoAdd()" class="btn-primary px-4 py-1.5 rounded-xl text-sm font-medium">
+      <i class="fas fa-plus mr-1"></i>Add
+    </button>
+  </div>
+
+  <!-- Kanban board -->
+  <div id="obKanbanBoard">
+    ${OB_STATUSES.map(col => {
+      // When search is active, show all statuses but filter cards
+      const allCards = obState.candidates.filter(c => c.status === col.key)
+      const search   = (obState.search || '').toLowerCase().trim()
+      const cards    = search
+        ? obState.candidates.filter(c => c.status === col.key)   // all fetched (server already filtered)
+        : allCards
+      return `
+      <div class="kb-col" data-status="${col.key}">
+        <div class="kb-col-header">
+          <span class="w-2.5 h-2.5 rounded-full flex-shrink-0 ${col.dot}" style="display:inline-block"></span>
+          <span class="text-xs font-bold text-gray-700 uppercase tracking-wider flex-1 truncate">${col.label}</span>
+          <span class="text-xs font-bold rounded-full min-w-[20px] text-center px-1.5 py-0.5 bg-white/90 text-gray-500 shadow-sm border border-gray-100">${cards.length}</span>
+        </div>
+        <div class="kb-col-body"
+          data-status="${col.key}"
+          ondragover="obDragOver(event)"
+          ondragleave="obDragLeave(event)"
+          ondrop="obDrop(event)">
+          ${cards.length === 0
+            ? `<div class="kb-empty"><i class="fas fa-arrow-down block text-lg mb-1 opacity-50"></i>Drop cards here</div>`
+            : cards.map(c => obKanbanCard(c)).join('')}
+        </div>
+        <button class="kb-add-btn" onclick="obQuickAddInCol('${col.key}')">
+          <i class="fas fa-plus text-xs"></i><span>Add card</span>
+        </button>
+      </div>`
+    }).join('')}
+  </div>
+  `
+}
+
+// ── Contractors Tab (unified: pending onboarding + active payroll contractors) ────────
+function obOnboardedHTML() {
+  const search = (obState.contractorsSearch || '').toLowerCase().trim()
+  const checkItems = ['payroll_sent','contract_sent','contract_signed','training_scheduled','training_completed']
+  const checkLabels = {
+    payroll_sent:       'Payroll Sent',
+    contract_sent:      'Contract Sent',
+    contract_signed:    'Contract Signed',
+    training_scheduled: 'Training Scheduled',
+    training_completed: 'Training Completed',
+  }
+
+  // Section 1: Hired candidates still completing onboarding checklist (not yet converted to payroll)
+  let pending = obState.candidates.filter(c => c.status === 'hired' && !c.converted_contractor_id)
+  if (search) pending = pending.filter(c =>
+    (c.full_name||'').toLowerCase().includes(search) ||
+    (c.company_name||'').toLowerCase().includes(search) ||
+    (c.specialty||'').toLowerCase().includes(search) ||
+    (c.email||'').toLowerCase().includes(search)
+  )
+
+  // Section 2: All active payroll contractors
+  let active = obState.allContractors || []
+  if (search) active = active.filter(c =>
+    (c.name||'').toLowerCase().includes(search) ||
+    (c.company||'').toLowerCase().includes(search) ||
+    (c.email||'').toLowerCase().includes(search) ||
+    (c.ein_ssn||'').toLowerCase().includes(search)
+  )
+
+  // Build a set of converted contractor IDs so we can cross-link
+  const convertedIds = new Set(
+    obState.candidates.filter(c => c.converted_contractor_id).map(c => c.converted_contractor_id)
+  )
+  // Map contractor_id → onboarding candidate for linking
+  const candidateByContractorId = {}
+  obState.candidates.forEach(c => {
+    if (c.converted_contractor_id) candidateByContractorId[c.converted_contractor_id] = c
+  })
+
+  return `
+  <!-- Search bar -->
+  <div class="flex flex-wrap items-center justify-between gap-3 mb-6">
+    <div>
+      <h2 class="text-lg font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-user-md" style="color:var(--lion-gold)"></i> Contractors
+      </h2>
+      <p class="text-xs text-gray-500 mt-0.5">
+        ${pending.length} pending onboarding &nbsp;·&nbsp; ${active.length} active in payroll
+      </p>
+    </div>
+    <div class="relative" style="min-width:240px">
+      <i class="fas fa-search absolute left-3 top-1/2 -translate-y-1/2 text-gray-300 text-xs"></i>
+      <input type="text" placeholder="Search all contractors…" value="${escHtml(obState.contractorsSearch)}"
+        class="w-full pl-8 pr-3 py-2 text-sm border border-gray-200 rounded-xl bg-white"
+        oninput="obContractorsSearch(this.value)">
+    </div>
+  </div>
+
+  <!-- ── Section 1: Pending Onboarding ── -->
+  <div class="mb-8">
+    <div class="flex items-center gap-2 mb-3">
+      <span class="w-2 h-2 rounded-full bg-yellow-400"></span>
+      <h3 class="text-sm font-bold text-gray-700 uppercase tracking-wide">Pending Onboarding</h3>
+      <span class="text-xs bg-yellow-100 text-yellow-700 font-semibold px-2 py-0.5 rounded-full">${pending.length}</span>
+      <div class="flex-1 h-px bg-gray-100"></div>
+      <span class="text-xs text-gray-400">Hired — completing checklist</span>
+    </div>
+    ${pending.length === 0 ? `
+      <div class="flex items-center gap-3 px-5 py-4 bg-gray-50 rounded-xl border border-dashed border-gray-200 text-gray-400 text-sm">
+        <i class="fas fa-check-circle text-green-400 text-lg"></i>
+        <span>All hired contractors have been fully onboarded.</span>
+        <button onclick="obSwitchMainTab('kanban')" class="ml-auto text-xs px-3 py-1.5 rounded-lg border border-gray-200 text-gray-500 hover:bg-gray-100">
+          <i class="fas fa-columns mr-1"></i>View Pipeline
+        </button>
+      </div>
+    ` : `
+      <div class="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+        ${pending.map(c => {
+          const done = checkItems.filter(k => c[k]).length
+          const pct  = Math.round((done / checkItems.length) * 100)
+          const allDone = done === checkItems.length
+          return `
+          <div class="card p-4 cursor-pointer hover:shadow-md transition-shadow border-l-4 ${allDone ? 'border-l-blue-400' : 'border-l-yellow-400'}" onclick="obOpenDetail(${c.id})">
+            <div class="flex items-start justify-between gap-2 mb-3">
+              <div class="flex items-center gap-2 flex-1 min-w-0">
+                <div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style="background:var(--lion-gold)">${(c.full_name||'?')[0].toUpperCase()}</div>
+                <div class="min-w-0">
+                  <p class="font-semibold text-gray-800 text-sm truncate">${escHtml(c.full_name)}</p>
+                  ${c.company_name ? `<p class="text-xs text-gray-500 truncate">${escHtml(c.company_name)}</p>` : ''}
+                  ${c.specialty    ? `<p class="text-xs text-indigo-500 truncate">${escHtml(c.specialty)}</p>` : ''}
+                </div>
+              </div>
+              ${c.converted_contractor_id
+                ? `<span class="status-badge bg-green-100 text-green-700 text-xs shrink-0"><i class="fas fa-check-circle mr-1"></i>In Payroll</span>`
+                : allDone
+                  ? `<span class="status-badge bg-blue-100 text-blue-700 text-xs shrink-0"><i class="fas fa-star mr-1"></i>Ready</span>`
+                  : `<span class="status-badge bg-yellow-100 text-yellow-700 text-xs shrink-0"><i class="fas fa-hourglass-half mr-1"></i>${done}/${checkItems.length}</span>`
+              }
+            </div>
+            <!-- Progress bar -->
+            <div class="mb-2">
+              <div class="w-full bg-gray-100 rounded-full h-1.5">
+                <div class="h-1.5 rounded-full transition-all ${allDone ? 'bg-blue-400' : 'bg-yellow-400'}" style="width:${pct}%"></div>
+              </div>
+            </div>
+            <!-- Checklist dots with labels on hover -->
+            <div class="flex gap-1.5 flex-wrap">
+              ${checkItems.map(k => `
+                <span title="${checkLabels[k]}" class="w-2.5 h-2.5 rounded-full ${c[k] ? 'bg-green-400' : 'bg-gray-200'}"></span>
+              `).join('')}
+            </div>
+            ${c.email ? `<p class="text-xs text-gray-400 mt-2 truncate"><i class="fas fa-envelope mr-1"></i>${escHtml(c.email)}</p>` : ''}
+          </div>`
+        }).join('')}
+      </div>
+    `}
+  </div>
+
+  <!-- ── Section 2: Active Payroll Contractors (grouped by NP / Physician / Contractor) ── -->
+  <div>
+    <div class="flex items-center gap-2 mb-4">
+      <span class="w-2 h-2 rounded-full bg-green-400"></span>
+      <h3 class="text-sm font-bold text-gray-700 uppercase tracking-wide">Active Contractors</h3>
+      <span class="text-xs bg-green-100 text-green-700 font-semibold px-2 py-0.5 rounded-full">${active.length}</span>
+      <div class="flex-1 h-px bg-gray-100"></div>
+      <span class="text-xs text-gray-400">In payroll system</span>
+    </div>
+    ${active.length === 0 ? `
+      <div class="text-center py-12 text-gray-300">
+        <i class="fas fa-user-md text-4xl mb-2 block"></i>
+        <p class="text-sm text-gray-400">No active contractors yet.</p>
+      </div>
+    ` : (() => {
+      // Group contractors by role_group
+      const groups = [
+        { key: 'NP',         label: 'NPs / ARNPs / PAs', icon: 'fa-user-nurse',  color: 'bg-blue-50 text-blue-700 border-blue-200' },
+        { key: 'Physician',  label: 'Physicians',          icon: 'fa-stethoscope', color: 'bg-purple-50 text-purple-700 border-purple-200' },
+        { key: 'Contractor', label: 'Contractors',         icon: 'fa-briefcase',   color: 'bg-gray-50 text-gray-600 border-gray-200' },
+        { key: '',           label: 'Other / Unassigned',  icon: 'fa-user',        color: 'bg-yellow-50 text-yellow-700 border-yellow-200' },
+      ]
+      const byGroup = {}
+      groups.forEach(g => { byGroup[g.key] = [] })
+      active.forEach(ct => {
+        const k = ct.role_group || ''
+        if (byGroup[k] !== undefined) byGroup[k].push(ct)
+        else byGroup[''].push(ct)
+      })
+
+      const thead = `
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr>
+            <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Name</th>
+            <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Group</th>
+            <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Company</th>
+            <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">EIN / SSN</th>
+            <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Email</th>
+            <th class="text-center px-4 py-3 text-gray-500 font-semibold text-xs">Onboarding</th>
+          </tr>
+        </thead>`
+
+      return groups.filter(g => byGroup[g.key].length > 0).map(g => {
+        const list = byGroup[g.key]
+        const rows = list.map(ct => {
+          const linked = candidateByContractorId[ct.id]
+          const fromOb = convertedIds.has(ct.id)
+          return `
+          <tr class="border-b border-gray-50 hover:bg-yellow-50/40 transition-colors cursor-pointer" onclick="obOpenContractorDetail(${ct.id})">
+            <td class="px-5 py-3">
+              <div class="flex items-center gap-3">
+                <div class="w-8 h-8 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style="background:var(--lion-gold)">${(ct.name||'?')[0].toUpperCase()}</div>
+                <div>
+                  <p class="font-semibold text-gray-800">${escHtml(ct.name)}</p>
+                  <p class="text-xs text-gray-400">ID #${ct.id}</p>
+                </div>
+              </div>
+            </td>
+            <td class="px-5 py-3">${roleGroupBadge(ct.role_group || '')}</td>
+            <td class="px-5 py-3 text-gray-600">${escHtml(ct.company || '—')}</td>
+            <td class="px-5 py-3 font-mono text-xs text-gray-500">${escHtml(ct.ein_ssn || '—')}</td>
+            <td class="px-5 py-3 text-gray-500 text-xs">${escHtml(ct.email || '—')}</td>
+            <td class="px-4 py-3 text-center" onclick="event.stopPropagation()">
+              ${fromOb && linked
+                ? `<button onclick="obOpenDetail(${linked.id})" class="text-xs px-2 py-1 rounded-lg bg-green-50 text-green-700 border border-green-200 hover:bg-green-100">
+                    <i class="fas fa-check-circle mr-1"></i>Onboarding
+                  </button>`
+                : `<span class="text-xs text-gray-300">—</span>`
+              }
+            </td>
+          </tr>`
+        }).join('')
+
+        return `
+        <div class="card overflow-hidden mb-4">
+          <div class="flex items-center gap-2 px-5 py-3 border-b border-gray-100 ${g.color} bg-opacity-40">
+            <i class="fas ${g.icon} text-sm"></i>
+            <span class="font-bold text-sm">${g.label}</span>
+            <span class="ml-1 text-xs font-semibold px-2 py-0.5 rounded-full bg-white/60">${list.length}</span>
+          </div>
+          <table class="w-full text-sm">
+            ${thead}
+            <tbody>${rows}</tbody>
+          </table>
+        </div>`
+      }).join('')
+    })()}
+  </div>
+  `
+}
+
+function obContractorsSearch(val) {
+  obState.contractorsSearch = val
+  obRenderView()
+}
+
+// ── Contractor Detail Slide-Over Panel ───────────────────────────
+const ctDetailState = { tab: 'payroll', contractorId: null, licenses: [], fullProfile: null, docs: [], collabAgreements: [], collabProviders: [] }
+
+async function obOpenContractorDetail(contractorId) {
+  ctDetailState.contractorId = contractorId
+  ctDetailState.tab = 'profile'
+  // Create/show overlay
+  let panel = $('ctDetailPanel')
+  if (!panel) {
+    const el = document.createElement('div')
+    el.innerHTML = `
+      <div id="ctDetailOverlay" class="fixed inset-0 bg-black/40 z-40" onclick="obCloseContractorDetail()"></div>
+      <div id="ctDetailPanel" class="fixed top-0 right-0 h-full w-full max-w-lg bg-white shadow-2xl z-50 flex flex-col overflow-hidden" style="transform:translateX(100%);transition:transform 0.25s ease">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100 flex-shrink-0">
+          <h2 class="font-bold text-gray-800 text-base" id="ctDetailName">Loading…</h2>
+          <button onclick="obCloseContractorDetail()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+        <div id="ctDetailBody" class="flex-1 overflow-y-auto p-5">
+          <div class="flex justify-center py-16"><div class="spinner"></div></div>
+        </div>
+      </div>
+    `
+    document.body.appendChild(el.firstElementChild)
+    document.body.appendChild(el.lastElementChild)
+    panel = $('ctDetailPanel')
+  }
+  // Slide in
+  $('ctDetailOverlay').classList.remove('hidden')
+  requestAnimationFrame(() => { panel.style.transform = 'translateX(0)' })
+  $('ctDetailName').textContent = 'Loading…'
+  $('ctDetailBody').innerHTML = '<div class="flex justify-center py-16"><div class="spinner"></div></div>'
+
+  try {
+    const [data, fullProfile, docs] = await Promise.all([
+      api(`/api/contractors/${contractorId}/history`),
+      api(`/api/admin/contractors/${contractorId}/full-profile`).catch(() => null),
+      api(`/api/admin/contractors/${contractorId}/documents`).catch(() => [])
+    ])
+    // full-profile has richer licenses (from provider_licenses) + portal user + ob photo
+    const licenses = fullProfile?.licenses || []
+    ctDetailState.licenses = licenses
+    ctDetailState.fullProfile = fullProfile
+    ctDetailState.docs = docs || []
+    ctDetailState.collabAgreements = fullProfile?.collab_agreements || []
+    ctDetailState.collabProviders  = fullProfile?.collab_providers  || []
+    obRenderContractorDetail(data)
+  } catch(e) {
+    $('ctDetailBody').innerHTML = `<p class="text-red-500 text-sm text-center py-10">${e.message}</p>`
+  }
+}
+
+function obCloseContractorDetail() {
+  const panel = $('ctDetailPanel')
+  const overlay = $('ctDetailOverlay')
+  if (panel)   panel.style.transform = 'translateX(100%)'
+  if (overlay) overlay.classList.add('hidden')
+}
+
+function ctSwitchTab(tab) {
+  ctDetailState.tab = tab
+  const tabs = ['profile','payroll','licenses','documents']
+  tabs.forEach(t => {
+    const btn = $('ctTab_' + t)
+    const pane = $('ctPane_' + t)
+    if (btn) btn.className = t === tab
+      ? 'px-4 py-2 text-sm font-semibold border-b-2 border-yellow-500 text-yellow-700 whitespace-nowrap'
+      : 'px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-700 border-b-2 border-transparent whitespace-nowrap'
+    if (pane) pane.classList.toggle('hidden', t !== tab)
+  })
+  if (tab === 'documents') ctLoadContractorDocs()
+}
+
+function obRenderContractorDetail(data) {
+  const { contractor: ct, periods, totals, ob_candidate } = data
+  if (!ct) return
+  const fmt = n => n != null ? '$' + Number(n).toLocaleString('en-US', {minimumFractionDigits:2, maximumFractionDigits:2}) : '—'
+  const fmtN = n => n != null ? Number(n).toLocaleString() : '0'
+  const cid = ctDetailState.contractorId
+  const licenses = ctDetailState.licenses || []
+  const fp = ctDetailState.fullProfile  // full profile from /api/admin/contractors/:id/full-profile
+  const ctDocs = ctDetailState.docs || []
+  const collabAgreements = ctDetailState.collabAgreements || []
+  const collabProviders  = ctDetailState.collabProviders  || []
+
+  // Merge: contractor row fields take priority; fall back to ob_candidate for photo/specialty
+  const photoData = ct.photo_data || ob_candidate?.photo_data || ''
+  const photoMime = ct.photo_mime || ob_candidate?.photo_mime || 'image/jpeg'
+  const photoSrc  = photoData ? `data:${photoMime};base64,${photoData}` : ''
+  const specialty  = ct.specialty || ob_candidate?.specialty || ''
+  const statesLicensed = ct.states_licensed || ob_candidate?.states_licensed || ''
+  const portalUser = fp?.portal_user || null
+
+  $('ctDetailName').textContent = ct.name || 'Contractor'
+
+  const licStatusBadge = s => {
+    const map = { active:'bg-green-100 text-green-700', expired:'bg-red-100 text-red-700', pending:'bg-yellow-100 text-yellow-700' }
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${map[s]||'bg-gray-100 text-gray-500'}">${(s||'').charAt(0).toUpperCase()+(s||'').slice(1)}</span>`
+  }
+
+  const isExpiringSoon = (dateStr) => {
+    if (!dateStr) return false
+    const d = new Date(dateStr); const now = new Date()
+    return d > now && d < new Date(now.getTime() + 60*24*60*60*1000)
+  }
+
+  $('ctDetailBody').innerHTML = `
+    <!-- Profile card with photo -->
+    <div class="flex items-start gap-4 mb-4 p-4 bg-gray-50 rounded-2xl">
+      <div class="flex-shrink-0">
+        ${photoSrc
+          ? `<img src="${photoSrc}" alt="${escHtml(ct.name)}" class="w-16 h-16 rounded-2xl object-cover border-2 border-yellow-300 shadow">`
+          : `<div class="w-16 h-16 rounded-2xl flex items-center justify-center text-white text-2xl font-bold shadow" style="background:var(--lion-gold)">${(ct.name||'?')[0].toUpperCase()}</div>`
+        }
+      </div>
+      <div class="flex-1 min-w-0">
+        <p class="font-bold text-gray-900 text-base">${escHtml(ct.name)}</p>
+        <p class="text-sm text-gray-500">${escHtml(ct.company || '—')}</p>
+        ${specialty ? `<p class="text-xs text-purple-600 mt-0.5 font-medium"><i class="fas fa-stethoscope mr-1"></i>${escHtml(specialty)}</p>` : ''}
+        <div class="mt-1.5 flex items-center gap-2 flex-wrap">
+          ${contractorTypeBadge(ct.contractor_type || 'regular')}
+          ${roleGroupBadge(ct.role_group || '')}
+          ${ct.npi ? `<span class="px-2 py-0.5 rounded-full text-xs bg-gray-100 text-gray-500 font-mono">NPI: ${escHtml(ct.npi)}</span>` : ''}
+        </div>
+      </div>
+    </div>
+
+    <!-- Portal account status -->
+    ${portalUser ? `
+    <div class="mb-4 p-3 rounded-xl border border-blue-200 bg-blue-50 flex items-center gap-3">
+      <i class="fas fa-user-circle text-blue-500 text-lg flex-shrink-0"></i>
+      <div class="flex-1 min-w-0">
+        <p class="text-xs font-semibold text-blue-800">Portal Account Active</p>
+        <p class="text-xs text-blue-600 truncate">${escHtml(portalUser.email)} · Last login: ${portalUser.last_login ? new Date(portalUser.last_login).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : 'Never'}</p>
+      </div>
+      <button onclick="ctSendInviteEmail(this, ${portalUser.id}, '${escHtml((portalUser.name||ct.name||'').replace(/'/g,"&#39;"))}')"
+        class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-blue-300 text-blue-700 hover:bg-blue-100 transition-colors font-semibold"
+        title="Re-send invite email">
+        <i class="fas fa-envelope mr-1"></i>Resend
+      </button>
+    </div>` : `
+    <div class="mb-4 p-3 rounded-xl border border-gray-200 bg-gray-50 flex items-center gap-3">
+      <i class="fas fa-user-slash text-gray-400 text-lg flex-shrink-0"></i>
+      <div class="flex-1 min-w-0">
+        <p class="text-xs font-semibold text-gray-600">No Portal Account</p>
+        ${(() => {
+          const loginEmail = ct.work_email || ct.email || ''
+          return `<p class="text-xs text-gray-400">${escHtml(loginEmail)} ${loginEmail ? '— ready to invite' : 'No work email on file'}</p>`
+        })()}
+      </div>
+      ${(ct.work_email || ct.email) ? `<button onclick="ctCreateAndSendInvite(this, ${ct.id}, '${escHtml((ct.name||'').replace(/'/g,"&#39;"))}', '${escHtml(ct.work_email || ct.email)}')"
+        class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 transition-colors font-semibold">
+        <i class="fas fa-envelope mr-1"></i>Send Invite
+      </button>` : ''}
+    </div>`}
+
+    <!-- Onboarding link (if came through pipeline) -->
+    ${ob_candidate ? `
+    <div class="mb-4 p-3 rounded-xl border border-green-200 bg-green-50 flex items-center gap-3">
+      <i class="fas fa-check-circle text-green-500"></i>
+      <div class="flex-1 min-w-0">
+        <p class="text-xs font-semibold text-green-800">Onboarded through Pipeline</p>
+        <p class="text-xs text-green-600">${escHtml(ob_candidate.specialty || '')} · Converted ${ob_candidate.converted_at ? new Date(ob_candidate.converted_at).toLocaleDateString('en-US',{month:'short',year:'numeric'}) : ''}</p>
+      </div>
+      <button onclick="obOpenDetail(${ob_candidate.id})" class="text-xs px-2 py-1 rounded-lg bg-white border border-green-300 text-green-700 hover:bg-green-100 flex-shrink-0">
+        View Record
+      </button>
+    </div>` : ''}
+
+    <!-- Lifetime earnings KPIs -->
+    <div class="grid grid-cols-2 gap-3 mb-4">
+      <div class="p-3 rounded-xl bg-yellow-50 border border-yellow-100">
+        <p class="text-xs text-gray-500 mb-1">Lifetime Earnings</p>
+        <p class="text-xl font-bold" style="color:var(--lion-gold)">${fmt(totals?.total_pay)}</p>
+      </div>
+      <div class="p-3 rounded-xl bg-gray-50 border border-gray-100">
+        <p class="text-xs text-gray-500 mb-1">Total Cases</p>
+        <p class="text-xl font-bold text-gray-700">${fmtN(totals?.total_cases)}</p>
+      </div>
+    </div>
+
+    <!-- Tab bar -->
+    <div class="flex border-b border-gray-200 mb-4 -mx-5 px-5 overflow-x-auto">
+      <button id="ctTab_profile" onclick="ctSwitchTab('profile')"
+        class="px-4 py-2 text-sm font-semibold border-b-2 border-yellow-500 text-yellow-700 whitespace-nowrap">
+        <i class="fas fa-id-card mr-1.5"></i>Profile
+      </button>
+      <button id="ctTab_payroll" onclick="ctSwitchTab('payroll')"
+        class="px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-700 border-b-2 border-transparent whitespace-nowrap">
+        <i class="fas fa-receipt mr-1.5"></i>Payroll
+      </button>
+      <button id="ctTab_licenses" onclick="ctSwitchTab('licenses')"
+        class="px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-700 border-b-2 border-transparent whitespace-nowrap">
+        <i class="fas fa-map-marker-alt mr-1.5"></i>Licenses
+        ${licenses.length > 0 ? `<span class="ml-1 px-1.5 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">${licenses.length}</span>` : ''}
+      </button>
+      <button id="ctTab_documents" onclick="ctSwitchTab('documents')"
+        class="px-4 py-2 text-sm font-medium text-gray-400 hover:text-gray-700 border-b-2 border-transparent whitespace-nowrap">
+        <i class="fas fa-folder-open mr-1.5"></i>Documents
+      </button>
+    </div>
+
+    <!-- Profile Pane -->
+    <div id="ctPane_profile" class="">
+      <div class="space-y-3">
+
+        <!-- Contact Info -->
+        <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
+          <p class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">Contact Information</p>
+          <div class="space-y-2.5">
+            <!-- Work email (portal login) -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-briefcase w-4 text-blue-300 flex-shrink-0" title="Work email (portal login)"></i>
+              ${ct.work_email
+                ? `<a href="mailto:${escHtml(ct.work_email)}" class="text-blue-600 hover:underline truncate">${escHtml(ct.work_email)}</a>
+                   <span class="text-[10px] font-semibold text-blue-400 bg-blue-50 border border-blue-200 rounded px-1 py-0.5 flex-shrink-0">Work</span>`
+                : `<span class="italic text-gray-300 text-xs">No work email — <button onclick="openContractorModal(${JSON.stringify(ct).replace(/"/g,'&quot;')})" class="text-blue-400 hover:underline">Add</button></span>`}
+            </div>
+            <!-- Personal email -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-envelope w-4 text-gray-300 flex-shrink-0" title="Personal email"></i>
+              ${ct.email
+                ? `<a href="mailto:${escHtml(ct.email)}" class="text-gray-600 hover:underline truncate">${escHtml(ct.email)}</a>
+                   <span class="text-[10px] font-semibold text-gray-400 bg-gray-100 border border-gray-200 rounded px-1 py-0.5 flex-shrink-0">Personal</span>`
+                : `<span class="italic text-gray-300 text-xs">No personal email</span>`}
+            </div>
+            <!-- Phone -->
+            <div class="flex items-center gap-3 text-sm group">
+              <i class="fas fa-phone w-4 text-gray-300 flex-shrink-0"></i>
+              ${ct.phone
+                ? `<span class="text-gray-700">${escHtml(ct.phone)}</span>`
+                : `<span class="italic text-gray-300">No phone on file</span>`}
+              <button onclick="ctEditPhone(${cid}, '${escHtml(ct.phone||'')}')"
+                class="ml-auto opacity-0 group-hover:opacity-100 transition-opacity text-xs px-2 py-1 rounded-lg text-blue-500 hover:bg-blue-50 flex items-center gap-1 flex-shrink-0"
+                title="Edit phone number">
+                <i class="fas fa-pencil text-xs"></i> ${ct.phone ? 'Edit' : 'Add'}
+              </button>
+            </div>
+            ${ct.address ? `
+            <div class="flex items-start gap-3 text-sm">
+              <i class="fas fa-map-marker-alt w-4 text-gray-300 flex-shrink-0 mt-0.5"></i>
+              <span class="text-gray-700 leading-snug">${escHtml(ct.address)}</span>
+            </div>` : ''}
+            ${ct.ein_ssn ? `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-id-card w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="font-mono text-gray-600 text-xs">EIN/SSN: ${escHtml(ct.ein_ssn)}</span>
+            </div>` : ''}
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-hashtag w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-400 text-xs">Contractor ID #${ct.id}</span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Professional Details -->
+        <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-gray-400 uppercase tracking-wider">Professional Details</p>
+            <div class="flex items-center gap-2">
+              <button onclick="copyProviderDetails(${ct.id})" class="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-200 transition-colors" title="Copy to clipboard">
+                <i class="fas fa-copy"></i> Copy
+              </button>
+              <button onclick="exportProviderDetails(${ct.id})" class="text-xs text-gray-500 hover:text-gray-700 flex items-center gap-1 px-2 py-1 rounded hover:bg-gray-200 transition-colors" title="Export as text file">
+                <i class="fas fa-download"></i> Export
+              </button>
+              <button onclick="openContractorModal(${JSON.stringify(ct).replace(/"/g,'&quot;')})" class="text-xs text-blue-500 hover:underline ml-1">Edit →</button>
+            </div>
+          </div>
+          <div class="space-y-2.5">
+
+            <!-- Full Legal Name -->
+            ${(ct.first_name || ct.last_name) ? `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-user w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Legal Name</span>
+              <span class="text-gray-700 font-medium">${escHtml([ct.first_name, ct.last_name].filter(Boolean).join(' '))}</span>
+            </div>` : ''}
+
+            <!-- DOB -->
+            ${ct.dob ? `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-birthday-cake w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Date of Birth</span>
+              <span class="text-gray-700">${escHtml(ct.dob)}</span>
+            </div>` : `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-birthday-cake w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Date of Birth</span>
+              <span class="italic text-gray-300 text-xs">Not set</span>
+            </div>`}
+
+            <!-- Specialty -->
+            ${specialty ? `
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-stethoscope w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Specialty</span>
+              <span class="text-gray-700">${escHtml(specialty)}</span>
+            </div>` : ''}
+
+            <!-- NPI -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-id-badge w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">NPI</span>
+              ${ct.npi ? `<span class="text-gray-600 font-mono">${escHtml(ct.npi)}</span>` : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
+            <!-- States Licensed -->
+            <div class="flex items-start gap-3 text-sm">
+              <i class="fas fa-map-marker-alt w-4 text-gray-300 flex-shrink-0 mt-0.5"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0 mt-0.5">Licensed</span>
+              <div class="flex flex-wrap gap-1">
+                ${licenses.filter(l => l.license_type !== 'DEA').length > 0
+                  ? licenses.filter(l => l.license_type !== 'DEA').map(l => {
+                      const cls = l.status === 'expired' ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+                      return `<span class="px-1.5 py-0.5 rounded text-xs font-semibold ${cls}">${escHtml(l.state)}</span>`
+                    }).join('')
+                  : `<span class="italic text-gray-300 text-xs">No licenses on file</span>`
+                }
+              </div>
+            </div>
+
+            <!-- DEA Numbers -->
+            <div class="flex items-start gap-3 text-sm">
+              <i class="fas fa-prescription-bottle-alt w-4 text-gray-300 flex-shrink-0 mt-0.5"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0 mt-0.5">DEA</span>
+              <div class="flex flex-wrap gap-1.5">
+                ${licenses.filter(l => l.license_type === 'DEA').length > 0
+                  ? licenses.filter(l => l.license_type === 'DEA').map(d => `
+                      <span class="inline-flex items-center gap-1.5 px-2 py-1 rounded-lg bg-blue-50 border border-blue-200 text-xs">
+                        <span class="font-bold text-blue-700">${escHtml(d.state)}</span>
+                        <span class="font-mono text-gray-600">${escHtml(d.license_number || '—')}</span>
+                        ${d.expiry_date ? `<span class="text-gray-400">exp. ${escHtml(d.expiry_date)}</span>` : ''}
+                      </span>`).join('')
+                  : `<span class="italic text-gray-300 text-xs">None on file</span>`
+                }
+              </div>
+            </div>
+
+            <!-- Languages -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-language w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Languages</span>
+              ${ct.languages ? `<span class="text-gray-700">${escHtml(ct.languages)}</span>` : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
+            <!-- BMI Range -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-weight w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">BMI Range</span>
+              ${(ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '') || (ct.bmi_max !== null && ct.bmi_max !== undefined && ct.bmi_max !== '')
+                ? `<span class="text-gray-700">Min <strong>${ct.bmi_min ?? '—'}</strong> &nbsp;·&nbsp; Max <strong>${ct.bmi_max ?? '—'}</strong></span>`
+                : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
+            <!-- Start Date -->
+            <div class="flex items-center gap-3 text-sm">
+              <i class="fas fa-calendar-check w-4 text-gray-300 flex-shrink-0"></i>
+              <span class="text-gray-500 text-xs w-20 flex-shrink-0">Start Date</span>
+              ${ct.start_date ? `<span class="text-gray-700">${escHtml(ct.start_date)}</span>` : `<span class="italic text-gray-300 text-xs">Not set</span>`}
+            </div>
+
+          </div>
+        </div>
+
+        ${ct.bio ? `
+        <!-- Bio -->
+        <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
+          <p class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-2">Bio / Professional Summary</p>
+          <p class="text-sm text-gray-600 leading-relaxed">${escHtml(ct.bio)}</p>
+        </div>` : ''}
+
+        <!-- CV / Résumé -->
+        <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
+          <p class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-3">CV / Résumé</p>
+          ${(() => {
+            // Check new contractor_documents table first (doc_type === 'cv')
+            const cvDocs = ctDocs.filter(d => d.doc_type === 'cv')
+            if (cvDocs.length > 0) {
+              return cvDocs.map(d => `
+              <div class="flex items-center gap-3 p-3 bg-white rounded-xl border border-green-200 mb-2">
+                <i class="fas fa-file-alt text-green-500 text-lg flex-shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-semibold text-gray-800 truncate">${escHtml(d.file_name)}</p>
+                  <p class="text-xs text-gray-400">${d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : ''}</p>
+                </div>
+                <button onclick="ctDownloadContractorDoc(${d.id}, '${escHtml(d.file_name)}')"
+                  class="text-xs px-3 py-1.5 rounded-lg bg-white border border-green-300 text-green-700 hover:bg-green-100 flex-shrink-0 flex items-center gap-1">
+                  <i class="fas fa-download"></i> Download
+                </button>
+              </div>`).join('')
+            }
+            // Fall back to legacy cv_filename/cv_url columns
+            if (ct.cv_filename) {
+              return `
+              <div class="flex items-center gap-3 p-3 bg-white rounded-xl border border-green-200">
+                <i class="fas fa-file-alt text-green-500 text-lg flex-shrink-0"></i>
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-semibold text-gray-800 truncate">${escHtml(ct.cv_filename)}</p>
+                  ${ct.cv_updated_at ? `<p class="text-xs text-gray-400">Uploaded ${new Date(ct.cv_updated_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</p>` : ''}
+                </div>
+                ${ct.cv_url ? `<a href="${ct.cv_url}" download="${escHtml(ct.cv_filename)}" class="text-xs px-3 py-1.5 rounded-lg bg-white border border-green-300 text-green-700 hover:bg-green-100 flex-shrink-0 flex items-center gap-1">
+                  <i class="fas fa-download"></i> Download
+                </a>` : ''}
+              </div>`
+            }
+            return `<p class="text-xs text-gray-400 italic">No CV uploaded yet — provider can upload from their portal, or admin can upload via the Documents tab.</p>`
+          })()}
+        </div>
+
+        <!-- Documents summary -->
+        ${ctDocs.length > 0 ? `
+        <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-xs font-bold text-gray-400 uppercase tracking-wider">Documents on File</p>
+            <button onclick="ctSwitchTab('documents')" class="text-xs text-blue-500 hover:underline">View all →</button>
+          </div>
+          <div class="flex flex-wrap gap-2">
+            ${ctDocs.slice(0, 6).map(d => {
+              const typeLabel = CT_DOC_TYPES.find(t => t.key === d.doc_type)?.label || d.doc_type
+              return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-lg bg-white border border-gray-200 text-xs text-gray-600">
+                <i class="fas fa-file text-gray-300"></i>${escHtml(typeLabel)}
+              </span>`
+            }).join('')}
+            ${ctDocs.length > 6 ? `<span class="inline-flex items-center px-2 py-1 rounded-lg bg-gray-100 text-xs text-gray-400">+${ctDocs.length - 6} more</span>` : ''}
+          </div>
+        </div>` : ''}
+
+        <!-- State Licenses summary (from provider_licenses table) -->
+        ${licenses.length > 0 ? `
+        <div class="p-4 rounded-xl bg-gray-50 border border-gray-100">
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-xs font-bold text-gray-400 uppercase tracking-wider">Verified State Licenses (${licenses.length})</p>
+            <button onclick="ctSwitchTab('licenses')" class="text-xs text-blue-500 hover:underline">Manage →</button>
+          </div>
+          <div class="flex flex-wrap gap-1.5">
+            ${licenses.map(l => {
+              const cls = l.status === 'expired' ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+              const warn = isExpiringSoon(l.expiry_date) ? ' ring-1 ring-orange-400' : ''
+              return `<span class="px-2.5 py-1 rounded-full text-xs font-semibold ${cls}${warn}" title="${escHtml(l.license_type||'')}${l.expiry_date?' · Exp: '+l.expiry_date:''}">${escHtml(l.state)}</span>`
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+        <!-- Onboarding application data (if provider applied) -->
+        ${ob_candidate ? `
+        <div class="p-4 rounded-xl bg-green-50 border border-green-200">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-green-700 uppercase tracking-wider">Onboarding Application</p>
+            <button onclick="obOpenDetail(${ob_candidate.id})" class="text-xs px-2 py-1 rounded-lg bg-white border border-green-300 text-green-700 hover:bg-green-100">View Full Record →</button>
+          </div>
+          <div class="space-y-1.5 text-sm">
+            ${ob_candidate.specialty ? `<div class="flex items-center gap-2 text-green-800"><i class="fas fa-stethoscope w-4 text-green-400"></i>${escHtml(ob_candidate.specialty)}</div>` : ''}
+            ${ob_candidate.states_licensed ? `<div class="flex items-center gap-2 text-green-800"><i class="fas fa-map-marker-alt w-4 text-green-400"></i>Licensed: ${escHtml(ob_candidate.states_licensed)}</div>` : ''}
+            <div class="flex items-center gap-2 text-green-700 text-xs">
+              <i class="fas fa-calendar w-4 text-green-400"></i>
+              Converted ${ob_candidate.converted_at ? new Date(ob_candidate.converted_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'}) : 'Unknown'}
+            </div>
+          </div>
+        </div>` : ''}
+
+        <!-- Collaborating Agreements: states where this NP/PA has a collab MD -->
+        ${collabAgreements.length > 0 ? `
+        <div class="p-4 rounded-xl bg-purple-50 border border-purple-100">
+          <div class="flex items-center justify-between mb-3">
+            <p class="text-xs font-bold text-purple-700 uppercase tracking-wider"><i class="fas fa-handshake mr-1"></i>Collaborating Agreements (${collabAgreements.length} state${collabAgreements.length!==1?'s':''})</p>
+            <button onclick="ctSwitchTab('licenses')" class="text-xs text-purple-500 hover:underline">Edit →</button>
+          </div>
+          <div class="space-y-1.5">
+            ${collabAgreements.map(l => {
+              const expPast = l.collab_expiry && new Date(l.collab_expiry) < new Date()
+              const expSoon = l.collab_expiry && (() => { const d=new Date(l.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+              return `<div class="space-y-0.5">
+                <div class="flex items-center gap-2 text-sm">
+                  <span class="w-9 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
+                  <span class="font-medium text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+                  ${l.collab_expiry ? `<span class="text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500':'text-gray-400'}">· exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+                  ${l.permitted_actions ? `<span class="ml-auto text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+                </div>
+                ${cpaPending(l) ? `<div class="pl-11">${cpaBadgeHtml(l.notes)}</div>` : (l.notes ? `<div class="pl-11"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : '')}
+              </div>`
+            }).join('')}
+          </div>
+        </div>` : ''}
+
+        <!-- Collaborating Providers: NPs/PAs who list this MD as their collab physician -->
+        ${collabProviders.length > 0 ? `
+        <div class="p-4 rounded-xl bg-indigo-50 border border-indigo-100">
+          <p class="text-xs font-bold text-indigo-700 uppercase tracking-wider mb-3"><i class="fas fa-users mr-1"></i>Providers Under This Agreement</p>
+          ${(() => {
+            const byProvider = {}
+            for (const r of collabProviders) {
+              if (!byProvider[r.contractor_id]) byProvider[r.contractor_id] = { name: r.provider_name, role_group: r.role_group, states: [] }
+              byProvider[r.contractor_id].states.push(r)
+            }
+            return Object.values(byProvider).map(prov => `
+              <div class="mb-2 last:mb-0 p-2.5 rounded-xl bg-white border border-indigo-100">
+                <p class="text-sm font-semibold text-gray-800 mb-1.5"><i class="fas fa-user-nurse mr-1 text-indigo-400 text-xs"></i>${escHtml(prov.name)} <span class="text-xs font-normal text-indigo-400">${escHtml(prov.role_group||'')}</span></p>
+                <div class="flex flex-wrap gap-1">
+                  ${prov.states.map(s => {
+                    const expPast = s.collab_expiry && new Date(s.collab_expiry) < new Date()
+                    const expSoon = s.collab_expiry && (() => { const d=new Date(s.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+                    return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold border border-indigo-200 text-indigo-700 bg-indigo-50 group" title="${escHtml(s.collab_expiry?'Exp: '+s.collab_expiry:'No expiry recorded')}">
+                      ${escHtml(s.state)}${expPast?' ⚠️':expSoon?' ⏰':''}
+                      ${(state.role === 'admin' || state.role === 'license_editor') ? `<button onclick="licClearCollab(${s.id},${cid})" title="Remove collaborating agreement for ${escHtml(s.state)}" class="ml-0.5 text-indigo-300 hover:text-red-500 transition-colors leading-none font-bold" style="font-size:10px;line-height:1">×</button>` : ''}
+                    </span>`
+                  }).join('')}
+                </div>
+              </div>
+            `).join('')
+          })()}
+        </div>` : ''}
+
+        ${(() => {
+          // CPA capacity warning + external notes — only shown for Physicians
+          if (ct.role_group !== 'Physician') return ''
+
+          // State CPA limits for supervising physicians (NPs per physician)
+          const cpaLimits = {
+            CA: { limit: 4,  unit: 'NPs' },
+            GA: { limit: 4,  unit: 'NPs' },
+            FL: { limit: 4,  unit: 'office locations' },
+            NV: { limit: 3,  unit: 'NPs' },
+            NY: { limit: 4,  unit: 'off-site NPs' },
+            VA: { limit: 6,  unit: 'NPs' },
+            OK: { limit: 6,  unit: 'prescribing NPs' },
+            OH: { limit: 5,  unit: 'prescribing NPs' },
+            SC: { limit: 6,  unit: 'FTEs' },
+            MO: { limit: 6,  unit: 'FTEs' },
+            TX: { limit: 7,  unit: 'FTEs' },
+            AL: { limit: 9,  unit: 'FTEs / 360 hrs' },
+          }
+
+          // Count LionMD-supervised NPs per state from collabProviders
+          const lionmdByState = {}
+          for (const r of collabProviders) {
+            if (!lionmdByState[r.state]) lionmdByState[r.state] = 0
+            lionmdByState[r.state]++
+          }
+
+          const limitedStates = Object.keys(cpaLimits).filter(s => lionmdByState[s] > 0 || (ct.external_cpa_notes || '').toLowerCase().includes(s.toLowerCase()))
+          const warningRows = []
+          for (const s of Object.keys(cpaLimits).filter(s => lionmdByState[s] > 0)) {
+            const lion = lionmdByState[s] || 0
+            const { limit, unit } = cpaLimits[s]
+            const pct = lion / limit
+            const barColor = pct >= 1 ? 'bg-red-500' : pct >= 0.75 ? 'bg-amber-400' : 'bg-green-400'
+            warningRows.push(
+              '<div class="flex items-center gap-2">' +
+              '<span class="w-8 text-center text-xs font-bold text-gray-700 bg-white border border-gray-200 rounded py-0.5 flex-shrink-0">' + s + '</span>' +
+              '<div class="flex-1">' +
+              '<div class="flex items-center justify-between text-xs mb-0.5">' +
+              '<span class="text-gray-600">' + unit + '</span>' +
+              '<span class="font-semibold ' + (pct >= 1 ? 'text-red-600' : pct >= 0.75 ? 'text-amber-600' : 'text-green-600') + '">' + lion + ' / ' + limit + '</span>' +
+              '</div>' +
+              '<div class="h-1.5 bg-gray-100 rounded-full overflow-hidden">' +
+              '<div class="h-full rounded-full transition-all ' + barColor + '" style="width:' + Math.min(100, Math.round(pct*100)) + '%"></div>' +
+              '</div>' +
+              '</div>' +
+              '</div>'
+            )
+          }
+
+          const externalNotes = (ct.external_cpa_notes || '').trim()
+          const hasCapacityData = warningRows.length > 0
+          const hasExternalNotes = externalNotes.length > 0
+          if (!hasCapacityData && !hasExternalNotes) return ''
+
+          let html = '<div class="p-4 rounded-xl bg-amber-50 border border-amber-200">'
+          html += '<div class="flex items-center justify-between mb-3">'
+          html += '<p class="text-xs font-bold text-amber-700 uppercase tracking-wider"><i class="fas fa-balance-scale mr-1"></i>CPA Capacity</p>'
+          html += '<button onclick="openContractorModal(' + JSON.stringify(ct).replace(/"/g, '&quot;') + ')" class="text-xs text-amber-600 hover:underline">Edit Notes →</button>'
+          html += '</div>'
+
+          if (hasCapacityData) {
+            html += '<div class="space-y-2 mb-3">' + warningRows.join('') + '</div>'
+            if (warningRows.some(r => r.includes('text-red-600'))) {
+              html += '<p class="text-xs text-red-600 font-semibold"><i class="fas fa-exclamation-triangle mr-1"></i>At or over state limit — review before adding NPs in this state.</p>'
+            } else if (warningRows.some(r => r.includes('text-amber-600'))) {
+              html += '<p class="text-xs text-amber-600"><i class="fas fa-info-circle mr-1"></i>Approaching state limit — monitor capacity.</p>'
+            }
+          }
+
+          if (hasExternalNotes) {
+            html += '<div class="mt-3 pt-3 border-t border-amber-200">'
+            html += '<p class="text-xs font-semibold text-amber-700 mb-1"><i class="fas fa-building mr-1"></i>External CPA Agreements</p>'
+            html += '<p class="text-xs text-gray-700 whitespace-pre-line">' + escHtml(externalNotes) + '</p>'
+            html += '</div>'
+          }
+
+          html += '</div>'
+          return html
+        })()}
+
+      </div>
+    </div>
+
+    <!-- Payroll Pane -->
+    <div id="ctPane_payroll" class="hidden">
+      ${!periods || periods.length === 0 ? `
+        <div class="text-center py-8 text-gray-300">
+          <i class="fas fa-receipt text-3xl mb-2 block"></i>
+          <p class="text-sm text-gray-400">No payroll records yet</p>
+        </div>
+      ` : `
+        <div class="space-y-2">
+          ${periods.map(p => {
+            const pay = Number(p.total_pay || 0)
+            const cases = Number(p.total_cases || 0)
+            return `
+            <div class="p-3 rounded-xl border border-gray-100 hover:border-yellow-200 hover:bg-yellow-50/30 transition-colors">
+              <div class="flex items-center justify-between mb-1">
+                <span class="font-semibold text-gray-800 text-sm">${escHtml(p.period_label || p.period_key || '')}</span>
+                <span class="font-bold text-sm" style="color:var(--lion-gold)">${fmt(pay)}</span>
+              </div>
+              <div class="flex items-center gap-3 text-xs text-gray-400">
+                <span><i class="fas fa-file-medical mr-1"></i>${fmtN(cases)} case${cases !== 1 ? 's' : ''}</span>
+                ${p.async_count   > 0 ? `<span>${fmtN(p.async_count)} async</span>` : ''}
+                ${p.sync_count    > 0 ? `<span>${fmtN(p.sync_count)} sync</span>` : ''}
+                ${p.orderly_count > 0 ? `<span>${fmtN(p.orderly_count)} Orderly</span>` : ''}
+              </div>
+            </div>`
+          }).join('')}
+        </div>
+      `}
+    </div>
+
+    <!-- State Licensing Pane -->
+    <div id="ctPane_licenses" class="hidden">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-xs text-gray-500">${licenses.length} state license${licenses.length !== 1 ? 's' : ''} on file</p>
+        <button onclick="ctOpenAddLicense(${cid})" class="text-xs px-3 py-1.5 rounded-lg btn-primary font-semibold flex items-center gap-1.5">
+          <i class="fas fa-plus"></i> Add License
+        </button>
+      </div>
+
+      <!-- Expiring soon alert -->
+      ${licenses.filter(l => isExpiringSoon(l.expiry_date)).length > 0 ? `
+      <div class="mb-3 p-3 rounded-xl bg-orange-50 border border-orange-200 flex items-start gap-2">
+        <i class="fas fa-exclamation-triangle text-orange-500 mt-0.5 flex-shrink-0"></i>
+        <div>
+          <p class="text-xs font-semibold text-orange-800">Expiring within 60 days</p>
+          <p class="text-xs text-orange-600">${licenses.filter(l => isExpiringSoon(l.expiry_date)).map(l => l.state).join(', ')}</p>
+        </div>
+      </div>` : ''}
+
+      ${licenses.length === 0 ? `
+        <div class="text-center py-10">
+          <i class="fas fa-map-marked-alt text-4xl text-gray-200 mb-3 block"></i>
+          <p class="text-sm text-gray-400">No state licenses on file</p>
+          <p class="text-xs text-gray-300 mt-1">Click "Add License" to track where this provider is licensed</p>
+        </div>
+      ` : `
+        <div class="space-y-2" id="ctLicenseList">
+          ${licenses.map(lic => `
+          <div class="p-3 rounded-xl border border-gray-100 hover:border-blue-200 hover:bg-blue-50/20 transition-colors" id="ctLic_${lic.id}">
+            <div class="flex items-start justify-between gap-2">
+              <div class="flex-1 min-w-0">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="font-bold text-gray-800 text-sm">${escHtml(lic.state)}</span>
+                  ${licStatusBadge(lic.status)}
+                  ${isExpiringSoon(lic.expiry_date) ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">Expiring Soon</span>' : ''}
+                  ${cpaPending(lic) ? cpaBadgeHtml(lic.notes) : ''}
+                </div>
+                ${lic.license_type ? `<p class="text-xs text-gray-500 mt-0.5">${escHtml(lic.license_type)}</p>` : ''}
+                <div class="flex items-center gap-3 mt-1 text-xs text-gray-400 flex-wrap">
+                  ${lic.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(lic.license_number)}</span>` : '<span class="text-red-400 font-semibold italic">No # — edit required</span>'}
+                  ${lic.expiry_date ? `<span><i class="fas fa-calendar mr-0.5"></i>Exp: ${lic.expiry_date}</span>` : ''}
+                  ${lic.permitted_actions ? `<span class="px-1.5 py-0.5 rounded-full font-semibold ${lic.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':lic.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}"><i class="fas fa-stethoscope mr-0.5 text-[10px]"></i>${escHtml(lic.permitted_actions)}</span>` : ''}
+                </div>
+                ${(!cpaPending(lic) && lic.notes) ? `<p class="text-xs text-gray-400 mt-1 italic">${escHtml(lic.notes)}</p>` : ''}
+                ${lic.license_file_name ? `<button onclick="licDownloadFile(${JSON.stringify(lic.license_file_data||'').replace(/"/g,'&quot;')}, '${escHtml(lic.license_file_name)}', '${escHtml(lic.license_file_mime||'')}');" class="mt-1 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"><i class="fas fa-paperclip text-[10px]"></i>${escHtml(lic.license_file_name)}</button>` : ''}
+              </div>
+              <div class="flex items-center gap-1 flex-shrink-0">
+                <button onclick="ctOpenEditLicense(${cid},${JSON.stringify(lic).replace(/"/g,'&quot;')})" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600">
+                  <i class="fas fa-pencil text-xs"></i>
+                </button>
+                <button onclick="ctDeleteLicense(${lic.id},${cid})" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500">
+                  <i class="fas fa-trash text-xs"></i>
+                </button>
+              </div>
+            </div>
+          </div>`).join('')}
+        </div>
+      `}
+    </div>
+
+    <!-- Documents Pane -->
+    <div id="ctPane_documents" class="hidden">
+      <div class="flex items-center justify-between mb-3">
+        <p class="text-xs text-gray-500">Documents on file for this contractor</p>
+        <button onclick="ctUploadContractorDoc()" class="text-xs px-3 py-1.5 rounded-lg btn-primary font-semibold flex items-center gap-1.5">
+          <i class="fas fa-upload"></i> Upload Doc
+        </button>
+      </div>
+      <div id="ctDocList" class="space-y-2">
+        <div class="flex justify-center py-8"><div class="spinner"></div></div>
+      </div>
+    </div>
+  `
+}
+
+// ════════════════════════════════════════════════════════════════════
+// SHARED LICENSE FILE HELPERS
+// Used by all four license modals: admin (ct), provider (pp), lic-editor (lic), onboarding
+// ════════════════════════════════════════════════════════════════════
+
+// ── CPA status helper ─────────────────────────────────────────────
+// Returns true when a license row's CPA agreement is not yet fully executed.
+// "Fully cleared" statuses: Signed & Active, Not Required, Completed/Approved,
+// Autonomy Granted, Expired (agreement lapsed — different from pending),
+// Pending Renewal (existing agreement renewing — still valid).
+const CPA_CLEARED = new Set([
+  'CPA: Signed & Active', 'CPA: Not Required',
+  'CPA: Completed/Approved', 'CPA: Autonomy Granted',
+  'CPA: Expired', 'CPA: Pending Renewal'
+])
+function cpaPending(lic) {
+  if (!lic.collab_physician || !lic.collab_physician.trim()) return false
+  const n = (lic.notes || '').trim()
+  // Empty notes + collab physician = CPA not yet filed → pending
+  if (!n) return true
+  return !CPA_CLEARED.has(n)
+}
+// Amber badge HTML for a pending CPA
+function cpaBadgeHtml(notes) {
+  const raw = (notes || '').trim()
+  const label = raw ? raw.replace(/^CPA:\s*/i, '').trim() : 'Not Yet Filed'
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300 whitespace-nowrap"><i class="fas fa-exclamation-triangle text-[10px]"></i>${escHtml(label)}</span>`
+}
+
+// ── CPA-required state intelligence ────────────────────────────────
+// Source: AANP State Practice Environment map (updated 05/2026)
+// Restricted = CPA required for ALL clinical practice (cannot see patients, prescribe, or diagnose without it)
+// Reduced    = CPA required for at least one element (typically prescribing/Rx authority)
+// Full       = NP may practice fully independently — no CPA needed
+const CPA_RESTRICTED_STATES = new Set([
+  'CA','FL','GA','MI','MO','NC','OK','SC','TN','TX','VA'
+])
+const CPA_REDUCED_STATES = new Set([
+  'AL','AR','IL','IN','KY','LA','MS','NJ','OH','PA','UT','WI','WV'
+  // Note: DE, NY moved to Full Practice as of 2024-2025 per AANP
+])
+// Returns 'restricted', 'reduced', or 'full'
+function cpaStateType(state) {
+  if (CPA_RESTRICTED_STATES.has(state)) return 'restricted'
+  if (CPA_REDUCED_STATES.has(state))    return 'reduced'
+  return 'full'
+}
+// Returns true if this license is for an NP/PA in a state that legally
+// requires a CPA — meaning an unsigned CPA should block Active status
+function cpaRequiredForLic(lic) {
+  const rg = (lic.role_group || lic.contractor_role_group || '').toUpperCase()
+  const isNpPa = rg.includes('NP') || rg.includes('PA') || rg.includes('NURSE')
+  if (!isNpPa) return false
+  return cpaStateType(lic.state) !== 'full'
+}
+// The key gate: returns true when a license should display as PENDING
+// (not Active) because the CPA is required by state law but not yet signed.
+// Only fires when DB status is 'active' — pending/expired stay as-is.
+function cpaBlocksActive(lic) {
+  if (lic.status !== 'active') return false
+  if (!cpaRequiredForLic(lic)) return false
+  return cpaPending(lic)
+}
+
+// Renders the file upload widget HTML (injected into each modal)
+// widgetId: unique prefix so multiple modals don't clash
+// existingFileName: name of already-saved file (if editing)
+function licFileWidgetHtml(widgetId, existingFileName) {
+  const hasFile = existingFileName && existingFileName.trim()
+  return `
+  <div class="border-t border-gray-100 pt-3">
+    <label class="block text-xs font-semibold text-gray-600 mb-1.5">
+      <i class="fas fa-paperclip mr-1 text-gray-400"></i>License Copy (PDF or image)
+    </label>
+    ${hasFile ? `
+    <div id="${widgetId}Existing" class="flex items-center gap-2 mb-2 p-2 bg-green-50 border border-green-200 rounded-lg">
+      <i class="fas fa-file-pdf text-green-500 text-sm"></i>
+      <span class="text-xs text-green-700 font-medium flex-1 truncate">${escHtml(existingFileName)}</span>
+      <button type="button" onclick="${widgetId}RemoveFile()" class="text-xs text-red-400 hover:text-red-600 flex-shrink-0" title="Remove file">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>` : ''}
+    <div id="${widgetId}NewFile" class="${hasFile ? 'hidden' : ''}">
+      <label class="flex items-center gap-2 cursor-pointer px-3 py-2 rounded-lg border-2 border-dashed border-gray-200 hover:border-blue-300 hover:bg-blue-50 transition-colors">
+        <i class="fas fa-upload text-gray-400 text-sm"></i>
+        <span id="${widgetId}Label" class="text-xs text-gray-500">${hasFile ? 'Replace file…' : 'Upload license copy…'}</span>
+        <input type="file" id="${widgetId}Input" accept=".pdf,.jpg,.jpeg,.png,.webp" class="hidden"
+          onchange="${widgetId}FileChosen(this)">
+      </label>
+    </div>
+  </div>`
+}
+
+// Called when user picks a file — reads it and stores in hidden state
+function licFileChosen(input, labelId, stateObj) {
+  const file = input.files[0]
+  if (!file) return
+  const $label = $(labelId)
+  if ($label) $label.textContent = file.name
+  const reader = new FileReader()
+  reader.onload = e => {
+    stateObj.file_data = e.target.result   // full data URL
+    stateObj.file_name = file.name
+    stateObj.file_mime = file.type
+  }
+  reader.readAsDataURL(file)
+}
+
+// Download a license file given raw data (data URL or plain base64)
+function licDownloadFile(fileData, fileName, fileMime) {
+  if (!fileData) { showToast('No file on record', 'error'); return }
+  try {
+    const b64 = fileData.replace(/^data:[^;]+;base64,/, '')
+    const binary = atob(b64)
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    const blob = new Blob([bytes], { type: fileMime || 'application/octet-stream' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = fileName || 'license'
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+  } catch(e) { showToast('Download failed: ' + e.message, 'error') }
+}
+
+// ── License CRUD (admin side) ─────────────────────────────────────
+function ctOpenAddLicense(contractorId) {
+  ctShowLicenseModal(contractorId, null)
+}
+function ctOpenEditLicense(contractorId, lic) {
+  ctShowLicenseModal(contractorId, lic)
+}
+
+const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','PR','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC']
+
+let _ctLicFile = {}  // holds { file_data, file_name, file_mime } for the admin modal
+
+function ctShowLicenseModal(contractorId, lic) {
+  _ctLicFile = {}
+  const isEdit = !!lic
+  let modal = $('ctLicenseModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'ctLicenseModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-[60] flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-800">${isEdit ? 'Edit License' : 'Add State License'}</h3>
+        <button onclick="$('ctLicenseModal').classList.add('hidden')" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+            <select id="ctLicState" class="w-full text-sm">
+              <option value="">Select state…</option>
+              ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+            <select id="ctLicStatus" class="w-full text-sm">
+              <option value="active" ${(!lic||lic.status==='active')?'selected':''}>Active</option>
+              <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+              <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+          <input id="ctLicType" type="text" placeholder="e.g. ARNP, MD, DO, NP, DEA" value="${escHtml(lic?.license_type||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Number *</label>
+          <input id="ctLicNum" type="text" placeholder="e.g. AP123456" value="${escHtml(lic?.license_number||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Expiration Date</label>
+          <input id="ctLicExpiry" type="date" value="${lic?.expiry_date||''}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+          <textarea id="ctLicNotes" rows="2" placeholder="Optional notes…" class="w-full text-sm resize-none">${escHtml(lic?.notes||'')}</textarea>
+        </div>
+        ${licFileWidgetHtml('ctLicF', lic?.license_file_name||'')}
+        <div id="ctLicError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+        <div class="flex gap-3 pt-1">
+          <button onclick="$('ctLicenseModal').classList.add('hidden')" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+          <button onclick="ctSaveLicense(${contractorId}, ${isEdit ? lic.id : 'null'})" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+            ${isEdit ? 'Save Changes' : 'Add License'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `
+  modal.classList.remove('hidden')
+}
+
+function ctLicFFileChosen(input) { licFileChosen(input, 'ctLicFLabel', _ctLicFile) }
+function ctLicFRemoveFile() {
+  _ctLicFile = { remove: true }
+  const ex = $('ctLicFExisting'); if (ex) ex.remove()
+  const nf = $('ctLicFNewFile'); if (nf) nf.classList.remove('hidden')
+}
+
+async function ctSaveLicense(contractorId, licId) {
+  const state   = $('ctLicState').value
+  const status  = $('ctLicStatus').value
+  const type    = ($('ctLicType').value||'').trim()
+  const num     = ($('ctLicNum').value||'').trim()
+  const expiry  = $('ctLicExpiry').value
+  const notes   = ($('ctLicNotes').value||'').trim()
+  const errEl   = $('ctLicError')
+  errEl.classList.add('hidden')
+  if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  if (!num && status === 'active') { errEl.textContent = 'License number is required for active licenses.'; errEl.classList.remove('hidden'); return }
+  const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes }
+  if (_ctLicFile.file_data) {
+    payload.license_file_name = _ctLicFile.file_name
+    payload.license_file_data = _ctLicFile.file_data
+    payload.license_file_mime = _ctLicFile.file_mime
+  }
+  try {
+    if (licId) {
+      await api(`/api/admin/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(payload) })
+      if (_ctLicFile.remove && !_ctLicFile.file_data) {
+        await api(`/api/admin/licenses/${licId}/file`, { method: 'DELETE' }).catch(() => {})
+      }
+    } else {
+      await api(`/api/admin/contractors/${contractorId}/licenses`, { method: 'POST', body: JSON.stringify(payload) })
+    }
+    $('ctLicenseModal').classList.add('hidden')
+    showToast(licId ? 'License updated!' : 'License added!', 'success')
+    // Reload
+    const [data, licenses] = await Promise.all([
+      api(`/api/contractors/${contractorId}/history`),
+      api(`/api/admin/contractors/${contractorId}/licenses`).catch(() => [])
+    ])
+    ctDetailState.licenses = licenses || []
+    obRenderContractorDetail(data)
+    ctSwitchTab('licenses')
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden') }
+}
+
+async function ctDeleteLicense(licId, contractorId) {
+  if (!confirm('Delete this license record?')) return
+  try {
+    await api(`/api/admin/licenses/${licId}`, { method: 'DELETE' })
+    showToast('License deleted.', 'success')
+    const [data, licenses] = await Promise.all([
+      api(`/api/contractors/${contractorId}/history`),
+      api(`/api/admin/contractors/${contractorId}/licenses`).catch(() => [])
+    ])
+    ctDetailState.licenses = licenses || []
+    obRenderContractorDetail(data)
+    ctSwitchTab('licenses')
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+// ── Contractor Documents (admin) ──────────────────────────────────
+
+const CT_DOC_TYPES = [
+  { key: 'w9',          label: 'W-9 Form' },
+  { key: 'malpractice', label: 'Malpractice Insurance' },
+  { key: 'npi',         label: 'NPI Certificate' },
+  { key: 'dea',         label: 'DEA Registration' },
+  { key: 'cv',          label: 'CV / Résumé' },
+  { key: 'medical_license', label: 'Medical License' },
+  { key: 'id',          label: 'Government ID' },
+  { key: 'contract',    label: 'Signed Contract' },
+  { key: 'other',       label: 'Other' },
+]
+
+async function ctLoadContractorDocs() {
+  const cid = ctDetailState.contractorId
+  if (!cid) return
+  const listEl = $('ctDocList')
+  if (!listEl) return
+  try {
+    const docs = await api(`/api/admin/contractors/${cid}/documents`)
+    ctDetailState.docs = docs || []  // keep state in sync for Profile tab summary
+    if (!docs || docs.length === 0) {
+      listEl.innerHTML = `
+        <div class="text-center py-10">
+          <i class="fas fa-folder-open text-4xl text-gray-200 mb-3 block"></i>
+          <p class="text-sm text-gray-400">No documents on file</p>
+          <p class="text-xs text-gray-300 mt-1">Click "Upload Doc" to add W-9, licenses, insurance, etc.</p>
+        </div>`
+      return
+    }
+    listEl.innerHTML = docs.map(d => {
+      const typeLabel = CT_DOC_TYPES.find(t => t.key === d.doc_type)?.label || d.doc_type
+      const icon = ctDocIcon(d.mime_type)
+      const sizeFmt = ctFmtSize(d.file_size)
+      const dateFmt = d.uploaded_at ? new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : ''
+      return `
+        <div class="flex items-center gap-3 p-3 border border-gray-100 rounded-xl hover:border-blue-200 hover:bg-blue-50/20 transition-colors">
+          <div class="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
+            <i class="fas ${icon} text-blue-500 text-sm"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="font-medium text-sm text-gray-800 truncate">${escHtml(d.file_name)}</div>
+            <div class="text-xs text-gray-400 mt-0.5">
+              <span class="inline-flex items-center px-1.5 py-0.5 rounded-full bg-gray-100 text-gray-600 text-xs font-medium mr-1">${escHtml(typeLabel)}</span>
+              ${sizeFmt ? `<span>${sizeFmt}</span>` : ''}
+              ${dateFmt ? `<span class="ml-1">· ${dateFmt}</span>` : ''}
+            </div>
+            ${d.notes ? `<p class="text-xs text-gray-400 mt-0.5 italic">${escHtml(d.notes)}</p>` : ''}
+          </div>
+          <div class="flex gap-1 flex-shrink-0">
+            <button onclick="ctDownloadContractorDoc(${d.id}, '${escHtml(d.file_name)}')"
+              class="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100 flex items-center gap-1" title="Download">
+              <i class="fas fa-download"></i><span class="hidden sm:inline">Download</span>
+            </button>
+            <button onclick="ctDeleteContractorDoc(${d.id})"
+              class="text-xs px-2 py-1.5 bg-red-50 text-red-400 rounded-lg hover:bg-red-100" title="Delete">
+              <i class="fas fa-trash"></i>
+            </button>
+          </div>
+        </div>`
+    }).join('')
+  } catch(e) {
+    if (listEl) listEl.innerHTML = `<p class="text-sm text-red-500 text-center py-6">Failed to load documents: ${escHtml(e.message)}</p>`
+  }
+}
+
+function ctDocIcon(mimeType) {
+  if (!mimeType) return 'fa-file'
+  if (mimeType.includes('pdf'))  return 'fa-file-pdf'
+  if (mimeType.includes('word') || mimeType.includes('docx')) return 'fa-file-word'
+  if (mimeType.includes('image')) return 'fa-file-image'
+  if (mimeType.includes('text')) return 'fa-file-alt'
+  return 'fa-file'
+}
+
+function ctFmtSize(bytes) {
+  if (!bytes || bytes === 0) return ''
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB'
+  return (bytes / (1024 * 1024)).toFixed(1) + ' MB'
+}
+
+function ctUploadContractorDoc() {
+  const cid = ctDetailState.contractorId
+  if (!cid) return
+
+  // Build modal
+  let modal = $('ctDocUploadModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'ctDocUploadModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-[60] flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-800"><i class="fas fa-upload mr-2 text-blue-500"></i>Upload Document</h3>
+        <button onclick="$('ctDocUploadModal').classList.add('hidden')" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Document Type *</label>
+          <select id="ctDocType" class="w-full text-sm">
+            ${CT_DOC_TYPES.map(t => `<option value="${t.key}">${t.label}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Notes (optional)</label>
+          <input id="ctDocNotes" type="text" placeholder="e.g. Expires 2026-01-01" class="w-full text-sm"/>
+        </div>
+        <div class="upload-zone p-6 text-center rounded-xl cursor-pointer" id="ctDocDropZone" onclick="$('ctDocFileInput').click()">
+          <i class="fas fa-file-upload text-3xl text-gray-300 mb-2 block"></i>
+          <p class="text-sm text-gray-500 font-medium">Click to select file</p>
+          <p class="text-xs text-gray-400 mt-1">PDF, DOCX, PNG, JPG — max 10MB</p>
+        </div>
+        <input type="file" id="ctDocFileInput" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt" class="hidden"
+          onchange="ctHandleDocFileSelected(event, ${cid})">
+        <div id="ctDocError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+      </div>
+    </div>`
+  modal.classList.remove('hidden')
+}
+
+async function ctHandleDocFileSelected(event, contractorId) {
+  const file = event.target.files[0]
+  if (!file) return
+  if (file.size > 10 * 1024 * 1024) {
+    const errEl = $('ctDocError')
+    if (errEl) { errEl.textContent = 'File too large (max 10MB)'; errEl.classList.remove('hidden') }
+    return
+  }
+
+  const dz = $('ctDocDropZone')
+  const dzOrig = dz ? dz.innerHTML : ''
+  if (dz) dz.innerHTML = '<div class="flex justify-center py-2"><div class="spinner"></div></div>'
+
+  const docType = $('ctDocType')?.value || 'other'
+  const notes   = ($('ctDocNotes')?.value || '').trim()
+
+  try {
+    const b64 = await new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        // Strip data URL prefix, send raw base64
+        const result = reader.result
+        resolve(result.replace(/^data:[^;]+;base64,/, ''))
+      }
+      reader.onerror = reject
+      reader.readAsDataURL(file)
+    })
+
+    await api(`/api/admin/contractors/${contractorId}/documents`, {
+      method: 'POST',
+      body: JSON.stringify({
+        doc_type:  docType,
+        file_name: file.name,
+        file_data: b64,
+        file_size: file.size,
+        mime_type: file.type || 'application/octet-stream',
+        notes:     notes
+      })
+    })
+
+    $('ctDocUploadModal').classList.add('hidden')
+    showToast('Document uploaded!', 'success')
+    await ctLoadContractorDocs()
+  } catch(e) {
+    if (dz) dz.innerHTML = dzOrig
+    const errEl = $('ctDocError')
+    if (errEl) { errEl.textContent = 'Upload failed: ' + e.message; errEl.classList.remove('hidden') }
+    showToast('Upload failed: ' + e.message, 'error')
+  }
+}
+
+// ── Provider Details Copy / Export ───────────────────────────────
+function buildProviderDetailsText(contractorId) {
+  const fp = ctDetailState.fullProfile
+  const ct = fp?.contractor || fp
+  const licenses = ctDetailState.licenses || []
+  if (!ct) return null
+
+  const name = [ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.name || '—'
+  const stateLicenses = licenses.filter(l => l.license_type !== 'DEA')
+  const deaLicenses   = licenses.filter(l => l.license_type === 'DEA')
+
+  const lines = [
+    '─────────────────────────────────────',
+    'PROVIDER PROFESSIONAL DETAILS',
+    '─────────────────────────────────────',
+    `Name:         ${name}`,
+  ]
+  if (ct.dob)       lines.push(`Date of Birth: ${ct.dob}`)
+  if (ct.specialty || ct.role_group) lines.push(`Specialty:    ${[ct.specialty, ct.role_group].filter(Boolean).join(' / ')}`)
+  if (ct.npi)       lines.push(`NPI:          ${ct.npi}`)
+  if (ct.email)     lines.push(`Email:        ${ct.email}`)
+  if (ct.phone)     lines.push(`Phone:        ${ct.phone}`)
+  if (ct.ein_ssn)   lines.push(`EIN / SSN:    ${ct.ein_ssn}`)
+  if (ct.languages) lines.push(`Languages:    ${ct.languages}`)
+  if (ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '')
+    lines.push(`BMI Range:    Min ${ct.bmi_min}  Max ${ct.bmi_max ?? '—'}`)
+  if (ct.start_date) lines.push(`Start Date:   ${ct.start_date}`)
+
+  if (stateLicenses.length > 0) {
+    lines.push('')
+    lines.push('STATE LICENSES')
+    lines.push('─────────────────────────────────────')
+    stateLicenses.forEach(l => {
+      const parts = [l.state, l.license_type, l.license_number].filter(Boolean)
+      if (l.expiry_date) parts.push(`exp. ${l.expiry_date}`)
+      if (l.status && l.status !== 'active') parts.push(`(${l.status})`)
+      lines.push('  ' + parts.join('  ·  '))
+    })
+  }
+
+  if (deaLicenses.length > 0) {
+    lines.push('')
+    lines.push('DEA CERTIFICATES')
+    lines.push('─────────────────────────────────────')
+    deaLicenses.forEach(d => {
+      const parts = [d.state, d.license_number].filter(Boolean)
+      if (d.expiry_date) parts.push(`exp. ${d.expiry_date}`)
+      lines.push('  ' + parts.join('  ·  '))
+    })
+  }
+
+  lines.push('─────────────────────────────────────')
+  return lines.join('\n')
+}
+
+function copyProviderDetails(contractorId) {
+  const text = buildProviderDetailsText(contractorId)
+  if (!text) { showToast('No provider data loaded', 'error'); return }
+  navigator.clipboard.writeText(text)
+    .then(() => showToast('Provider details copied to clipboard', 'success'))
+    .catch(() => showToast('Copy failed — try the Export button instead', 'error'))
+}
+
+function exportProviderDetails(contractorId) {
+  const text = buildProviderDetailsText(contractorId)
+  if (!text) { showToast('No provider data loaded', 'error'); return }
+  const fp = ctDetailState.fullProfile
+  const ct = fp?.contractor || fp
+  const name = (ct?.name || 'provider').replace(/\s+/g, '_')
+  const date = new Date().toISOString().slice(0, 10)
+  const fileName = `${name}_details_${date}.txt`
+  const blob = new Blob([text], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url; a.download = fileName; a.click()
+  URL.revokeObjectURL(url)
+  showToast('Exported as ' + fileName, 'success')
+}
+
+async function ctDownloadContractorDoc(docId, fileName) {
+  try {
+    showLoading('Preparing download…')
+    const doc = await api(`/api/admin/contractor-documents/${docId}`)
+    hideLoading()
+    if (!doc.file_data) { showToast('No file data found', 'error'); return }
+    // file_data may be a raw base64 string or a full data URL — strip prefix if present
+    const binary = atob(doc.file_data.replace(/^data:[^;]+;base64,/, ''))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    const blob = new Blob([bytes], { type: doc.mime_type || 'application/octet-stream' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = fileName
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    showToast('Downloaded!', 'success')
+  } catch(e) { hideLoading(); showToast('Download failed: ' + e.message, 'error') }
+}
+
+async function ctDeleteContractorDoc(docId) {
+  if (!confirm('Delete this document? This cannot be undone.')) return
+  try {
+    await api(`/api/admin/contractor-documents/${docId}`, { method: 'DELETE' })
+    showToast('Document deleted.', 'success')
+    await ctLoadContractorDocs()
+  } catch(e) { showToast('Failed to delete: ' + e.message, 'error') }
+}
+
+function ctEditPhone(contractorId, currentPhone) {
+  let modal = $('ctPhoneModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'ctPhoneModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-[60] flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-800"><i class="fas fa-phone mr-2 text-blue-400"></i>${currentPhone ? 'Edit' : 'Add'} Phone Number</h3>
+        <button onclick="$('ctPhoneModal').classList.add('hidden')"
+          class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Phone Number</label>
+          <input id="ctPhoneInput" type="tel" placeholder="(555) 123-4567"
+            value="${escHtml(currentPhone)}"
+            class="w-full text-sm"
+            onkeydown="if(event.key==='Enter') ctSavePhone(${contractorId})"/>
+        </div>
+        <div id="ctPhoneError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+        <div class="flex gap-3 pt-1">
+          <button onclick="$('ctPhoneModal').classList.add('hidden')"
+            class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">
+            Cancel
+          </button>
+          <button onclick="ctSavePhone(${contractorId})"
+            class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+            Save
+          </button>
+        </div>
+      </div>
+    </div>`
+  modal.classList.remove('hidden')
+  setTimeout(() => $('ctPhoneInput')?.focus(), 50)
+}
+
+async function ctSavePhone(contractorId) {
+  const phone = ($('ctPhoneInput')?.value || '').trim()
+  const errEl = $('ctPhoneError')
+  if (errEl) errEl.classList.add('hidden')
+  try {
+    await api(`/api/admin/contractors/${contractorId}/phone`, {
+      method: 'PATCH',
+      body: JSON.stringify({ phone })
+    })
+    $('ctPhoneModal').classList.add('hidden')
+    showToast('Phone number saved.', 'success')
+    // Reload the panel to reflect the change
+    await obOpenContractorDetail(contractorId)
+    ctSwitchTab('profile')
+  } catch(e) {
+    if (errEl) { errEl.textContent = 'Failed to save: ' + e.message; errEl.classList.remove('hidden') }
+    showToast('Failed to save phone: ' + e.message, 'error')
+  }
+}
+
+// ── Calendar & Deadlines Tab ──────────────────────────────────────
+function obCalendarHTML() {
+  const d = obState.calendarData
+  if (!d) {
+    return `<div class="text-center py-20 text-gray-300">
+      <i class="fas fa-spinner fa-spin text-4xl mb-3 block"></i>
+      <p class="text-sm text-gray-400">Loading calendar…</p>
+    </div>`
+  }
+
+  const checkLabels = {
+    payroll_sent:       { label: 'Payroll Onboarding Sent',  icon: 'fa-money-check', color: 'bg-blue-100 text-blue-700' },
+    contract_sent:      { label: 'Contract Sent',            icon: 'fa-paper-plane',  color: 'bg-purple-100 text-purple-700' },
+    contract_signed:    { label: 'Contract Signed',          icon: 'fa-signature',    color: 'bg-indigo-100 text-indigo-700' },
+    training_scheduled: { label: 'Training Scheduled',       icon: 'fa-calendar-plus', color: 'bg-yellow-100 text-yellow-700' },
+    training_completed: { label: 'Training Completed',       icon: 'fa-graduation-cap', color: 'bg-green-100 text-green-700' },
+  }
+
+  // Build pending checklist items from hired_pending
+  const pendingTasks = []
+  ;(d.hired_pending || []).forEach(c => {
+    Object.entries(checkLabels).forEach(([key, meta]) => {
+      if (!c[key]) pendingTasks.push({ candidate: c, key, ...meta })
+    })
+  })
+
+  // Upcoming meetings — next 30 days
+  const now = new Date()
+  const in30 = new Date(now.getTime() + 30 * 86400000)
+  const upcomingMeetings = (d.meetings || []).filter(m => {
+    if (!m.scheduled_at) return false
+    const t = new Date(m.scheduled_at)
+    return t >= now
+  })
+  const pastMeetings = (d.meetings || []).filter(m => {
+    if (!m.scheduled_at) return false
+    return new Date(m.scheduled_at) < now
+  }).slice(-5).reverse()
+
+  // Calendar grid builder
+  if (!obState.calendarMonth) obState.calendarMonth = new Date(now.getFullYear(), now.getMonth(), 1)
+  const calMonth = obState.calendarMonth
+  const calYear  = calMonth.getFullYear()
+  const calMo    = calMonth.getMonth()
+  const firstDay = new Date(calYear, calMo, 1).getDay()  // 0=Sun
+  const daysInMonth = new Date(calYear, calMo + 1, 0).getDate()
+  const monthLabel  = calMonth.toLocaleDateString('en-US', { month: 'long', year: 'numeric' })
+
+  // Map meetings to day numbers within this month
+  const meetingsByDay = {}
+  ;(d.meetings || []).forEach(m => {
+    if (!m.scheduled_at) return
+    const dt = new Date(m.scheduled_at)
+    if (dt.getFullYear() === calYear && dt.getMonth() === calMo) {
+      const day = dt.getDate()
+      if (!meetingsByDay[day]) meetingsByDay[day] = []
+      meetingsByDay[day].push(m)
+    }
+  })
+
+  const todayNum = (now.getFullYear() === calYear && now.getMonth() === calMo) ? now.getDate() : -1
+
+  // Build calendar cells
+  let cells = ''
+  const totalCells = Math.ceil((firstDay + daysInMonth) / 7) * 7
+  for (let i = 0; i < totalCells; i++) {
+    const dayNum = i - firstDay + 1
+    const isValid = dayNum >= 1 && dayNum <= daysInMonth
+    const isToday = dayNum === todayNum
+    const dots = isValid && meetingsByDay[dayNum] ? meetingsByDay[dayNum] : []
+    const isPast = isValid && dayNum < todayNum
+    cells += `
+      <div class="border border-gray-100 rounded-lg min-h-[68px] p-1.5 ${isValid ? 'bg-white' : 'bg-gray-50/50'}
+                  ${isToday ? 'ring-2 ring-yellow-400 ring-offset-1' : ''}
+                  ${isValid && !isPast ? 'cursor-pointer hover:bg-amber-50 transition-colors' : ''}">
+        ${isValid ? `
+          <div class="text-xs font-semibold mb-1 ${isToday ? 'text-yellow-600' : isPast ? 'text-gray-300' : 'text-gray-700'}">${dayNum}</div>
+          ${dots.map(m => `
+            <div class="text-xs rounded px-1 py-0.5 mb-0.5 truncate font-medium
+                        ${m.meeting_status === 'completed' ? 'bg-green-100 text-green-700' :
+                          new Date(m.scheduled_at) < now ? 'bg-gray-100 text-gray-400' :
+                          'bg-blue-100 text-blue-700'}">
+              ${escHtml((m.title || m.meeting_type || 'Meeting').substring(0,16))}
+            </div>
+          `).join('')}
+        ` : ''}
+      </div>`
+  }
+
+  const meetingTypeColor = t =>
+    t==='interview' ? 'bg-blue-100 text-blue-700' :
+    t==='onboarding_call' ? 'bg-purple-100 text-purple-700' :
+    t==='training' ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'
+
+  return `
+  <div class="space-y-6">
+
+    <!-- Calendar Grid Card -->
+    <div class="card p-5">
+      <div class="flex items-center justify-between mb-4">
+        <button onclick="obCalPrev()" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors">
+          <i class="fas fa-chevron-left"></i>
+        </button>
+        <h3 class="font-bold text-gray-800 text-base">${monthLabel}</h3>
+        <button onclick="obCalNext()" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 transition-colors">
+          <i class="fas fa-chevron-right"></i>
+        </button>
+      </div>
+      <!-- Day headers -->
+      <div class="grid grid-cols-7 gap-1 mb-1">
+        ${['Sun','Mon','Tue','Wed','Thu','Fri','Sat'].map(d =>
+          `<div class="text-center text-xs font-semibold text-gray-400 py-1">${d}</div>`
+        ).join('')}
+      </div>
+      <!-- Day cells -->
+      <div class="grid grid-cols-7 gap-1">
+        ${cells}
+      </div>
+      <p class="text-xs text-gray-400 mt-3 text-center">
+        <span class="inline-block w-2 h-2 rounded bg-blue-200 mr-1"></span>Upcoming meeting
+        <span class="inline-block w-2 h-2 rounded bg-green-200 mx-1 ml-3"></span>Completed
+      </p>
+    </div>
+
+    <div class="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+      <!-- Upcoming Meetings -->
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-calendar-check text-blue-500"></i> Upcoming Meetings
+          ${upcomingMeetings.length ? `<span class="ml-auto text-xs bg-blue-100 text-blue-600 rounded-full px-2 py-0.5 font-bold">${upcomingMeetings.length}</span>` : ''}
+        </h3>
+        ${upcomingMeetings.length === 0 ? `
+          <div class="text-center py-8 text-gray-300">
+            <i class="fas fa-calendar text-3xl mb-2 block"></i>
+            <p class="text-sm">No upcoming meetings scheduled</p>
+          </div>
+        ` : `
+          <div class="space-y-2">
+            ${upcomingMeetings.slice(0, 8).map(m => {
+              const dt = new Date(m.scheduled_at)
+              const isToday = dt.toDateString() === now.toDateString()
+              const dateStr = isToday ? 'Today' : dt.toLocaleDateString('en-US', { month:'short', day:'numeric' })
+              const timeStr = dt.toLocaleTimeString('en-US', { hour:'numeric', minute:'2-digit' })
+              return `
+              <div class="flex items-start gap-3 p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer"
+                   onclick="obOpenDetail(${m.candidate_id})">
+                <div class="flex-shrink-0 text-center min-w-[40px]">
+                  <div class="text-xs font-bold ${isToday ? 'text-yellow-600' : 'text-blue-600'}">${dateStr}</div>
+                  <div class="text-xs text-gray-400">${timeStr}</div>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="text-sm font-medium text-gray-800 truncate">${escHtml(m.title || 'Meeting')}</p>
+                  <p class="text-xs text-gray-500 truncate">${escHtml(m.full_name)}</p>
+                </div>
+                <span class="text-xs px-2 py-0.5 rounded-full ${meetingTypeColor(m.meeting_type)} font-medium shrink-0">
+                  ${escHtml(m.meeting_type || 'interview')}
+                </span>
+              </div>`
+            }).join('')}
+          </div>
+        `}
+      </div>
+
+      <!-- Pending Checklist Items -->
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-clipboard-list text-yellow-500"></i> Pending Checklist Items
+          ${pendingTasks.length ? `<span class="ml-auto text-xs bg-yellow-100 text-yellow-700 rounded-full px-2 py-0.5 font-bold">${pendingTasks.length}</span>` : ''}
+        </h3>
+        ${pendingTasks.length === 0 ? `
+          <div class="text-center py-8 text-gray-300">
+            <i class="fas fa-check-circle text-3xl mb-2 block"></i>
+            <p class="text-sm">All checklist items complete!</p>
+          </div>
+        ` : `
+          <div class="space-y-2 max-h-80 overflow-y-auto">
+            ${pendingTasks.slice(0, 20).map(t => `
+              <div class="flex items-center gap-3 p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer"
+                   onclick="obOpenDetail(${t.candidate.id})">
+                <div class="w-7 h-7 rounded-full ${t.color} flex items-center justify-center flex-shrink-0">
+                  <i class="fas ${t.icon} text-xs"></i>
+                </div>
+                <div class="flex-1 min-w-0">
+                  <p class="text-xs font-semibold text-gray-700">${t.label}</p>
+                  <p class="text-xs text-gray-400 truncate">${escHtml(t.candidate.full_name)}</p>
+                </div>
+                <i class="fas fa-chevron-right text-gray-300 text-xs"></i>
+              </div>
+            `).join('')}
+            ${pendingTasks.length > 20 ? `<p class="text-xs text-gray-400 text-center pt-2">+${pendingTasks.length - 20} more…</p>` : ''}
+          </div>
+        `}
+      </div>
+
+      <!-- Attention Needed: Interview Scheduled -->
+      ${(d.interview_scheduled||[]).length > 0 ? `
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-bell text-orange-500"></i> Interview Scheduled — Needs Attention
+          <span class="ml-auto text-xs bg-orange-100 text-orange-600 rounded-full px-2 py-0.5 font-bold">${d.interview_scheduled.length}</span>
+        </h3>
+        <div class="space-y-2">
+          ${(d.interview_scheduled||[]).map(c => `
+            <div class="flex items-center gap-3 p-2.5 rounded-xl border border-orange-100 bg-orange-50 hover:bg-orange-100 transition-colors cursor-pointer"
+                 onclick="obOpenDetail(${c.id})">
+              <div class="w-7 h-7 rounded-full bg-orange-200 text-orange-700 flex items-center justify-center flex-shrink-0">
+                <i class="fas fa-calendar-check text-xs"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm font-medium text-gray-800 truncate">${escHtml(c.full_name)}</p>
+                <p class="text-xs text-gray-500">Updated ${obTimeAgo(c.updated_at)}</p>
+              </div>
+              <i class="fas fa-chevron-right text-gray-300 text-xs"></i>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      ` : ''}
+
+      <!-- Stale Candidates -->
+      ${(d.stale||[]).length > 0 ? `
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-hourglass-end text-red-400"></i> Stale — No Update in 7+ Days
+          <span class="ml-auto text-xs bg-red-100 text-red-500 rounded-full px-2 py-0.5 font-bold">${d.stale.length}</span>
+        </h3>
+        <div class="space-y-2">
+          ${(d.stale||[]).slice(0,8).map(c => `
+            <div class="flex items-center gap-3 p-2.5 rounded-xl border border-red-100 hover:bg-red-50 transition-colors cursor-pointer"
+                 onclick="obOpenDetail(${c.id})">
+              ${obStatusBadge(c.status)}
+              <p class="flex-1 text-sm font-medium text-gray-800 truncate">${escHtml(c.full_name)}</p>
+              <p class="text-xs text-gray-400 whitespace-nowrap">${obTimeAgo(c.updated_at)}</p>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+      ` : ''}
+
+    </div>
+
+    <!-- Past Meetings -->
+    ${pastMeetings.length > 0 ? `
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+        <i class="fas fa-history text-gray-400"></i> Recent Past Meetings
+      </h3>
+      <div class="space-y-2">
+        ${pastMeetings.map(m => {
+          const dt = new Date(m.scheduled_at)
+          return `
+          <div class="flex items-center gap-3 p-2.5 rounded-xl border border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer opacity-70"
+               onclick="obOpenDetail(${m.candidate_id})">
+            <div class="flex-shrink-0 text-center min-w-[40px]">
+              <div class="text-xs font-bold text-gray-400">${dt.toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+              <div class="text-xs text-gray-300">${dt.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}</div>
+            </div>
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-gray-600 truncate">${escHtml(m.title || 'Meeting')}</p>
+              <p class="text-xs text-gray-400 truncate">${escHtml(m.full_name)}</p>
+            </div>
+            <span class="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-500">${escHtml(m.meeting_type||'')}</span>
+          </div>`
+        }).join('')}
+      </div>
+    </div>
+    ` : ''}
+
+  </div>
+  `
+}
+
+// Calendar navigation
+function obCalPrev() {
+  const m = obState.calendarMonth || new Date()
+  obState.calendarMonth = new Date(m.getFullYear(), m.getMonth() - 1, 1)
+  obRenderView()
+}
+function obCalNext() {
+  const m = obState.calendarMonth || new Date()
+  obState.calendarMonth = new Date(m.getFullYear(), m.getMonth() + 1, 1)
+  obRenderView()
+}
+
+// Toggle "More" dropdown in pipeline toolbar
+function obToggleMoreMenu() {
+  const menu = document.getElementById('obMoreMenu')
+  if (!menu) return
+  const isHidden = menu.classList.contains('hidden')
+  menu.classList.toggle('hidden', !isHidden)
+  if (isHidden) {
+    const close = (e) => {
+      if (!document.getElementById('obMoreMenuWrap')?.contains(e.target)) {
+        menu.classList.add('hidden')
+        document.removeEventListener('click', close)
+      }
+    }
+    setTimeout(() => document.addEventListener('click', close), 10)
+  }
+}
+
+// Build a single draggable kanban card
+function obKanbanCard(c) {
+  const hired    = c.status === 'hired'
+  const rejected = c.status === 'rejected'
+  // Hired checklist: payroll_sent, contract_sent, contract_signed, training_scheduled, training_completed
+  const checkItems = ['payroll_sent','contract_sent','contract_signed','training_scheduled','training_completed']
+  const done = hired ? checkItems.filter(k => c[k]).length : 0
+  const total = hired ? checkItems.length : 0
+  const pct   = hired && total > 0 ? Math.round((done / total) * 100) : 0
+
+  // Avatar initials
+  const initials = (c.full_name || '?').split(' ').map(w => w[0]).slice(0,2).join('').toUpperCase()
+  const avatarColors = ['bg-blue-100 text-blue-600','bg-purple-100 text-purple-600','bg-amber-100 text-amber-600',
+    'bg-emerald-100 text-emerald-600','bg-rose-100 text-rose-600','bg-indigo-100 text-indigo-600']
+  const avatarColor = avatarColors[c.id % avatarColors.length]
+
+  return `<div class="kb-card${hired?' kb-hired':''}${rejected?' kb-rejected':''}"
+    draggable="true"
+    data-id="${c.id}"
+    data-status="${c.status}"
+    ondragstart="obDragStart(event)"
+    ondragend="obDragEnd(event)">
+
+    <!-- Header row: avatar + name + grip -->
+    <div class="flex items-start gap-2.5">
+      <div class="w-8 h-8 rounded-full ${avatarColor} flex items-center justify-center text-xs font-bold flex-shrink-0 select-none">
+        ${initials}
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="font-semibold text-gray-800 text-sm leading-snug truncate cursor-pointer hover:text-blue-600 transition-colors"
+             onclick="obOpenDetail(${c.id})">${escHtml(c.full_name)}</div>
+        ${c.company_name ? `<div class="text-xs text-gray-400 truncate leading-tight">${escHtml(c.company_name)}</div>` : ''}
+        ${c.specialty    ? `<div class="text-xs text-purple-500 truncate leading-tight">${escHtml(c.specialty)}</div>` : ''}
+        ${c.role_group  ? `<div class="mt-0.5">${roleGroupBadge(c.role_group)}</div>` : ''}
+      </div>
+      <div class="text-gray-200 text-xs flex-shrink-0 cursor-grab hover:text-gray-400 transition-colors mt-0.5" title="Drag to move">
+        <i class="fas fa-grip-vertical"></i>
+      </div>
+    </div>
+
+    <!-- Hired progress bar -->
+    ${hired ? `
+      <div class="mt-2.5">
+        <div class="flex justify-between text-xs text-gray-400 mb-1">
+          <span class="font-medium">Onboarding</span>
+          <span class="${done===total?'text-green-500 font-semibold':''}">${done}/${total}</span>
+        </div>
+        <div class="h-1.5 bg-gray-100 rounded-full overflow-hidden">
+          <div class="h-full rounded-full transition-all ${pct===100?'bg-green-500':'bg-amber-400'}" style="width:${pct}%"></div>
+        </div>
+      </div>
+    ` : ''}
+
+    <!-- Footer: chips + timestamp -->
+    <div class="flex items-center gap-1 mt-2.5 flex-wrap">
+      ${c.doc_count > 0
+        ? `<span class="text-xs bg-blue-50 text-blue-500 px-1.5 py-0.5 rounded-md font-medium" title="${c.doc_count} document(s)">
+             <i class="fas fa-paperclip mr-0.5"></i>${c.doc_count}
+           </span>` : ''}
+      ${c.meeting_count > 0
+        ? `<span class="text-xs bg-purple-50 text-purple-500 px-1.5 py-0.5 rounded-md font-medium" title="${c.meeting_count} meeting(s)">
+             <i class="fas fa-calendar mr-0.5"></i>${c.meeting_count}
+           </span>` : ''}
+      ${c.converted_contractor_id
+        ? `<span class="text-xs bg-green-100 text-green-600 px-1.5 py-0.5 rounded-md font-medium" title="In Payroll">
+             <i class="fas fa-check mr-0.5"></i>Payroll
+           </span>` : ''}
+      <span class="ml-auto text-gray-300 text-xs">${obTimeAgo(c.updated_at)}</span>
+    </div>
+
+    <!-- Status dropdown + actions -->
+    <div class="mt-2 pt-2 border-t border-gray-50">
+      <!-- Status select -->
+      <select
+        onclick="event.stopPropagation()"
+        onmousedown="event.stopPropagation()"
+        onchange="event.stopPropagation(); obCardStatusChange(${c.id}, this)"
+        class="kb-status-select w-full text-xs rounded-lg px-2 py-1.5 mb-1.5 border font-medium cursor-pointer focus:outline-none focus:ring-2 focus:ring-amber-300 transition-colors"
+        style="${obCardSelectStyle(c.status)}">
+        ${OB_STATUSES.map(s => `<option value="${s.key}" ${c.status===s.key?'selected':''}>${s.label}</option>`).join('')}
+      </select>
+      <!-- Open + Payroll buttons -->
+      <div class="flex gap-1">
+        <button onclick="event.stopPropagation();obOpenDetail(${c.id})"
+          class="flex-1 text-xs text-gray-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg py-1 transition-colors text-center font-medium">
+          <i class="fas fa-arrow-right mr-1"></i>Open
+        </button>
+        ${hired && !c.converted_contractor_id ? `
+        <button onclick="event.stopPropagation();obConvert(${c.id})"
+          class="flex-1 text-xs text-green-500 hover:text-green-700 hover:bg-green-50 rounded-lg py-1 transition-colors text-center font-medium">
+          <i class="fas fa-user-check mr-1"></i>→ Payroll
+        </button>` : ''}
+      </div>
+    </div>
+  </div>`
+}
+
+// Returns inline style string for the status select based on current status
+function obCardSelectStyle(status) {
+  const styles = {
+    new:                 'background:#eff6ff;color:#1d4ed8;border-color:#bfdbfe',
+    contacted:           'background:#faf5ff;color:#7e22ce;border-color:#e9d5ff',
+    interview_scheduled: 'background:#fefce8;color:#92400e;border-color:#fde68a',
+    interviewed:         'background:#fff7ed;color:#9a3412;border-color:#fed7aa',
+    hired:               'background:#f0fdf4;color:#15803d;border-color:#bbf7d0',
+    rejected:            'background:#fff5f5;color:#b91c1c;border-color:#fecaca',
+  }
+  return styles[status] || 'background:#f9fafb;color:#374151;border-color:#e5e7eb'
+}
+
+// Called when the select on a Kanban card changes
+async function obCardStatusChange(id, selectEl) {
+  const newStatus = selectEl.value
+  const candidate = obState.candidates.find(c => c.id === id)
+  if (!candidate || candidate.status === newStatus) return
+
+  const oldStatus = candidate.status
+
+  // Optimistic: update local state and restyle the select immediately
+  candidate.status = newStatus
+  selectEl.style.cssText = obCardSelectStyle(newStatus)
+
+  // Move the whole card to the correct column by re-rendering
+  obRenderView()
+
+  try {
+    await api(`/api/onboarding/candidates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status: newStatus })
+    })
+    await obLoadStats()
+    obRenderView()
+    showToast(`Status → ${obStatusInfo(newStatus).label}`, 'success')
+    if (newStatus === 'hired') {
+      setTimeout(() => showToast('Candidate hired! Complete the checklist in their profile.', 'info'), 700)
+    }
+  } catch(e) {
+    // Revert
+    candidate.status = oldStatus
+    obRenderView()
+    showToast('Failed to update status', 'error')
+  }
+}
+
+function obCheckDot(val, label) {
+  return val
+    ? `<span title="${label}" class="w-4 h-4 rounded-full bg-green-400 inline-flex items-center justify-center" style="font-size:8px;color:white">✓</span>`
+    : `<span title="${label} (pending)" class="w-4 h-4 rounded-full bg-gray-200 inline-flex items-center justify-center" style="font-size:8px;color:#999">·</span>`
+}
+
+function obTimeAgo(ts) {
+  if (!ts) return '—'
+  const d = new Date(ts.replace(' ', 'T') + (ts.includes('Z') ? '' : 'Z'))
+  const diff = (Date.now() - d.getTime()) / 1000
+  if (diff < 60) return 'just now'
+  if (diff < 3600) return Math.floor(diff/60) + 'm ago'
+  if (diff < 86400) return Math.floor(diff/3600) + 'h ago'
+  if (diff < 604800) return Math.floor(diff/86400) + 'd ago'
+  return d.toLocaleDateString('en-US', { month:'short', day:'numeric' })
+}
+
+// ── Detail View ──────────────────────────────────────────────────
+function obDetailHTML() {
+  const c = obState.selectedCandidate
+  if (!c) return '<div class="p-8 text-center text-gray-400">Candidate not found</div>'
+  const si = obStatusInfo(c.status)
+  const isHired = c.status === 'hired'
+  const tabs = [
+    { key: 'overview',  label: 'Overview',  icon: 'fa-user' },
+    { key: 'meetings',  label: 'Meetings',   icon: 'fa-calendar' },
+    { key: 'documents', label: 'Documents',  icon: 'fa-paperclip' },
+    { key: 'contract',  label: 'Contract',   icon: 'fa-file-signature' },
+  ]
+  return `
+  <!-- Back + Header -->
+  <div class="flex flex-col md:flex-row md:items-start justify-between gap-3 mb-5">
+    <div class="flex items-start gap-3">
+      <button onclick="obGoBack()" class="mt-1 text-gray-400 hover:text-gray-700 p-1.5 rounded-lg hover:bg-gray-100 transition-colors">
+        <i class="fas fa-arrow-left"></i>
+      </button>
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">${escHtml(c.full_name)}</h2>
+        ${c.company_name ? `<div class="text-sm text-gray-500">${escHtml(c.company_name)}</div>` : ''}
+        <div class="flex items-center gap-2 mt-1.5 flex-wrap">
+          ${obStatusBadge(c.status)}
+          ${c.role_group ? roleGroupBadge(c.role_group) : ''}
+          ${c.converted_contractor_id ? '<span class="status-badge bg-green-100 text-green-700"><i class="fas fa-check-circle mr-1"></i>Active Contractor</span>' : ''}
+        </div>
+      </div>
+    </div>
+    <div class="flex gap-2 flex-wrap md:flex-nowrap">
+      <select onchange="obUpdateStatus(${c.id}, this.value)" class="text-sm px-3 py-2 border border-gray-200 rounded-xl bg-white min-w-[160px]">
+        ${OB_STATUSES.map(s => `<option value="${s.key}" ${c.status===s.key?'selected':''}>${s.label}</option>`).join('')}
+      </select>
+      ${isHired && !c.converted_contractor_id ? `
+        <button onclick="obConvert(${c.id})" class="btn-primary px-4 py-2 rounded-xl text-sm font-medium whitespace-nowrap">
+          <i class="fas fa-arrow-circle-right mr-2"></i>Move to Payroll
+        </button>
+      ` : ''}
+      ${c.email ? `
+        <button onclick="obSendCandidatePortalInvite(${c.id}, '${escHtml(c.full_name).replace(/'/g,"&#39;")}', '${escHtml(c.email).replace(/'/g,"&#39;")}')"
+          class="px-3 py-2 rounded-xl text-sm text-sky-600 hover:bg-sky-50 border border-sky-200 transition-colors whitespace-nowrap"
+          title="Send portal login invite to candidate">
+          <i class="fas fa-paper-plane mr-1.5"></i>Invite to Portal
+        </button>
+      ` : ''}
+      <button onclick="obConfirmDelete(${c.id}, '${escHtml(c.full_name)}')" class="px-3 py-2 rounded-xl text-sm text-red-400 hover:bg-red-50 border border-red-200 transition-colors">
+        <i class="fas fa-trash"></i>
+      </button>
+    </div>
+  </div>
+
+  <!-- Tabs -->
+  <div class="flex border-b border-gray-200 mb-5 overflow-x-auto gap-0">
+    ${tabs.map(t => `
+      <button onclick="obSetDetailTab('${t.key}')"
+        class="px-4 py-2.5 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px
+               ${obState.detailTab===t.key ? 'tab-active' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas ${t.icon} mr-1.5"></i>${t.label}
+        ${t.key==='documents' && c.documents?.length ? `<span class="ml-1 text-xs bg-blue-100 text-blue-600 rounded-full px-1.5">${c.documents.length}</span>` : ''}
+        ${t.key==='meetings' && c.meetings?.length ? `<span class="ml-1 text-xs bg-purple-100 text-purple-600 rounded-full px-1.5">${c.meetings.length}</span>` : ''}
+      </button>
+    `).join('')}
+  </div>
+
+  <!-- Tab Content -->
+  <div id="obDetailContent">
+    ${obDetailTabHTML(c)}
+  </div>
+  `
+}
+
+function obDetailTabHTML(c) {
+  if (obState.detailTab === 'overview')   return obOverviewTab(c)
+  if (obState.detailTab === 'resume')     return obResumeTab(c)
+  if (obState.detailTab === 'meetings')   return obMeetingsTab(c)
+  if (obState.detailTab === 'documents')  return obDocumentsTab(c)
+  if (obState.detailTab === 'contract')   return obContractTab(c)
+  return ''
+}
+
+function obOverviewTab(c) {
+  const isHired = c.status === 'hired'
+  const hired_checklist = [
+    { key: 'payroll_sent',         label: 'Payroll Onboarding Sent',  icon: 'fa-money-check' },
+    { key: 'contract_sent',        label: 'Contract Sent',            icon: 'fa-paper-plane' },
+    { key: 'contract_signed',      label: 'Contract Signed',          icon: 'fa-signature' },
+    { key: 'training_scheduled',   label: 'Training Scheduled',       icon: 'fa-calendar-plus' },
+    { key: 'training_completed',   label: 'Training Completed',       icon: 'fa-graduation-cap' },
+  ]
+  return `
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    <!-- Info Card -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2"><i class="fas fa-id-card text-blue-400"></i> Contact Info</h3>
+      <div class="space-y-3 text-sm">
+        ${c.photo_data ? `
+        <div class="flex justify-center mb-4">
+          <img src="data:${c.photo_mime||'image/jpeg'};base64,${c.photo_data}" alt="${escHtml(c.full_name)}" class="w-20 h-20 rounded-full object-cover border-2" style="border-color:#C9A84C;">
+        </div>` : ''}
+        ${obInfoRow('fa-envelope', 'Email', c.email || '—')}
+        ${obInfoRow('fa-phone', 'Phone', c.phone || '—')}
+        ${obInfoRow('fa-building', 'Company', c.company_name || '—')}
+        ${obInfoRow('fa-id-badge', 'EIN / SSN (last 4)', c.ein_ssn ? '•••• ' + c.ein_ssn.replace(/^.*(.{4})$/, '$1') : '—')}
+        ${obInfoRow('fa-stethoscope', 'Specialty', c.specialty || '—')}
+        ${obInfoRow('fa-users', 'Provider Group', c.role_group ? (c.role_group === 'NP' ? 'NP / ARNP / PA' : c.role_group === 'Physician' ? 'Physician (MD / DO)' : c.role_group) : '—')}
+        ${obInfoRow('fa-user-tag', 'Type', c.contractor_type === 'owner' ? 'Owner' : 'Regular Contractor')}
+        ${c.states_licensed ? obInfoRow('fa-map-marker-alt', 'Licensed States', c.states_licensed) : ''}
+        ${obInfoRow('fa-tag', 'Source', c.source || '—')}
+      </div>
+      <button onclick="obOpenEditModal()" class="mt-4 w-full btn-outline py-2 rounded-xl text-sm font-medium">
+        <i class="fas fa-pencil-alt mr-2"></i>Edit Info
+      </button>
+    </div>
+
+    <!-- Notes + Hired Checklist -->
+    <div class="flex flex-col gap-4">
+      <!-- Checklist -->
+      ${isHired ? `
+      <div class="card p-5">
+        <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+          <i class="fas fa-clipboard-check text-green-500"></i> Hiring Checklist
+          <span class="ml-auto text-xs text-gray-400">${hired_checklist.filter(h=>c[h.key]).length}/${hired_checklist.length} done</span>
+        </h3>
+        <div class="space-y-2">
+          ${hired_checklist.map(h => `
+            <label class="flex items-center gap-3 cursor-pointer group p-2 rounded-lg hover:bg-gray-50 transition-colors">
+              <input type="checkbox" ${c[h.key]?'checked':''} onchange="obToggleChecklist(${c.id},'${h.key}',this.checked)"
+                class="w-4 h-4 accent-green-500 flex-shrink-0">
+              <i class="fas ${h.icon} text-gray-400 group-hover:text-gray-600 w-4 text-center"></i>
+              <span class="text-sm ${c[h.key]?'line-through text-gray-400':'text-gray-700'}">${h.label}</span>
+              ${c[h.key+'_at'] ? `<span class="ml-auto text-xs text-gray-400">${obTimeAgo(c[h.key+'_at'])}</span>` : ''}
+            </label>
+          `).join('')}
+        </div>
+        ${!c.converted_contractor_id && hired_checklist.every(h=>c[h.key]) ? `
+          <div class="mt-4 p-3 bg-green-50 rounded-xl border border-green-200 text-sm text-green-700">
+            <i class="fas fa-check-circle mr-2"></i>All steps complete! Ready to move to payroll.
+          </div>
+        ` : ''}
+        ${c.converted_contractor_id ? `
+          <div class="mt-4 p-3 bg-green-50 rounded-xl border border-green-200 text-sm text-green-700">
+            <i class="fas fa-check-circle mr-2"></i>Active contractor (ID #${c.converted_contractor_id}). 
+            <button onclick="navigate('contractors')" class="underline font-medium">View in Contractors</button>
+          </div>
+        ` : ''}
+      </div>
+      ` : ''}
+
+      <!-- Notes -->
+      <div class="card p-5 flex-1">
+        <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2"><i class="fas fa-sticky-note text-yellow-400"></i> Notes</h3>
+        <textarea id="obNotesArea" rows="5" placeholder="Add notes about this candidate…"
+          class="w-full text-sm border border-gray-200 rounded-xl p-3 resize-none focus:outline-none focus:border-yellow-400 transition-colors"
+          onblur="obSaveNotes(${c.id}, this.value)">${escHtml(c.notes || '')}</textarea>
+        <p class="text-xs text-gray-400 mt-1">Auto-saved on blur</p>
+      </div>
+    </div>
+  </div>
+  `
+}
+
+function obInfoRow(icon, label, val) {
+  return `<div class="flex items-start gap-3">
+    <i class="fas ${icon} text-gray-300 w-4 mt-0.5 flex-shrink-0"></i>
+    <div><span class="text-gray-500">${label}:</span> <span class="font-medium text-gray-800">${escHtml(String(val))}</span></div>
+  </div>`
+}
+
+function obResumeTab(c) {
+  const keyPoints = (() => { try { return JSON.parse(c.resume_key_points || '[]') } catch(_) { return [] } })()
+  return `
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    <!-- Upload + Analyze -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2"><i class="fas fa-file-alt text-indigo-500"></i> Resume Upload & Analysis</h3>
+      <div class="upload-zone p-6 text-center rounded-xl cursor-pointer mb-3" id="resumeDropZone" onclick="$('resumeFileInput').click()">
+        <i class="fas fa-cloud-upload-alt text-3xl text-gray-300 mb-2"></i>
+        <p class="text-sm text-gray-500">Drop resume PDF/TXT here or <span class="text-blue-500 font-medium">browse</span></p>
+        <p class="text-xs text-gray-400 mt-1">PDF, DOCX, TXT supported</p>
+      </div>
+      <input type="file" id="resumeFileInput" accept=".pdf,.txt,.docx" class="hidden" onchange="obHandleResumeUpload(event, ${c.id})">
+      ${c.resume_text ? `
+        <div class="p-3 bg-gray-50 rounded-xl border border-gray-200 mb-3">
+          <p class="text-xs font-semibold text-gray-600 mb-1"><i class="fas fa-check-circle text-green-500 mr-1"></i>Resume on file</p>
+          <p class="text-xs text-gray-500 line-clamp-3">${escHtml((c.resume_text || '').substring(0, 200))}…</p>
+        </div>
+      ` : ''}
+      <p class="text-xs text-gray-400 mb-3">Or paste resume text directly:</p>
+      <textarea id="obResumeText" rows="6" placeholder="Paste resume text here for AI analysis…"
+        class="w-full text-xs border border-gray-200 rounded-xl p-3 resize-none font-mono focus:outline-none focus:border-indigo-300">${escHtml(c.resume_text || '')}</textarea>
+      <button onclick="obAnalyzeResume(${c.id})" class="mt-3 w-full btn-primary py-2.5 rounded-xl text-sm font-medium">
+        <i class="fas fa-brain mr-2"></i>Analyze Resume
+      </button>
+    </div>
+
+    <!-- Key Points + Summary -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2"><i class="fas fa-lightbulb text-yellow-400"></i> Key Talking Points</h3>
+      ${keyPoints.length > 0 ? `
+        <div class="space-y-2 mb-4">
+          ${keyPoints.map(p => `
+            <div class="flex items-start gap-2 p-2.5 bg-amber-50 border border-amber-100 rounded-xl text-sm text-amber-900">
+              ${escHtml(p)}
+            </div>
+          `).join('')}
+        </div>
+      ` : `
+        <div class="text-center py-8 text-gray-300">
+          <i class="fas fa-lightbulb text-4xl mb-2 block"></i>
+          <p class="text-sm">Upload or paste a resume then click Analyze to get AI-generated talking points for your interview</p>
+        </div>
+      `}
+      ${c.resume_summary ? `
+        <div class="mt-4">
+          <h4 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Summary</h4>
+          <p class="text-sm text-gray-700 leading-relaxed">${escHtml(c.resume_summary)}</p>
+        </div>
+      ` : ''}
+    </div>
+  </div>
+  `
+}
+
+function obMeetingsTab(c) {
+  const meetings = c.meetings || []
+  return `
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+    <!-- Schedule Form -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2"><i class="fas fa-calendar-plus text-purple-500"></i> Schedule Meeting</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Type</label>
+          <select id="mtgType" class="w-full text-sm">
+            <option value="interview">Interview</option>
+            <option value="training">Training</option>
+            <option value="onboarding">Onboarding Call</option>
+            <option value="followup">Follow-up</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Title</label>
+          <input type="text" id="mtgTitle" placeholder="e.g. Initial Interview" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Date & Time</label>
+          <input type="datetime-local" id="mtgDate" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Duration</label>
+          <select id="mtgDuration" class="w-full text-sm">
+            <option value="15">15 min</option>
+            <option value="30" selected>30 min</option>
+            <option value="45">45 min</option>
+            <option value="60">60 min</option>
+            <option value="90">90 min</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Meeting Link</label>
+          <input type="text" id="mtgLink" placeholder="https://zoom.us/j/…" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Notes</label>
+          <textarea id="mtgNotes" rows="2" placeholder="Pre-meeting notes…" class="w-full text-sm border border-gray-200 rounded-lg p-2 resize-none"></textarea>
+        </div>
+        <button onclick="obScheduleMeeting(${c.id})" class="w-full btn-primary py-2.5 rounded-xl text-sm font-medium">
+          <i class="fas fa-calendar-check mr-2"></i>Schedule Meeting
+        </button>
+      </div>
+
+      <!-- Available Slots -->
+      <div id="availSlots" class="mt-4">
+        <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Available Slots</h4>
+        <div id="availSlotsContent"><div class="text-xs text-gray-400">Loading…</div></div>
+      </div>
+    </div>
+
+    <!-- Meetings List -->
+    <div class="md:col-span-2 card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+        <i class="fas fa-calendar text-purple-500"></i> Scheduled Meetings
+        <span class="ml-auto text-xs text-gray-400">${meetings.length} total</span>
+      </h3>
+      ${meetings.length === 0 ? `
+        <div class="text-center py-10 text-gray-300">
+          <i class="fas fa-calendar-times text-4xl mb-2 block"></i>
+          <p class="text-sm">No meetings scheduled yet</p>
+        </div>
+      ` : `
+        <div class="space-y-3">
+          ${meetings.map(m => `
+            <div class="p-4 border border-gray-100 rounded-xl hover:border-gray-200 transition-colors">
+              <div class="flex items-start justify-between gap-2">
+                <div>
+                  <div class="font-semibold text-gray-800 text-sm">${escHtml(m.title || 'Meeting')}</div>
+                  <div class="text-xs text-gray-500 mt-0.5">
+                    <i class="fas fa-calendar mr-1"></i>${m.scheduled_at ? new Date(m.scheduled_at.replace(' ','T')+'Z').toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}) : 'No date set'}
+                    · <i class="fas fa-clock ml-1 mr-1"></i>${m.duration_min} min
+                  </div>
+                  ${m.meeting_link ? `
+                    <a href="${escHtml(m.meeting_link)}" target="_blank" class="text-xs text-blue-500 hover:underline mt-1 block">
+                      <i class="fas fa-video mr-1"></i>${escHtml(m.meeting_link.substring(0,50))}${m.meeting_link.length>50?'…':''}
+                    </a>
+                  ` : ''}
+                  ${m.notes ? `<p class="text-xs text-gray-500 mt-1">${escHtml(m.notes)}</p>` : ''}
+                </div>
+                <div class="flex flex-col items-end gap-1 flex-shrink-0">
+                  <span class="text-xs px-2 py-0.5 rounded-full ${m.status==='completed'?'bg-green-100 text-green-600':'bg-purple-100 text-purple-600'}">${m.status}</span>
+                  <div class="flex gap-1 mt-1">
+                    ${m.meeting_link ? `
+                      <button onclick="obCopyLink('${escHtml(m.meeting_link)}')" class="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded hover:bg-gray-200" title="Copy link">
+                        <i class="fas fa-copy"></i>
+                      </button>
+                    ` : ''}
+                    <button onclick="obSendMeetingEmail(${c.id}, ${m.id})" class="text-xs px-2 py-1 bg-blue-50 text-blue-600 rounded hover:bg-blue-100" title="Send invite">
+                      <i class="fas fa-envelope"></i>
+                    </button>
+                    <button onclick="obDeleteMeeting(${m.id}, ${c.id})" class="text-xs px-2 py-1 bg-red-50 text-red-400 rounded hover:bg-red-100" title="Delete">
+                      <i class="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `}
+    </div>
+  </div>
+  `
+}
+
+function obDocumentsTab(c) {
+  const docs = c.documents || []
+  return `
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+    <!-- Upload -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2"><i class="fas fa-cloud-upload-alt text-blue-500"></i> Upload Document</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Document Type</label>
+          <select id="docType" class="w-full text-sm">
+            ${OB_DOC_TYPES.map(d => `<option value="${d.key}">${d.label}</option>`).join('')}
+          </select>
+        </div>
+        <div class="upload-zone p-5 text-center rounded-xl cursor-pointer" id="docDropZone" onclick="$('docFileInput').click()">
+          <i class="fas fa-file-upload text-2xl text-gray-300 mb-1"></i>
+          <p class="text-sm text-gray-500">Click to select file</p>
+          <p class="text-xs text-gray-400 mt-1">PDF, DOCX, PNG, JPG — max 5MB</p>
+        </div>
+        <input type="file" id="docFileInput" accept=".pdf,.doc,.docx,.png,.jpg,.jpeg,.txt" class="hidden" onchange="obHandleDocUpload(event, ${c.id})">
+      </div>
+
+      <div class="mt-5">
+        <h4 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Document Checklist</h4>
+        ${[
+          { key:'resume', label:'Resume' }, { key:'w9', label:'W-9' }, { key:'contract', label:'Signed Contract' },
+          { key:'license', label:'Medical License' }, { key:'malpractice', label:'Malpractice Ins.' }
+        ].map(dt => {
+          const has = docs.some(d => d.doc_type === dt.key)
+          return `<div class="flex items-center gap-2 py-1.5 text-sm">
+            <i class="fas ${has?'fa-check-circle text-green-500':'fa-circle text-gray-200'}"></i>
+            <span class="${has?'text-gray-700':'text-gray-400'}">${dt.label}</span>
+          </div>`
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Files List -->
+    <div class="md:col-span-2 card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+        <i class="fas fa-folder text-yellow-400"></i> Uploaded Documents
+        <span class="ml-auto text-xs text-gray-400">${docs.length} files</span>
+      </h3>
+      ${docs.length === 0 ? `
+        <div class="text-center py-10 text-gray-300">
+          <i class="fas fa-folder-open text-4xl mb-2 block"></i>
+          <p class="text-sm">No documents uploaded yet</p>
+        </div>
+      ` : `
+        <div class="space-y-2">
+          ${docs.map(d => `
+            <div class="flex items-center gap-3 p-3 border border-gray-100 rounded-xl hover:border-gray-200 transition-colors">
+              <div class="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
+                <i class="fas ${obDocIcon(d.mime_type)} text-blue-500"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-sm text-gray-800 truncate">${escHtml(d.file_name)}</div>
+                <div class="text-xs text-gray-400">
+                  ${OB_DOC_TYPES.find(t=>t.key===d.doc_type)?.label || d.doc_type}
+                  · ${obFmtSize(d.file_size)} · ${obTimeAgo(d.uploaded_at)}
+                </div>
+              </div>
+              <div class="flex gap-1 flex-shrink-0">
+                <button onclick="obDownloadDoc(${d.id}, '${escHtml(d.file_name)}')" class="text-xs px-2.5 py-1.5 bg-blue-50 text-blue-600 rounded-lg hover:bg-blue-100" title="Download">
+                  <i class="fas fa-download mr-1"></i>Download
+                </button>
+                <button onclick="obDeleteDoc(${d.id}, ${c.id})" class="text-xs px-2 py-1.5 bg-red-50 text-red-400 rounded-lg hover:bg-red-100" title="Delete">
+                  <i class="fas fa-trash"></i>
+                </button>
+              </div>
+            </div>
+          `).join('')}
+        </div>
+      `}
+    </div>
+  </div>
+  `
+}
+
+function obDocIcon(mime) {
+  if (!mime) return 'fa-file'
+  if (mime.includes('pdf')) return 'fa-file-pdf'
+  if (mime.includes('word') || mime.includes('docx')) return 'fa-file-word'
+  if (mime.includes('image')) return 'fa-file-image'
+  if (mime.includes('text')) return 'fa-file-alt'
+  return 'fa-file'
+}
+function obFmtSize(bytes) {
+  if (!bytes) return '—'
+  if (bytes < 1024) return bytes + ' B'
+  if (bytes < 1048576) return (bytes/1024).toFixed(1) + ' KB'
+  return (bytes/1048576).toFixed(1) + ' MB'
+}
+
+function obContractTab(c) {
+  return `
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    <!-- Template Selector -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2"><i class="fas fa-file-contract text-emerald-500"></i> Generate Contract</h3>
+      <p class="text-sm text-gray-500 mb-4">Select a contract template and generate a pre-filled PDF with this candidate's information.</p>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Template</label>
+          <select id="contractTmplSel" class="w-full text-sm" onchange="obLoadContractPreview()">
+            <option value="">Loading…</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Effective Date</label>
+          <input type="date" id="contractDate" value="${new Date().toISOString().substring(0,10)}" class="w-full text-sm">
+        </div>
+        <div class="flex gap-2">
+          <button onclick="obGenerateContract(${c.id})" class="flex-1 btn-primary py-2.5 rounded-xl text-sm font-medium">
+            <i class="fas fa-download mr-2"></i>Download PDF
+          </button>
+          <button onclick="obGoTemplates()" class="px-3 py-2.5 btn-outline rounded-xl text-sm font-medium" title="Manage templates">
+            <i class="fas fa-cog"></i>
+          </button>
+        </div>
+        <button onclick="obMarkContractSent(${c.id})" class="w-full py-2 text-sm text-blue-600 hover:text-blue-800 border border-blue-200 rounded-xl hover:bg-blue-50 transition-colors">
+          <i class="fas fa-paper-plane mr-2"></i>Mark Contract as Sent
+        </button>
+        ${c.contract_signed ? '<div class="p-3 bg-green-50 border border-green-200 rounded-xl text-sm text-green-700"><i class="fas fa-check-circle mr-2"></i>Contract signed on ' + obTimeAgo(c.contract_signed_at) + '</div>' : ''}
+      </div>
+    </div>
+
+    <!-- Preview -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-3 flex items-center gap-2"><i class="fas fa-eye text-gray-400"></i> Preview</h3>
+      <div id="contractPreview" class="bg-gray-50 rounded-xl p-4 text-xs font-mono text-gray-600 overflow-y-auto leading-relaxed whitespace-pre-wrap" style="max-height:420px">
+        Select a template to preview the filled contract
+      </div>
+    </div>
+  </div>
+  `
+}
+
+// ── Add Candidate Form ───────────────────────────────────────────
+function obAddFormHTML() {
+  return `
+  <div class="max-w-2xl mx-auto">
+    <div class="flex items-center gap-3 mb-5">
+      <button onclick="obGoBack()" class="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg hover:bg-gray-100">
+        <i class="fas fa-arrow-left"></i>
+      </button>
+      <h2 class="text-xl font-bold text-gray-800">Add New Candidate</h2>
+    </div>
+    <div class="card p-6">
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div class="md:col-span-2">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Full Name <span class="text-red-400">*</span></label>
+          <input type="text" id="obAddName" placeholder="Dr. Jane Smith" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Company / Practice Name</label>
+          <input type="text" id="obAddCompany" placeholder="Smith Medical PLLC" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Specialty</label>
+          <input type="text" id="obAddSpecialty" placeholder="Internal Medicine, Psychiatry…" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Email</label>
+          <input type="text" id="obAddEmail" placeholder="jane@example.com" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Phone</label>
+          <input type="text" id="obAddPhone" placeholder="(555) 123-4567" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">EIN / SSN</label>
+          <input type="text" id="obAddEin" placeholder="XX-XXXXXXX" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Provider Group <span class="text-red-400">*</span></label>
+          <select id="obAddRoleGroup" class="w-full text-sm">
+            <option value="NP">NP / ARNP / PA</option>
+            <option value="Physician">Physician (MD / DO)</option>
+            <option value="Contractor">Contractor</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Contractor Type</label>
+          <select id="obAddType" class="w-full text-sm">
+            <option value="regular">Regular Contractor</option>
+            <option value="owner">Owner</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Initial Status</label>
+          <select id="obAddStatus" class="w-full text-sm">
+            ${OB_STATUSES.map(s => `<option value="${s.key}">${s.label}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Source</label>
+          <input type="text" id="obAddSource" placeholder="LinkedIn, Referral, Indeed…" class="w-full text-sm">
+        </div>
+        <div class="md:col-span-2">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Notes</label>
+          <textarea id="obAddNotes" rows="3" placeholder="Initial notes about this candidate…"
+            class="w-full text-sm border border-gray-200 rounded-xl p-3 resize-none focus:outline-none focus:border-amber-400"></textarea>
+        </div>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button onclick="obSaveNewCandidate()" class="btn-primary px-6 py-2.5 rounded-xl text-sm font-medium">
+          <i class="fas fa-save mr-2"></i>Save Candidate
+        </button>
+        <button onclick="obGoBack()" class="px-5 py-2.5 btn-outline rounded-xl text-sm font-medium">Cancel</button>
+      </div>
+    </div>
+  </div>
+  `
+}
+
+// ── Templates Manager ────────────────────────────────────────────
+function obTemplatesHTML() {
+  const tmpls = obState.templates
+  return `
+  <div class="flex items-center gap-3 mb-5">
+    <button onclick="obGoBack()" class="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg hover:bg-gray-100">
+      <i class="fas fa-arrow-left"></i>
+    </button>
+    <div>
+      <h2 class="text-xl font-bold text-gray-800">Contract Templates</h2>
+      <p class="text-sm text-gray-500">Create and manage contract templates. Use {{contractor_name}}, {{company_name}}, {{ein_ssn}}, {{email}}, {{date}}, {{specialty}} as placeholders.</p>
+    </div>
+    <button onclick="obNewTemplate()" class="ml-auto btn-primary px-4 py-2 rounded-xl text-sm font-medium">
+      <i class="fas fa-plus mr-2"></i>New Template
+    </button>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-3 gap-5">
+    <!-- Template List -->
+    <div class="card p-4">
+      <h3 class="font-semibold text-sm text-gray-700 mb-3">Templates (${tmpls.length})</h3>
+      <div class="space-y-2" id="tmplList">
+        ${tmpls.length === 0 ? '<div class="text-xs text-gray-400 text-center py-4">No templates yet</div>' : ''}
+        ${tmpls.map(t => `
+          <div class="p-3 border rounded-xl cursor-pointer hover:border-amber-300 transition-colors ${t.is_default?'border-amber-300 bg-amber-50':' border-gray-100'}" onclick="obSelectTemplate(${t.id})">
+            <div class="font-medium text-sm text-gray-800">${escHtml(t.name)}</div>
+            ${t.is_default ? '<span class="text-xs text-amber-600 font-medium"><i class="fas fa-star mr-1"></i>Default</span>' : ''}
+            <div class="text-xs text-gray-400 mt-0.5">Updated ${obTimeAgo(t.updated_at)}</div>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <!-- Template Editor -->
+    <div class="md:col-span-2 card p-5">
+      <div id="tmplEditor">
+        <div class="text-center py-12 text-gray-300">
+          <i class="fas fa-file-contract text-4xl mb-2 block"></i>
+          <p class="text-sm">Select a template to edit, or create a new one</p>
+        </div>
+      </div>
+    </div>
+  </div>
+  `
+}
+
+// ── Availability Manager ─────────────────────────────────────────
+function obAvailabilityHTML() {
+  const slots = obState.availability
+  const days = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+  return `
+  <div class="flex items-center gap-3 mb-5">
+    <button onclick="obGoBack()" class="text-gray-400 hover:text-gray-700 p-1.5 rounded-lg hover:bg-gray-100">
+      <i class="fas fa-arrow-left"></i>
+    </button>
+    <div>
+      <h2 class="text-xl font-bold text-gray-800">Interview Availability</h2>
+      <p class="text-sm text-gray-500">Set your available time slots. Candidates will see these when scheduling.</p>
+    </div>
+  </div>
+
+  <div class="grid grid-cols-1 md:grid-cols-2 gap-5">
+    <!-- Add Slot -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2"><i class="fas fa-plus-circle text-blue-500"></i> Add Availability Slot</h3>
+      <div class="space-y-3">
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Repeat</label>
+          <select id="availType" class="w-full text-sm" onchange="obToggleAvailType()">
+            <option value="weekly">Weekly (repeating)</option>
+            <option value="specific">Specific Date</option>
+          </select>
+        </div>
+        <div id="availDayRow">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Day of Week</label>
+          <select id="availDay" class="w-full text-sm">
+            ${days.map((d,i) => `<option value="${i}">${d}</option>`).join('')}
+          </select>
+        </div>
+        <div id="availDateRow" class="hidden">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Date</label>
+          <input type="date" id="availDate" class="w-full text-sm">
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Start Time</label>
+            <input type="time" id="availStart" value="09:00" class="w-full text-sm">
+          </div>
+          <div>
+            <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">End Time</label>
+            <input type="time" id="availEnd" value="17:00" class="w-full text-sm">
+          </div>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Label (optional)</label>
+          <input type="text" id="availLabel" placeholder="e.g. Morning Interviews" class="w-full text-sm">
+        </div>
+        <button onclick="obAddSlot()" class="w-full btn-primary py-2.5 rounded-xl text-sm font-medium">
+          <i class="fas fa-plus mr-2"></i>Add Slot
+        </button>
+      </div>
+    </div>
+
+    <!-- Slots List -->
+    <div class="card p-5">
+      <h3 class="font-semibold text-gray-700 mb-4 flex items-center gap-2">
+        <i class="fas fa-calendar-alt text-purple-500"></i> Current Availability
+        <span class="ml-auto text-xs text-gray-400">${slots.length} slots</span>
+      </h3>
+      ${slots.length === 0 ? `
+        <div class="text-center py-8 text-gray-300">
+          <i class="fas fa-calendar-times text-3xl mb-2 block"></i>
+          <p class="text-sm">No availability set</p>
+        </div>
+      ` : `
+        <div class="space-y-2">
+          ${slots.map(s => `
+            <div class="flex items-center gap-3 p-3 border border-gray-100 rounded-xl">
+              <div class="w-9 h-9 rounded-xl bg-purple-50 flex items-center justify-center flex-shrink-0">
+                <i class="fas fa-calendar text-purple-500 text-sm"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="font-medium text-sm text-gray-800">
+                  ${s.date ? new Date(s.date+'T12:00:00').toLocaleDateString('en-US',{weekday:'long',month:'short',day:'numeric'}) : days[s.day_of_week] + 's'}
+                </div>
+                <div class="text-xs text-gray-500">${s.start_time} – ${s.end_time}${s.label?' · '+s.label:''}</div>
+              </div>
+              <button onclick="obDeleteSlot(${s.id})" class="text-gray-300 hover:text-red-500 p-1.5 rounded transition-colors">
+                <i class="fas fa-times text-sm"></i>
+              </button>
+            </div>
+          `).join('')}
+        </div>
+      `}
+    </div>
+  </div>
+  `
+}
+
+// ── Edit Modal ───────────────────────────────────────────────────
+function obOpenEditModal() {
+  const c = obState.selectedCandidate
+  if (!c) return
+  const html = `
+  <div id="obEditModal" class="fixed inset-0 z-50 flex items-center justify-center modal-backdrop" onclick="if(event.target===this)obCloseEditModal()">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg mx-4 p-6" onclick="event.stopPropagation()">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="font-bold text-gray-800 text-lg">Edit Candidate</h3>
+        <button onclick="obCloseEditModal()" class="text-gray-400 hover:text-gray-700"><i class="fas fa-times text-lg"></i></button>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div class="col-span-2">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Full Name</label>
+          <input type="text" id="obEditName" value="${escHtml(c.full_name||'')}" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Company</label>
+          <input type="text" id="obEditCompany" value="${escHtml(c.company_name||'')}" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Specialty</label>
+          <input type="text" id="obEditSpecialty" value="${escHtml(c.specialty||'')}" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Email</label>
+          <input type="text" id="obEditEmail" value="${escHtml(c.email||'')}" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Phone</label>
+          <input type="text" id="obEditPhone" value="${escHtml(c.phone||'')}" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">EIN / SSN</label>
+          <input type="text" id="obEditEin" value="${escHtml(c.ein_ssn||'')}" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Provider Group</label>
+          <select id="obEditRoleGroup" class="w-full text-sm">
+            <option value="NP" ${(c.role_group||'')==='NP'?'selected':''}>NP / ARNP / PA</option>
+            <option value="Physician" ${(c.role_group||'')==='Physician'?'selected':''}>Physician (MD / DO)</option>
+            <option value="Contractor" ${(c.role_group||'')==='Contractor'?'selected':''}>Contractor</option>
+            <option value="" ${!(c.role_group)?'selected':''}>— Unassigned —</option>
+          </select>
+        </div>
+        <div>
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Type</label>
+          <select id="obEditType" class="w-full text-sm">
+            <option value="regular" ${c.contractor_type==='regular'?'selected':''}>Regular</option>
+            <option value="owner" ${c.contractor_type==='owner'?'selected':''}>Owner</option>
+          </select>
+        </div>
+        <div class="col-span-2">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Source</label>
+          <input type="text" id="obEditSource" value="${escHtml(c.source||'')}" class="w-full text-sm">
+        </div>
+        <div class="col-span-2">
+          <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Licensed States</label>
+          <input type="text" id="obEditStates" value="${escHtml(c.states_licensed||'')}" placeholder="FL, TX, NY…" class="w-full text-sm">
+        </div>
+      </div>
+      <div class="flex gap-3 mt-5">
+        <button onclick="obSaveEdit(${c.id})" class="btn-primary px-5 py-2.5 rounded-xl text-sm font-medium">Save Changes</button>
+        <button onclick="obCloseEditModal()" class="px-4 py-2.5 btn-outline rounded-xl text-sm">Cancel</button>
+      </div>
+    </div>
+  </div>`
+  document.body.insertAdjacentHTML('beforeend', html)
+}
+function obCloseEditModal() { const m = document.getElementById('obEditModal'); if (m) m.remove() }
+
+// ── Actions & Event Handlers ─────────────────────────────────────
+function obBindEvents() {
+  // Load availability if on meetings tab
+  if (obState.view === 'detail' && obState.detailTab === 'meetings') {
+    obLoadAvailSlots()
+  }
+  // Load contract templates if on contract tab
+  if (obState.view === 'detail' && obState.detailTab === 'contract') {
+    obLoadContractTemplates().then(obLoadContractPreview)
+  }
+  // Load templates list if on templates page
+  if (obState.view === 'templates') {
+    obFetchTemplates()
+  }
+  // Load availability slots if on availability page
+  if (obState.view === 'availability') {
+    obFetchAvailability()
+  }
+  // Drag-drop for resume
+  const rdz = document.getElementById('resumeDropZone')
+  if (rdz) {
+    rdz.addEventListener('dragover', e => { e.preventDefault(); rdz.classList.add('drag-over') })
+    rdz.addEventListener('dragleave', () => rdz.classList.remove('drag-over'))
+    rdz.addEventListener('drop', e => { e.preventDefault(); rdz.classList.remove('drag-over'); const f = e.dataTransfer.files[0]; if(f) obProcessResumeFile(f, obState.selectedCandidate?.id) })
+  }
+}
+
+function obGoBack() {
+  obState.view = 'pipeline'
+  obState.selectedId = null
+  obState.selectedCandidate = null
+  // Return to whichever main tab the user came from
+  obLoadStats().then(async () => {
+    if (obState.mainTab === 'onboarded') {
+      const saved = obState.filterStatus
+      obState.filterStatus = 'hired'
+      await obLoadCandidates()
+      obState.filterStatus = saved
+    } else {
+      obState.filterStatus = 'all'
+      await obLoadCandidates()
+    }
+    obRenderView()
+  })
+}
+
+function obGoAdd() { obState.view = 'add'; obRenderView() }
+function obGoTemplates() {
+  obState.view = 'templates'
+  obFetchTemplates().then(() => obRenderView())
+}
+function obGoAvailability() {
+  obState.view = 'availability'
+  obFetchAvailability().then(() => obRenderView())
+}
+
+async function obOpenDetail(id) {
+  showLoading('Loading…')
+  try {
+    obState.selectedId = id
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${id}`)
+    obState.view = 'detail'
+    obState.detailTab = 'overview'
+    obRenderView()
+  } catch(e) { showToast('Failed to load candidate', 'error') }
+  finally { hideLoading() }
+}
+
+function obSetDetailTab(tab) {
+  obState.detailTab = tab
+  const content = document.getElementById('obDetailContent')
+  if (content && obState.selectedCandidate) {
+    content.innerHTML = obDetailTabHTML(obState.selectedCandidate)
+    // Update tab underlines
+    document.querySelectorAll('[onclick^="obSetDetailTab"]').forEach(btn => {
+      const t = btn.getAttribute('onclick').match(/'(\w+)'/)?.[1]
+      if (t === tab) btn.classList.add('tab-active')
+      else { btn.classList.remove('tab-active'); btn.classList.add('border-transparent','text-gray-500') }
+    })
+  }
+  obBindEvents()
+}
+
+async function obSetFilter(status) {
+  obState.filterStatus = status
+  await obLoadCandidates()
+  obRenderView()
+}
+
+let obSearchTimer = null
+function obOnSearch(val) {
+  obState.search = val
+  clearTimeout(obSearchTimer)
+  obSearchTimer = setTimeout(async () => {
+    await obLoadCandidates()
+    obRenderView()
+  }, 350)
+}
+
+async function obUpdateStatus(id, status) {
+  try {
+    await api(`/api/onboarding/candidates/${id}`, { method: 'PUT', body: JSON.stringify({ status }) })
+    if (obState.selectedCandidate) {
+      obState.selectedCandidate.status = status
+      obRenderView()
+    }
+    showToast('Status updated to ' + obStatusInfo(status).label, 'success')
+    if (status === 'hired') {
+      setTimeout(() => showToast('Candidate marked as hired — go to the Checklist to complete onboarding!', 'info'), 800)
+    }
+  } catch(e) { showToast('Failed to update status', 'error') }
+}
+
+async function obToggleChecklist(id, key, val) {
+  try {
+    const body = { [key]: val ? 1 : 0 }
+    if (val) body[key + '_at'] = new Date().toISOString()
+    await api(`/api/onboarding/candidates/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+    if (obState.selectedCandidate) {
+      obState.selectedCandidate[key] = val ? 1 : 0
+      obState.selectedCandidate[key + '_at'] = val ? new Date().toISOString() : null
+    }
+    showToast(val ? 'Checked ✓' : 'Unchecked', 'success')
+  } catch(e) { showToast('Failed to update', 'error') }
+}
+
+let obNoteTimer = null
+function obSaveNotes(id, val) {
+  clearTimeout(obNoteTimer)
+  obNoteTimer = setTimeout(async () => {
+    try {
+      await api(`/api/onboarding/candidates/${id}`, { method: 'PUT', body: JSON.stringify({ notes: val }) })
+      if (obState.selectedCandidate) obState.selectedCandidate.notes = val
+      showToast('Notes saved', 'success')
+    } catch(e) {}
+  }, 500)
+}
+
+async function obSaveNewCandidate() {
+  const name = ($('obAddName')?.value || '').trim()
+  if (!name) { showToast('Name is required', 'warning'); return }
+  try {
+    const body = {
+      full_name: name,
+      company_name: $('obAddCompany')?.value || '',
+      specialty: $('obAddSpecialty')?.value || '',
+      email: $('obAddEmail')?.value || '',
+      phone: $('obAddPhone')?.value || '',
+      ein_ssn: $('obAddEin')?.value || '',
+      contractor_type: $('obAddType')?.value || 'regular',
+      role_group: $('obAddRoleGroup')?.value || '',
+      status: $('obAddStatus')?.value || 'new',
+      source: $('obAddSource')?.value || '',
+      notes: $('obAddNotes')?.value || '',
+    }
+    const r = await api('/api/onboarding/candidates', { method: 'POST', body: JSON.stringify(body) })
+    showToast('Candidate added!', 'success')
+    await obOpenDetail(r.id)
+  } catch(e) { showToast('Failed to save: ' + e.message, 'error') }
+}
+
+async function obSaveEdit(id) {
+  try {
+    const body = {
+      full_name: $('obEditName')?.value || '',
+      company_name: $('obEditCompany')?.value || '',
+      specialty: $('obEditSpecialty')?.value || '',
+      email: $('obEditEmail')?.value || '',
+      phone: $('obEditPhone')?.value || '',
+      ein_ssn: $('obEditEin')?.value || '',
+      contractor_type: $('obEditType')?.value || 'regular',
+      role_group: $('obEditRoleGroup')?.value || '',
+      source: $('obEditSource')?.value || '',
+      states_licensed: $('obEditStates')?.value || '',
+    }
+    await api(`/api/onboarding/candidates/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+    obCloseEditModal()
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${id}`)
+    obRenderView()
+    showToast('Saved!', 'success')
+  } catch(e) { showToast('Failed to save', 'error') }
+}
+
+async function obConfirmDelete(id, name) {
+  if (!confirm(`Delete "${name}"? This will also remove all their documents and meetings.`)) return
+  try {
+    await api(`/api/onboarding/candidates/${id}`, { method: 'DELETE' })
+    showToast('Candidate deleted', 'success')
+    obGoBack()
+  } catch(e) { showToast('Failed to delete', 'error') }
+}
+
+async function obSendCandidatePortalInvite(id, name, email) {
+  if (!confirm(`Send a portal login invite to ${name} (${email})?\n\nThey will receive an email with a link to view their application status.`)) return
+  try {
+    showLoading('Sending invite…')
+    await api(`/api/admin/onboarding/candidates/${id}/send-invite`, { method: 'POST' })
+    hideLoading()
+    showToast(`Portal invite sent to ${name}!`, 'success')
+  } catch(e) {
+    hideLoading()
+    showToast('Failed to send invite: ' + (e.message || 'Unknown error'), 'error')
+  }
+}
+
+async function obConvert(id) {
+  if (!confirm('Move this candidate to the Contractors module? This will create an active contractor record.')) return
+  try {
+    showLoading('Creating contractor record…')
+    const r = await api(`/api/onboarding/candidates/${id}/convert`, { method: 'POST' })
+    hideLoading()
+    if (r.already_converted) {
+      showToast('Already converted — contractor #' + r.contractor_id, 'info')
+    } else {
+      showToast('Contractor created! They are now in the Payroll module.', 'success')
+      // Reload candidate data and update state.contractors
+      obState.selectedCandidate = await api(`/api/onboarding/candidates/${id}`)
+      await reloadContractors()
+      obRenderView()
+    }
+  } catch(e) { hideLoading(); showToast('Failed: ' + e.message, 'error') }
+}
+
+// ── Resume Handling ──────────────────────────────────────────────
+async function obHandleResumeUpload(event, candidateId) {
+  const file = event.target.files[0]
+  if (!file) return
+  obProcessResumeFile(file, candidateId)
+}
+
+async function obProcessResumeFile(file, candidateId) {
+  // Show inline spinner on the drop zone instead of full-screen overlay
+  // (full-screen overlay blocks file I/O callbacks in some browsers)
+  const rdz = document.getElementById('resumeDropZone')
+  const rdzOrig = rdz ? rdz.innerHTML : ''
+  if (rdz) rdz.innerHTML = '<i class="fas fa-spinner fa-spin text-2xl text-indigo-400 my-2"></i><p class="text-sm text-gray-500 mt-1">Reading file…</p>'
+
+  try {
+    let text = ''
+
+    if (file.type === 'text/plain' || file.name.endsWith('.txt')) {
+      // Plain text — just read it
+      text = await file.text()
+
+    } else if (file.type === 'application/pdf' || file.name.endsWith('.pdf')) {
+      // Use PDF.js for proper text extraction
+      try {
+        const pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib
+        if (pdfjsLib) {
+          // Point worker to CDN
+          if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+            pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
+          }
+          const arrBuf = await file.arrayBuffer()
+          const pdf = await pdfjsLib.getDocument({ data: arrBuf }).promise
+          const pages = []
+          for (let p = 1; p <= pdf.numPages; p++) {
+            const page = await pdf.getPage(p)
+            const tc = await page.getTextContent()
+            pages.push(tc.items.map(i => i.str).join(' '))
+          }
+          text = pages.join('\n\n')
+        }
+      } catch(pdfErr) {
+        console.warn('PDF.js extraction failed, falling back:', pdfErr)
+      }
+
+      // Fallback: scan for printable ASCII if PDF.js failed or not loaded
+      if (!text.trim()) {
+        const arrBuf = await file.arrayBuffer()
+        const bytes = new Uint8Array(arrBuf)
+        let raw = ''
+        for (let i = 0; i < bytes.length; i++) {
+          const b = bytes[i]
+          if (b >= 32 && b < 127) raw += String.fromCharCode(b)
+          else if (b === 10 || b === 13) raw += '\n'
+        }
+        const matches = [...raw.matchAll(/BT\s+([\s\S]*?)\s+ET/g)]
+        if (matches.length > 0) {
+          text = matches.map(m =>
+            m[1].replace(/\(([^)]*)\)\s*Tj/g, '$1 ')
+                 .replace(/\(([^)]*)\)\s*TJ/g, '$1 ')
+                 .replace(/\/[A-Za-z]+\d*\s+\d+\s+Tf/g, '\n')
+                 .replace(/T\*/g, '\n').replace(/Td/g, ' ')
+          ).join('\n')
+        }
+        if (!text.trim()) text = raw.replace(/[^\x20-\x7E\n]/g, '').replace(/\n{3,}/g, '\n\n')
+      }
+
+    } else if (file.name.endsWith('.docx') || file.type.includes('word') || file.type.includes('officedocument')) {
+      // DOCX: extract the word/document.xml from the ZIP structure
+      // DOCX files are ZIP archives containing XML
+      try {
+        const arrBuf = await file.arrayBuffer()
+        const bytes = new Uint8Array(arrBuf)
+        // Convert to string to find XML content
+        let raw = ''
+        for (let i = 0; i < bytes.length; i++) {
+          raw += String.fromCharCode(bytes[i])
+        }
+        // Look for XML text content between word/document.xml patterns
+        // Extract text from <w:t> tags which contain the actual text in DOCX
+        const xmlMatches = raw.match(/<w:t[^>]*>([^<]+)<\/w:t>/g)
+        if (xmlMatches && xmlMatches.length > 0) {
+          text = xmlMatches
+            .map(m => m.replace(/<[^>]+>/g, ''))
+            .join(' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+        }
+        // If XML parsing fails, try reading as UTF-8 text and strip binary
+        if (!text.trim()) {
+          const decoder = new TextDecoder('utf-8', { fatal: false })
+          const decoded = decoder.decode(new Uint8Array(arrBuf))
+          const wt = decoded.match(/<w:t[^>]*>([^<]+)<\/w:t>/g)
+          if (wt) text = wt.map(m => m.replace(/<[^>]+>/g, '')).join(' ')
+        }
+      } catch(docxErr) {
+        console.warn('DOCX extraction error:', docxErr)
+      }
+      // Last resort: readable ASCII
+      if (!text.trim()) {
+        const arrBuf = await file.arrayBuffer()
+        const bytes = new Uint8Array(arrBuf)
+        let raw = ''
+        for (let i = 0; i < bytes.length; i++) {
+          if (bytes[i] >= 32 && bytes[i] < 127) raw += String.fromCharCode(bytes[i])
+          else if (bytes[i] === 10 || bytes[i] === 13) raw += '\n'
+        }
+        text = raw.replace(/[^\x20-\x7E\n]/g, '').replace(/\n{3,}/g, '\n\n')
+      }
+
+    } else {
+      // Unknown type — try reading as text
+      text = await file.text().catch(() => '')
+    }
+
+    // Clean up extracted text
+    text = text.replace(/\r\n/g, '\n').replace(/\r/g, '\n').replace(/\n{4,}/g, '\n\n').trim()
+
+    // Store in textarea
+    const ta = document.getElementById('obResumeText')
+    if (ta) ta.value = text.substring(0, 8000)
+
+    // Restore drop zone
+    if (rdz) rdz.innerHTML = rdzOrig
+
+    if (!text.trim()) {
+      showToast('Could not extract text from file. Please paste the resume text manually.', 'warning')
+      return
+    }
+
+    // Upload as document (non-blocking, don't await so UI stays responsive)
+    obFileToBase64(file).then(b64 =>
+      api(`/api/onboarding/candidates/${candidateId}/documents`, {
+        method: 'POST',
+        body: JSON.stringify({ doc_type: 'resume', file_name: file.name, file_data: b64, file_size: file.size, mime_type: file.type })
+      })
+    ).catch(err => console.warn('Doc upload failed:', err))
+
+    showToast('Resume loaded — click Analyze Resume to extract key points', 'success')
+  } catch(e) {
+    if (rdz) rdz.innerHTML = rdzOrig
+    showToast('Error reading file: ' + e.message, 'error')
+  }
+}
+
+async function obAnalyzeResume(id) {
+  const text = (document.getElementById('obResumeText')?.value || '').trim()
+  if (!text) { showToast('Please paste or upload resume text first', 'warning'); return }
+
+  // Use inline button spinner — NOT the full-screen overlay (which blocks API callbacks)
+  const btn = document.querySelector(`[onclick="obAnalyzeResume(${id})"]`)
+  const btnOrig = btn ? btn.innerHTML : ''
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Analyzing…' }
+
+  try {
+    await api(`/api/onboarding/candidates/${id}/analyze-resume`, {
+      method: 'POST', body: JSON.stringify({ resume_text: text })
+    })
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${id}`)
+    showToast('Analysis complete! Key points extracted.', 'success')
+    // Re-render resume tab to show key points
+    const content = document.getElementById('obDetailContent')
+    if (content) content.innerHTML = obDetailTabHTML(obState.selectedCandidate)
+  } catch(e) {
+    if (btn) { btn.disabled = false; btn.innerHTML = btnOrig }
+    showToast('Analysis failed: ' + e.message, 'error')
+  }
+}
+
+// ── Document Handling ────────────────────────────────────────────
+async function obHandleDocUpload(event, candidateId) {
+  const file = event.target.files[0]
+  if (!file) return
+  if (file.size > 5 * 1024 * 1024) { showToast('File too large (max 5MB)', 'warning'); return }
+  const docType = $('docType')?.value || 'other'
+  showLoading('Uploading document…')
+  try {
+    const b64 = await obFileToBase64(file)
+    await api(`/api/onboarding/candidates/${candidateId}/documents`, {
+      method: 'POST',
+      body: JSON.stringify({ doc_type: docType, file_name: file.name, file_data: b64, file_size: file.size, mime_type: file.type })
+    })
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${candidateId}`)
+    hideLoading()
+    showToast('Document uploaded!', 'success')
+    const content = document.getElementById('obDetailContent')
+    if (content) content.innerHTML = obDetailTabHTML(obState.selectedCandidate)
+  } catch(e) { hideLoading(); showToast('Upload failed: ' + e.message, 'error') }
+}
+
+async function obDownloadDoc(docId, fileName) {
+  try {
+    showLoading('Preparing download…')
+    const doc = await api(`/api/onboarding/documents/${docId}`)
+    hideLoading()
+    if (!doc.file_data) { showToast('No file data found', 'error'); return }
+    // Convert base64 to blob
+    const binary = atob(doc.file_data.replace(/^data:[^;]+;base64,/, ''))
+    const bytes = new Uint8Array(binary.length)
+    for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i)
+    const blob = new Blob([bytes], { type: doc.mime_type || 'application/octet-stream' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a'); a.href = url; a.download = fileName
+    document.body.appendChild(a); a.click(); document.body.removeChild(a)
+    URL.revokeObjectURL(url)
+    showToast('Downloaded!', 'success')
+  } catch(e) { hideLoading(); showToast('Download failed: ' + e.message, 'error') }
+}
+
+async function obDeleteDoc(docId, candidateId) {
+  if (!confirm('Delete this document?')) return
+  try {
+    await api(`/api/onboarding/documents/${docId}`, { method: 'DELETE' })
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${candidateId}`)
+    const content = document.getElementById('obDetailContent')
+    if (content) content.innerHTML = obDetailTabHTML(obState.selectedCandidate)
+    showToast('Document deleted', 'success')
+  } catch(e) { showToast('Failed to delete', 'error') }
+}
+
+function obFileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(reader.result)
+    reader.onerror = reject
+    reader.readAsDataURL(file)
+  })
+}
+
+// ── Meetings ─────────────────────────────────────────────────────
+async function obLoadAvailSlots() {
+  try {
+    const slots = await api('/api/onboarding/availability')
+    const el = document.getElementById('availSlotsContent')
+    if (!el) return
+    const days = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+    if (slots.length === 0) { el.innerHTML = '<div class="text-xs text-gray-400">No availability set. <button onclick="obGoAvailability()" class="text-blue-500 underline">Set availability</button></div>'; return }
+    el.innerHTML = slots.map(s => `
+      <div class="flex items-center gap-2 py-1 text-xs text-gray-600">
+        <i class="fas fa-clock text-gray-300 w-3"></i>
+        <span class="font-medium">${s.date ? new Date(s.date+'T12:00').toLocaleDateString('en-US',{month:'short',day:'numeric'}) : days[s.day_of_week]+'s'}</span>
+        <span class="text-gray-400">${s.start_time}–${s.end_time}</span>
+        <button onclick="obFillSlot('${s.date || ''}', '${s.start_time}', ${s.day_of_week??-1})" class="ml-auto text-blue-500 hover:underline">Use</button>
+      </div>
+    `).join('')
+  } catch(_) {}
+}
+
+function obFillSlot(date, time, dow) {
+  const dtInput = document.getElementById('mtgDate')
+  if (!dtInput) return
+  if (date) {
+    dtInput.value = date + 'T' + time
+  } else {
+    // Find next occurrence of that day of week
+    const now = new Date()
+    const diff = (dow - now.getDay() + 7) % 7 || 7
+    const next = new Date(now.getTime() + diff * 86400000)
+    dtInput.value = next.toISOString().substring(0,10) + 'T' + time
+  }
+}
+
+async function obScheduleMeeting(candidateId) {
+  const body = {
+    title:       $('mtgTitle')?.value || 'Interview',
+    scheduled_at: $('mtgDate')?.value ? new Date($('mtgDate').value).toISOString().replace('T',' ').substring(0,19) : null,
+    duration_min: parseInt($('mtgDuration')?.value || '30'),
+    meeting_link: $('mtgLink')?.value || '',
+    meeting_type: $('mtgType')?.value || 'interview',
+    notes:        $('mtgNotes')?.value || '',
+  }
+  if (!body.scheduled_at) { showToast('Please select a date and time', 'warning'); return }
+  try {
+    await api(`/api/onboarding/candidates/${candidateId}/meetings`, { method: 'POST', body: JSON.stringify(body) })
+    // Auto-update candidate status to interview_scheduled if still in earlier stage
+    const c = obState.selectedCandidate
+    const earlyStatuses = ['new','contacted']
+    if (c && earlyStatuses.includes(c.status) && body.meeting_type === 'interview') {
+      await api(`/api/onboarding/candidates/${candidateId}`, { method: 'PUT', body: JSON.stringify({ status: 'interview_scheduled' }) })
+    }
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${candidateId}`)
+    obRenderView()
+    showToast('Meeting scheduled!', 'success')
+  } catch(e) { showToast('Failed to schedule: ' + e.message, 'error') }
+}
+
+async function obDeleteMeeting(meetingId, candidateId) {
+  if (!confirm('Remove this meeting?')) return
+  try {
+    await api(`/api/onboarding/meetings/${meetingId}`, { method: 'DELETE' })
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${candidateId}`)
+    const content = document.getElementById('obDetailContent')
+    if (content) content.innerHTML = obDetailTabHTML(obState.selectedCandidate)
+    showToast('Meeting removed', 'success')
+  } catch(e) { showToast('Failed to remove', 'error') }
+}
+
+function obCopyLink(link) {
+  navigator.clipboard.writeText(link).then(() => showToast('Link copied!', 'success')).catch(() => showToast('Copy failed', 'error'))
+}
+
+function obSendMeetingEmail(candidateId, meetingId) {
+  const c = obState.selectedCandidate
+  const mtg = c?.meetings?.find(m => m.id === meetingId)
+  if (!c || !mtg) return
+  const dt = mtg.scheduled_at ? new Date(mtg.scheduled_at.replace(' ','T')+'Z').toLocaleString('en-US',{weekday:'long',month:'long',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}) : 'TBD'
+  const subject = encodeURIComponent(`${mtg.title || 'Interview'} with Lion MD's, PLLC`)
+  const body = encodeURIComponent(`Hi ${c.full_name},\n\nWe'd like to schedule a ${mtg.title || 'meeting'} with you.\n\nDate/Time: ${dt}\nDuration: ${mtg.duration_min} minutes\n${mtg.meeting_link ? 'Meeting Link: ' + mtg.meeting_link + '\n' : ''}\nPlease let us know if this time works for you.\n\nBest regards,\nLion MD's, PLLC`)
+  window.open(`mailto:${c.email || ''}?subject=${subject}&body=${body}`)
+  showToast('Email client opened', 'info')
+}
+
+async function obMarkContractSent(id) {
+  try {
+    await api(`/api/onboarding/candidates/${id}`, { method: 'PUT', body: JSON.stringify({ contract_sent: 1, contract_sent_at: new Date().toISOString() }) })
+    obState.selectedCandidate = await api(`/api/onboarding/candidates/${id}`)
+    const content = document.getElementById('obDetailContent')
+    if (content) content.innerHTML = obDetailTabHTML(obState.selectedCandidate)
+    showToast('Marked as contract sent ✓', 'success')
+  } catch(e) { showToast('Failed', 'error') }
+}
+
+// ── Availability ─────────────────────────────────────────────────
+async function obFetchAvailability() {
+  try { obState.availability = await api('/api/onboarding/availability') } catch(_) { obState.availability = [] }
+}
+
+function obToggleAvailType() {
+  const t = $('availType')?.value
+  if (t === 'specific') { $('availDayRow')?.classList.add('hidden'); $('availDateRow')?.classList.remove('hidden') }
+  else { $('availDayRow')?.classList.remove('hidden'); $('availDateRow')?.classList.add('hidden') }
+}
+
+async function obAddSlot() {
+  const isSpecific = $('availType')?.value === 'specific'
+  const body = {
+    day_of_week: isSpecific ? null : parseInt($('availDay')?.value ?? '1'),
+    date: isSpecific ? $('availDate')?.value || null : null,
+    start_time: $('availStart')?.value || '09:00',
+    end_time: $('availEnd')?.value || '17:00',
+    label: $('availLabel')?.value || '',
+  }
+  if (isSpecific && !body.date) { showToast('Please select a date', 'warning'); return }
+  try {
+    await api('/api/onboarding/availability', { method: 'POST', body: JSON.stringify(body) })
+    await obFetchAvailability()
+    obRenderView()
+    showToast('Availability slot added!', 'success')
+  } catch(e) { showToast('Failed to add slot', 'error') }
+}
+
+async function obDeleteSlot(id) {
+  try {
+    await api(`/api/onboarding/availability/${id}`, { method: 'DELETE' })
+    await obFetchAvailability()
+    obRenderView()
+    showToast('Slot removed', 'success')
+  } catch(e) { showToast('Failed to remove', 'error') }
+}
+
+// ── Contract Templates ───────────────────────────────────────────
+async function obFetchTemplates() {
+  try { obState.templates = await api('/api/onboarding/templates') } catch(_) { obState.templates = [] }
+}
+
+async function obLoadContractTemplates() {
+  try {
+    obState.templates = await api('/api/onboarding/templates')
+    const sel = document.getElementById('contractTmplSel')
+    if (!sel) return
+    sel.innerHTML = obState.templates.map(t => `<option value="${t.id}" ${t.is_default?'selected':''}>${escHtml(t.name)}</option>`).join('')
+  } catch(_) {}
+}
+
+async function obLoadContractPreview() {
+  const sel = document.getElementById('contractTmplSel')
+  const preview = document.getElementById('contractPreview')
+  if (!sel || !preview) return
+  const tmplId = sel.value
+  if (!tmplId) return
+  const c = obState.selectedCandidate
+  if (!c) return
+  try {
+    const dateVal = document.getElementById('contractDate')?.value
+    const date = dateVal ? new Date(dateVal).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}) : new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})
+    const r = await api(`/api/onboarding/templates/${tmplId}/fill`, {
+      method: 'POST',
+      body: JSON.stringify({ full_name: c.full_name, company_name: c.company_name, ein_ssn: c.ein_ssn, email: c.email, phone: c.phone, specialty: c.specialty, date })
+    })
+    preview.textContent = r.content
+  } catch(_) { preview.textContent = 'Preview unavailable' }
+}
+
+async function obGenerateContract(candidateId) {
+  const sel = document.getElementById('contractTmplSel')
+  const c = obState.selectedCandidate
+  if (!c || !sel?.value) { showToast('Select a template first', 'warning'); return }
+  showLoading('Generating contract PDF…')
+  try {
+    const dateVal = document.getElementById('contractDate')?.value
+    const date = dateVal ? new Date(dateVal).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}) : new Date().toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'})
+    const r = await api(`/api/onboarding/templates/${sel.value}/fill`, {
+      method: 'POST',
+      body: JSON.stringify({ full_name: c.full_name, company_name: c.company_name, ein_ssn: c.ein_ssn, email: c.email, phone: c.phone, specialty: c.specialty, date })
+    })
+    const { jsPDF } = window.jspdf
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'letter' })
+    const PW = doc.internal.pageSize.getWidth()
+    const PH = doc.internal.pageSize.getHeight()
+    const ML = 20, MR = 20, MT = 25
+
+    // Header
+    doc.setFillColor(26, 26, 46)
+    doc.rect(0, 0, PW, 22, 'F')
+    doc.setTextColor(201, 168, 76)
+    doc.setFontSize(13)
+    doc.setFont('helvetica', 'bold')
+    doc.text("LION MD's, PLLC", ML, 13)
+    doc.setTextColor(180, 180, 180)
+    doc.setFontSize(8)
+    doc.setFont('helvetica', 'normal')
+    doc.text('Independent Contractor Agreement', PW - MR, 13, { align: 'right' })
+
+    // Body text
+    doc.setTextColor(40, 40, 40)
+    doc.setFontSize(9.5)
+    doc.setFont('helvetica', 'normal')
+    const lines = doc.splitTextToSize(r.content, PW - ML - MR)
+    let y = MT + 4
+    const lineH = 5.5
+    const pageLines = Math.floor((PH - y - 15) / lineH)
+
+    for (let i = 0; i < lines.length; i++) {
+      if (i > 0 && i % pageLines === 0) {
+        doc.addPage()
+        doc.setFillColor(26, 26, 46)
+        doc.rect(0, 0, PW, 22, 'F')
+        doc.setTextColor(201, 168, 76)
+        doc.setFontSize(13)
+        doc.setFont('helvetica', 'bold')
+        doc.text("LION MD's, PLLC", ML, 13)
+        doc.setTextColor(40, 40, 40)
+        doc.setFontSize(9.5)
+        doc.setFont('helvetica', 'normal')
+        y = MT + 4
+      }
+      doc.text(lines[i], ML, y)
+      y += lineH
+    }
+
+    // Footer on each page
+    const totalPgs = doc.internal.getNumberOfPages()
+    for (let p = 1; p <= totalPgs; p++) {
+      doc.setPage(p)
+      doc.setFillColor(245, 245, 245)
+      doc.rect(0, PH - 12, PW, 12, 'F')
+      doc.setTextColor(150, 150, 150)
+      doc.setFontSize(7)
+      doc.text("Lion MD's, PLLC · Confidential", ML, PH - 4)
+      doc.text(`Page ${p} of ${totalPgs}`, PW - MR, PH - 4, { align: 'right' })
+    }
+
+    const fileName = `Contract_${(c.full_name||'contractor').replace(/\s+/g,'_')}_${date.replace(/\s+/g,'_')}.pdf`
+    doc.save(fileName)
+    hideLoading()
+    showToast('Contract PDF downloaded!', 'success')
+  } catch(e) { hideLoading(); showToast('PDF generation failed: ' + e.message, 'error') }
+}
+
+function obNewTemplate() {
+  document.getElementById('tmplEditor').innerHTML = obTemplateEditorForm(null)
+}
+
+async function obSelectTemplate(id) {
+  try {
+    const t = await api(`/api/onboarding/templates/${id}`)
+    document.getElementById('tmplEditor').innerHTML = obTemplateEditorForm(t)
+  } catch(_) {}
+}
+
+function obTemplateEditorForm(t) {
+  return `
+  <div>
+    <h3 class="font-semibold text-gray-700 mb-4">${t ? 'Edit Template' : 'New Template'}</h3>
+    <div class="space-y-3">
+      <div>
+        <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Template Name</label>
+        <input type="text" id="tmplName" value="${escHtml(t?.name||'')}" placeholder="e.g. Standard Agreement" class="w-full text-sm">
+      </div>
+      <div>
+        <label class="text-xs font-semibold text-gray-600 uppercase tracking-wider block mb-1">Contract Content</label>
+        <div class="text-xs text-gray-400 mb-1">Placeholders: <code class="bg-gray-100 px-1 rounded">{{contractor_name}}</code> <code class="bg-gray-100 px-1 rounded">{{company_name}}</code> <code class="bg-gray-100 px-1 rounded">{{ein_ssn}}</code> <code class="bg-gray-100 px-1 rounded">{{email}}</code> <code class="bg-gray-100 px-1 rounded">{{date}}</code> <code class="bg-gray-100 px-1 rounded">{{specialty}}</code></div>
+        <textarea id="tmplContent" rows="18" class="w-full text-xs border border-gray-200 rounded-xl p-3 resize-none font-mono focus:outline-none focus:border-amber-400" style="line-height:1.5">${escHtml(t?.content||'')}</textarea>
+      </div>
+      <label class="flex items-center gap-2 text-sm cursor-pointer">
+        <input type="checkbox" id="tmplDefault" ${t?.is_default?'checked':''} class="w-4 h-4 accent-amber-500">
+        <span class="text-gray-700">Set as default template</span>
+      </label>
+      <div class="flex gap-2">
+        <button onclick="obSaveTemplate(${t?.id||'null'})" class="btn-primary px-5 py-2.5 rounded-xl text-sm font-medium">
+          <i class="fas fa-save mr-2"></i>Save Template
+        </button>
+        ${t?.id ? `<button onclick="obDeleteTemplate(${t.id})" class="px-4 py-2.5 text-red-400 border border-red-200 rounded-xl text-sm hover:bg-red-50">Delete</button>` : ''}
+      </div>
+    </div>
+  </div>`
+}
+
+async function obSaveTemplate(id) {
+  const name = ($('tmplName')?.value || '').trim()
+  const content = $('tmplContent')?.value || ''
+  const isDefault = $('tmplDefault')?.checked ? 1 : 0
+  if (!name) { showToast('Template name is required', 'warning'); return }
+  if (!content) { showToast('Template content is required', 'warning'); return }
+  try {
+    if (id) {
+      await api(`/api/onboarding/templates/${id}`, { method: 'PUT', body: JSON.stringify({ name, content, is_default: isDefault }) })
+    } else {
+      await api('/api/onboarding/templates', { method: 'POST', body: JSON.stringify({ name, content, is_default: isDefault }) })
+    }
+    await obFetchTemplates()
+    obRenderView()
+    showToast('Template saved!', 'success')
+  } catch(e) { showToast('Failed to save: ' + e.message, 'error') }
+}
+
+async function obDeleteTemplate(id) {
+  if (!confirm('Delete this template?')) return
+  try {
+    await api(`/api/onboarding/templates/${id}`, { method: 'DELETE' })
+    await obFetchTemplates()
+    obRenderView()
+    showToast('Template deleted', 'success')
+  } catch(e) { showToast('Failed to delete', 'error') }
+}
+
+// ════════════════════════════════════════════════════
+// KANBAN DRAG-AND-DROP
+// ════════════════════════════════════════════════════
+
+let _obDragId = null          // candidate id being dragged
+let _obDragEl = null          // the DOM element being dragged
+let _obDragIndicator = null   // current drop-indicator element
+let _obDragOverCol = null     // column key currently hovered
+
+function obDragStart(event) {
+  _obDragId = parseInt(event.currentTarget.dataset.id)
+  _obDragEl  = event.currentTarget
+  event.dataTransfer.effectAllowed = 'move'
+  event.dataTransfer.setData('text/plain', String(_obDragId))
+  // Short delay so the drag image renders before we add the dim class
+  setTimeout(() => {
+    if (_obDragEl) _obDragEl.classList.add('dragging')
+    // Dim all other cards
+    document.querySelectorAll('.kb-card').forEach(c => {
+      if (parseInt(c.dataset.id) !== _obDragId) c.classList.add('kb-dim')
+    })
+  }, 0)
+}
+
+function obDragEnd(event) {
+  if (_obDragEl) _obDragEl.classList.remove('dragging')
+  _obDragEl = null
+  _obDragId = null
+  _obDragOverCol = null
+  // Remove all visual states
+  document.querySelectorAll('.kb-card').forEach(c => c.classList.remove('kb-dim', 'dragging'))
+  document.querySelectorAll('.kb-col-body').forEach(b => b.classList.remove('drag-over'))
+  _removeDropIndicator()
+}
+
+function obDragOver(event) {
+  event.preventDefault()
+  event.dataTransfer.dropEffect = 'move'
+  const body = event.currentTarget
+  const colKey = body.dataset.status
+  if (colKey === _obDragOverCol) return   // already handling this col
+  _obDragOverCol = colKey
+  // Highlight target column
+  document.querySelectorAll('.kb-col-body').forEach(b => b.classList.remove('drag-over'))
+  body.classList.add('drag-over')
+  // Show drop indicator line
+  _placeDropIndicator(body, event.clientY)
+}
+
+function obDragLeave(event) {
+  // Only clear if leaving the column body itself (not a child)
+  if (!event.currentTarget.contains(event.relatedTarget)) {
+    event.currentTarget.classList.remove('drag-over')
+    if (_obDragOverCol === event.currentTarget.dataset.status) {
+      _obDragOverCol = null
+    }
+  }
+}
+
+async function obDrop(event) {
+  event.preventDefault()
+  const body      = event.currentTarget
+  const newStatus = body.dataset.status
+  const id        = parseInt(event.dataTransfer.getData('text/plain'))
+  if (!id || !newStatus) return
+
+  body.classList.remove('drag-over')
+  _removeDropIndicator()
+
+  const candidate = obState.candidates.find(c => c.id === id)
+  if (!candidate || candidate.status === newStatus) return
+
+  // Optimistic UI update
+  const oldStatus = candidate.status
+  candidate.status = newStatus
+  obRenderView()
+
+  try {
+    await api(`/api/onboarding/candidates/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ status: newStatus })
+    })
+    // Refresh stats
+    await obLoadStats()
+    obRenderView()
+    showToast(`Moved to "${obStatusInfo(newStatus).label}"`, 'success')
+    if (newStatus === 'hired') {
+      setTimeout(() => showToast('Candidate hired! Complete the checklist in their profile.', 'info'), 700)
+    }
+  } catch(e) {
+    // Revert on failure
+    candidate.status = oldStatus
+    obRenderView()
+    showToast('Failed to update status', 'error')
+  }
+}
+
+function _placeDropIndicator(colBody, clientY) {
+  _removeDropIndicator()
+  const cards = [...colBody.querySelectorAll('.kb-card:not(.dragging)')]
+  let insertBefore = null
+  for (const card of cards) {
+    const rect = card.getBoundingClientRect()
+    if (clientY < rect.top + rect.height / 2) { insertBefore = card; break }
+  }
+  const ind = document.createElement('div')
+  ind.className = 'kb-drop-indicator'
+  ind.id = '_obDropInd'
+  if (insertBefore) colBody.insertBefore(ind, insertBefore)
+  else colBody.appendChild(ind)
+  _obDragIndicator = ind
+}
+
+function _removeDropIndicator() {
+  if (_obDragIndicator) { _obDragIndicator.remove(); _obDragIndicator = null }
+  const old = document.getElementById('_obDropInd')
+  if (old) old.remove()
+}
+
+// ── Quick-add inline form inside a column ────────────────────────
+function obQuickAddInCol(statusKey) {
+  // Remove any existing quick-add form
+  const existing = document.getElementById('obQuickAdd')
+  if (existing) {
+    const wasInCol = existing.closest('.kb-col')?.dataset.status
+    existing.remove()
+    if (wasInCol === statusKey) return   // toggle off
+  }
+
+  const colBody = document.querySelector(`.kb-col-body[data-status="${statusKey}"]`)
+  if (!colBody) return
+
+  const form = document.createElement('div')
+  form.id = 'obQuickAdd'
+  form.innerHTML = `
+    <input id="obQAName" type="text" placeholder="Full name…" class="w-full text-sm px-2 py-1.5 border border-gray-200 rounded-lg mb-2 focus:outline-none focus:border-amber-400" autofocus>
+    <input id="obQASpecialty" type="text" placeholder="Specialty (optional)" class="w-full text-sm px-2 py-1.5 border border-gray-200 rounded-lg mb-2 focus:outline-none focus:border-amber-400">
+    <div class="flex gap-2">
+      <button onclick="obQuickAddSave('${statusKey}')" class="flex-1 text-xs btn-primary py-1.5 rounded-lg font-medium">
+        <i class="fas fa-plus mr-1"></i>Add
+      </button>
+      <button onclick="document.getElementById('obQuickAdd')?.remove()" class="text-xs px-3 py-1.5 btn-outline rounded-lg">
+        Cancel
+      </button>
+    </div>
+  `
+  colBody.appendChild(form)
+  form.querySelector('#obQAName')?.focus()
+
+  // Allow Enter key to save
+  form.querySelector('#obQAName')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') obQuickAddSave(statusKey)
+    if (e.key === 'Escape') form.remove()
+  })
+  form.querySelector('#obQASpecialty')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') obQuickAddSave(statusKey)
+    if (e.key === 'Escape') form.remove()
+  })
+}
+
+async function obQuickAddSave(statusKey) {
+  const name = (document.getElementById('obQAName')?.value || '').trim()
+  if (!name) { showToast('Name is required', 'warning'); document.getElementById('obQAName')?.focus(); return }
+  const specialty = (document.getElementById('obQASpecialty')?.value || '').trim()
+  try {
+    const r = await api('/api/onboarding/candidates', {
+      method: 'POST',
+      body: JSON.stringify({ full_name: name, specialty, status: statusKey })
+    })
+    showToast('Candidate added!', 'success')
+    document.getElementById('obQuickAdd')?.remove()
+    await obLoadStats()
+    await obLoadCandidates()
+    obRenderView()
+  } catch(e) { showToast('Failed to add: ' + e.message, 'error') }
+}
+
+// ════════════════════════════════════════════════════
+// HELPERS
+// ════════════════════════════════════════════════════
+function noDataMsg() {
+  return `<div class="flex flex-col items-center justify-center h-64 text-center">
+    <i class="fas fa-database text-4xl text-gray-200 mb-4"></i>
+    <h3 class="text-lg font-semibold text-gray-500">No data for selected period</h3>
+    <p class="text-gray-400 text-sm mt-1">Please select a period or upload a report</p>
+  </div>`
+}
+
+// ════════════════════════════════════════════════════
+// USER MANAGEMENT (Admin only)
+// ════════════════════════════════════════════════════
+let umState = { users: [], editId: null, contractors: [], editManagedIds: [] }
+
+async function renderUserManagement() {
+  $('mainContent').innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    umState.users = await api('/api/admin/users')
+    umDrawPage()
+  } catch(e) { showToast('Error loading users: ' + e.message, 'error') }
+}
+
+function umDrawPage() {
+  const users = umState.users
+  $('mainContent').innerHTML = `
+    <div class="max-w-4xl">
+      <div class="flex flex-wrap items-center justify-between gap-3 mb-5">
+        <div>
+          <h2 class="text-xl font-bold text-gray-800">User Management</h2>
+          <p class="text-sm text-gray-500 mt-0.5">Create users and assign portal access roles</p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="umBulkOpen()" class="px-3 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5 border border-purple-300 text-purple-700 bg-purple-50 hover:bg-purple-100 transition-colors">
+            <i class="fas fa-users-cog"></i><span class="hidden xs:inline sm:inline"> Bulk Portal Setup</span>
+          </button>
+          <button onclick="umOpenAdd()" class="btn-primary px-3 py-2 rounded-xl text-sm font-semibold flex items-center gap-1.5">
+            <i class="fas fa-user-plus"></i><span class="hidden xs:inline sm:inline"> Add User</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Bulk Portal Setup Panel -->
+      <div id="umBulkPanel" class="hidden card p-5 mb-6 border-2 border-purple-200 bg-purple-50">
+        <div class="flex items-center justify-between mb-4">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-purple-600 flex items-center justify-center flex-shrink-0">
+              <i class="fas fa-users-cog text-white"></i>
+            </div>
+            <div>
+              <h3 class="font-bold text-gray-800 text-sm">Bulk Portal Setup</h3>
+              <p class="text-xs text-gray-500">Create provider portal accounts for all active contractors at once</p>
+            </div>
+          </div>
+          <button onclick="umBulkClose()" class="p-1.5 rounded-lg hover:bg-purple-100 text-gray-400 hover:text-gray-600">
+            <i class="fas fa-times"></i>
+          </button>
+        </div>
+
+        <!-- Loading state -->
+        <div id="umBulkLoading" class="hidden py-6 flex items-center justify-center gap-2 text-gray-400 text-sm">
+          <div class="spinner"></div> Loading contractors…
+        </div>
+
+        <!-- Contractor list -->
+        <div id="umBulkList" class="hidden">
+          <div class="flex items-center justify-between mb-3">
+            <p id="umBulkSubtitle" class="text-xs text-gray-500"></p>
+            <div class="flex items-center gap-2 text-xs">
+              <button onclick="umBulkSelectAll(true)" class="text-purple-600 hover:underline font-semibold">Select All</button>
+              <span class="text-gray-300">|</span>
+              <button onclick="umBulkSelectAll(false)" class="text-gray-500 hover:underline">Deselect All</button>
+            </div>
+          </div>
+          <div id="umBulkItems" class="max-h-64 overflow-y-auto space-y-1 bg-white rounded-xl border border-purple-100 p-2"></div>
+          <div id="umBulkError" class="hidden mt-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-xs"></div>
+          <div class="flex items-center gap-3 mt-4">
+            <button onclick="umBulkSubmit()" id="umBulkSubmitBtn"
+              class="btn-primary px-5 py-2 rounded-lg text-sm font-semibold flex items-center gap-2">
+              <i class="fas fa-rocket"></i> Create Portal Accounts
+            </button>
+            <span id="umBulkSelectedCount" class="text-xs text-gray-500"></span>
+          </div>
+        </div>
+
+        <!-- Empty state -->
+        <div id="umBulkEmpty" class="hidden py-6 text-center text-gray-400 text-sm">
+          <i class="fas fa-check-circle text-green-400 text-2xl mb-2 block"></i>
+          All active contractors already have portal accounts.
+        </div>
+
+        <!-- Results -->
+        <div id="umBulkResults" class="hidden">
+          <p class="text-xs font-semibold text-gray-600 mb-3 uppercase tracking-wide">Results</p>
+          <div id="umBulkResultItems" class="space-y-2 max-h-72 overflow-y-auto"></div>
+          <button onclick="umBulkClose()" class="mt-4 px-4 py-2 rounded-lg border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Done</button>
+        </div>
+      </div>
+
+      <!-- Add/Edit form (hidden by default) -->
+      <div id="umForm" class="hidden card p-5 mb-6">
+        <h3 id="umFormTitle" class="font-bold text-gray-800 mb-4">Add New User</h3>
+        <div id="umFormError" class="hidden mb-3 p-3 bg-red-50 border border-red-200 rounded-lg text-red-600 text-sm"></div>
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Full Name *</label>
+            <input id="umName" type="text" placeholder="e.g. Jane Smith" class="w-full"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Email *</label>
+            <input id="umEmail" type="email" placeholder="jane@example.com" class="w-full"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Role *</label>
+            <select id="umRole" class="w-full" onchange="umHandleRoleChange(this.value)">
+              <option value="admin">👑 Admin — Full access</option>
+              <option value="onboarding">🟢 Onboarding — Onboarding pipeline only</option>
+              <option value="provider">🩺 Provider — Self-service profile portal</option>
+              <option value="manager">🗂️ Manager — Licenses, consults, no financials</option>
+              <option value="license_editor">📜 License Editor — Add/edit licenses only</option>
+            </select>
+          </div>
+          <div id="umPwField">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Password <span id="umPwNote" class="text-gray-400 font-normal">(leave blank to send invite link)</span></label>
+            <input id="umPassword" type="password" placeholder="Optional — or user sets via invite" class="w-full"/>
+          </div>
+        </div>
+        <!-- Provider contractor link (shown only when role=provider) -->
+        <div id="umProviderField" class="hidden mt-4 p-4 bg-purple-50 rounded-xl border border-purple-200">
+          <label class="block text-xs font-semibold text-purple-700 mb-1"><i class="fas fa-link mr-1"></i>Link to Contractor Profile</label>
+          <p class="text-xs text-purple-500 mb-2">Select the contractor this provider maps to. They'll be able to edit their own profile and state licenses.</p>
+          <select id="umContractorId" class="w-full text-sm">
+            <option value="">— No link yet —</option>
+          </select>
+        </div>
+        <!-- Manager contractor scope (shown only when role=manager) -->
+        <div id="umManagerField" class="hidden mt-4 p-4 bg-teal-50 rounded-xl border border-teal-200">
+          <label class="block text-xs font-semibold text-teal-700 mb-2"><i class="fas fa-users-cog mr-1"></i>Manager Contractor Access</label>
+          <label class="flex items-center gap-2 mb-3 cursor-pointer select-none">
+            <input type="checkbox" id="umManagedAll" class="accent-teal-600" onchange="umToggleManagedAll(this.checked)">
+            <span class="text-sm font-semibold text-teal-800">Access all contractors</span>
+            <span class="text-xs text-teal-500">(leave unchecked to assign specific contractors)</span>
+          </label>
+          <div id="umMgrContractorList" class="space-y-1 max-h-48 overflow-y-auto bg-white rounded-lg border border-teal-100 p-2">
+            <p class="text-xs text-gray-400 text-center py-3">Loading contractors…</p>
+          </div>
+          <p class="text-xs text-teal-500 mt-2">Managers see contractor profiles, licenses, and consults — but no financial data.</p>
+        </div>
+        <div class="flex gap-3 mt-4">
+          <button onclick="umCloseForm()" class="px-4 py-2 rounded-lg border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+          <button id="umSaveBtn" onclick="umSave()" class="btn-primary px-5 py-2 rounded-lg text-sm font-semibold">Save User</button>
+        </div>
+      </div>
+
+      <!-- Users table -->
+      <div class="card overflow-hidden">
+        <div class="overflow-x-auto">
+          <table class="w-full text-sm">
+            <thead>
+              <tr class="border-b border-gray-100 text-left">
+                <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
+                <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider um-hide-mobile">Email</th>
+                <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Role</th>
+                <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider um-hide-mobile">Status</th>
+                <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider um-hide-mobile">Last Login</th>
+                <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              ${users.length === 0 ? `<tr><td colspan="6" class="px-4 py-8 text-center text-gray-400">No users yet. Add one above.</td></tr>` :
+                users.map(u => `
+                <tr class="border-b border-gray-50 table-row">
+                  <td class="px-3 py-3 font-medium text-gray-800">
+                    <div class="truncate max-w-[150px] sm:max-w-xs">${escHtml(u.name)}
+                    ${u.id === state.user?.id ? '<span class="ml-1 text-xs bg-yellow-100 text-yellow-700 px-1.5 py-0.5 rounded-full font-semibold">You</span>' : ''}</div>
+                    ${u.role === 'provider' && u.contractor_name ? `<div class="text-xs text-purple-500 mt-0.5 truncate"><i class="fas fa-link mr-1"></i>${escHtml(u.contractor_name)}</div>` : ''}
+                    ${u.role === 'provider' && !u.contractor_name ? `<div class="text-xs text-orange-400 mt-0.5"><i class="fas fa-exclamation-triangle mr-1"></i>No link</div>` : ''}
+                    ${u.role === 'manager' ? (u.managed_all ? `<div class="text-xs text-teal-500 mt-0.5"><i class="fas fa-users mr-1"></i>All contractors</div>` : u.managed_contractor_ids ? `<div class="text-xs text-teal-500 mt-0.5 truncate"><i class="fas fa-users mr-1"></i>${u.managed_contractor_ids.split(',').filter(Boolean).length} contractor(s)</div>` : `<div class="text-xs text-orange-400 mt-0.5"><i class="fas fa-exclamation-triangle mr-1"></i>No scope set</div>`) : ''}
+                    <div class="text-xs text-gray-400 mt-0.5 truncate um-hide-mobile">${escHtml(u.email)}</div>
+                  </td>
+                  <td class="px-3 py-3 text-gray-600 text-xs um-hide-mobile">${escHtml(u.email)}</td>
+                  <td class="px-3 py-3">${umRoleBadge(u.role)}</td>
+                  <td class="px-3 py-3 um-hide-mobile">
+                    ${u.is_active
+                      ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">Active</span>'
+                      : '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Inactive</span>'}
+                    ${u.must_set_password ? '<span class="ml-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700">Pending</span>' : ''}
+                  </td>
+                  <td class="px-3 py-3 text-gray-500 text-xs um-hide-mobile">${u.last_login ? new Date(u.last_login).toLocaleDateString() : 'Never'}</td>
+                  <td class="px-4 py-3">
+                    <div class="flex items-center gap-1">
+                      <button onclick="umOpenEdit(${u.id})" class="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500 hover:text-gray-700 tooltip" data-tip="Edit">
+                        <i class="fas fa-pencil text-xs"></i>
+                      </button>
+                      <button onclick="umEmailInvite(this,${u.id},'${escHtml(u.name).replace(/'/g,"&#39;")}')" class="p-1.5 rounded-lg hover:bg-indigo-50 text-indigo-400 hover:text-indigo-600 tooltip" data-tip="Send invite email">
+                        <i class="fas fa-envelope text-xs"></i>
+                      </button>
+                      <button onclick="umResendInvite(${u.id},'${escHtml(u.name).replace(/'/g,"&#39;")}')" class="p-1.5 rounded-lg hover:bg-blue-50 text-blue-400 hover:text-blue-600 tooltip" data-tip="Generate &amp; copy invite link">
+                        <i class="fas fa-link text-xs"></i>
+                      </button>
+                      <button onclick="umToggleActive(${u.id},${u.is_active},'${escHtml(u.name).replace(/'/g,"&#39;")}')" class="p-1.5 rounded-lg tooltip ${u.is_active ? 'hover:bg-red-50 text-red-400 hover:text-red-600' : 'hover:bg-green-50 text-green-400 hover:text-green-600'}" data-tip="${u.is_active ? 'Deactivate' : 'Activate'}">
+                        <i class="fas ${u.is_active ? 'fa-user-slash' : 'fa-user-check'} text-xs"></i>
+                      </button>
+                      ${u.id !== state.user?.id ? `<button onclick="umDelete(${u.id},'${escHtml(u.name).replace(/'/g,"&#39;")}')" class="p-1.5 rounded-lg hover:bg-red-50 text-red-400 hover:text-red-600 tooltip" data-tip="Delete"><i class="fas fa-trash text-xs"></i></button>` : ''}
+                    </div>
+                  </td>
+                </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- Invite link display -->
+      <div id="umInviteBox" class="hidden mt-4 card p-5 border-2 border-dashed border-yellow-400 bg-yellow-50">
+        <div class="flex items-center gap-2 mb-3">
+          <div class="w-8 h-8 rounded-full bg-yellow-400 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-link text-white text-sm"></i>
+          </div>
+          <div>
+            <p class="text-sm font-bold text-yellow-800">Invite link ready — copy &amp; share it</p>
+            <p class="text-xs text-yellow-600">Link expires in 48 hours. The user sets their own password on first visit.</p>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <input id="umInviteLink" type="text" readonly
+            onclick="this.select(); umCopyInvite()"
+            class="flex-1 bg-white text-xs text-gray-700 font-mono cursor-pointer hover:bg-yellow-50 transition-colors"
+            title="Click to copy"/>
+          <button onclick="umCopyInvite()" id="umCopyBtn"
+            class="btn-primary px-4 py-2.5 rounded-xl text-sm font-semibold flex items-center gap-2 whitespace-nowrap flex-shrink-0">
+            <i class="fas fa-copy"></i> Copy Link
+          </button>
+        </div>
+      </div>
+    </div>`
+}
+
+// ── Bulk Portal Setup ──────────────────────────────────────────────
+let umBulkState = {
+  contractors: [],   // contractors without portal access yet
+  selected: new Set(),
+  submitting: false,
+}
+
+async function umBulkOpen() {
+  // Show panel, hide sub-sections while loading
+  const panel = $('umBulkPanel')
+  panel.classList.remove('hidden')
+  panel.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+
+  $('umBulkLoading').classList.remove('hidden')
+  $('umBulkList').classList.add('hidden')
+  $('umBulkEmpty').classList.add('hidden')
+  $('umBulkResults').classList.add('hidden')
+
+  // Ensure contractors are loaded
+  await umLoadContractors()
+
+  // Build set of contractor_ids that already have a portal user
+  const provisionedIds = new Set(
+    umState.users
+      .filter(u => u.contractor_id != null)
+      .map(u => u.contractor_id)
+  )
+
+  // Also check by email: contractors whose email matches an existing portal_users email
+  const provisionedEmails = new Set(
+    umState.users.map(u => (u.email || '').toLowerCase().trim())
+  )
+
+  // Contractors without portal access = not in provisionedIds AND email not already taken
+  umBulkState.contractors = umState.contractors.filter(c => {
+    if (provisionedIds.has(c.id)) return false
+    if (c.email && provisionedEmails.has(c.email.toLowerCase().trim())) return false
+    return true
+  })
+
+  umBulkState.selected = new Set(
+    umBulkState.contractors
+      .filter(c => c.email)  // pre-select only those with email
+      .map(c => c.id)
+  )
+
+  $('umBulkLoading').classList.add('hidden')
+
+  if (umBulkState.contractors.length === 0) {
+    $('umBulkEmpty').classList.remove('hidden')
+    return
+  }
+
+  const noEmail = umBulkState.contractors.filter(c => !c.work_email && !c.email).length
+  $('umBulkSubtitle').textContent =
+    `${umBulkState.contractors.length} contractor${umBulkState.contractors.length !== 1 ? 's' : ''} without portal access` +
+    (noEmail ? ` (${noEmail} missing email — cannot be invited)` : '')
+
+  umBulkRenderList()
+  $('umBulkList').classList.remove('hidden')
+}
+
+function umBulkClose() {
+  $('umBulkPanel').classList.add('hidden')
+  umBulkState = { contractors: [], selected: new Set(), submitting: false }
+}
+
+function umBulkRenderList() {
+  const items = $('umBulkItems')
+  if (!items) return
+  items.innerHTML = umBulkState.contractors.map(c => {
+    const effEmail = c.work_email || c.email || ''
+    const hasEmail = !!effEmail
+    const isWork = !!c.work_email
+    const checked = umBulkState.selected.has(c.id) ? 'checked' : ''
+    const disabledAttr = hasEmail ? '' : 'disabled'
+    const rowOpacity = hasEmail ? '' : 'opacity-50'
+    return `
+      <label class="flex items-center gap-3 px-3 py-2 rounded-lg hover:bg-purple-50 cursor-pointer ${rowOpacity} ${disabledAttr ? 'cursor-not-allowed' : ''}">
+        <input type="checkbox" class="umBulkCb rounded border-gray-300 text-purple-600"
+          data-id="${c.id}" ${checked} ${disabledAttr}
+          onchange="umBulkToggle(${c.id}, this.checked)">
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-gray-800 truncate">${escHtml(c.name || '—')}</div>
+          ${hasEmail
+            ? `<div class="text-xs text-gray-400 truncate">${escHtml(effEmail)}
+                <span class="ml-1 text-[10px] font-semibold px-1.5 py-0.5 rounded ${isWork ? 'text-green-600 bg-green-50' : 'text-amber-500 bg-amber-50'}">${isWork ? 'work' : 'personal'}</span>
+               </div>`
+            : `<div class="text-xs text-orange-400 font-semibold"><i class="fas fa-exclamation-triangle mr-1"></i>No email on file — cannot invite</div>`}
+        </div>
+        ${hasEmail ? `<span class="text-xs px-2 py-0.5 rounded-full bg-purple-100 text-purple-600 font-semibold flex-shrink-0">Will be invited</span>` : ''}
+      </label>`
+  }).join('')
+  umBulkUpdateCount()
+}
+
+function umBulkToggle(id, checked) {
+  if (checked) umBulkState.selected.add(id)
+  else umBulkState.selected.delete(id)
+  umBulkUpdateCount()
+}
+
+function umBulkSelectAll(on) {
+  umBulkState.contractors
+    .filter(c => c.work_email || c.email)
+    .forEach(c => {
+      if (on) umBulkState.selected.add(c.id)
+      else umBulkState.selected.delete(c.id)
+    })
+  // Sync checkboxes
+  document.querySelectorAll('.umBulkCb').forEach(cb => {
+    const id = parseInt(cb.dataset.id)
+    if (!cb.disabled) cb.checked = umBulkState.selected.has(id)
+  })
+  umBulkUpdateCount()
+}
+
+function umBulkUpdateCount() {
+  const n = umBulkState.selected.size
+  const btn = $('umBulkSubmitBtn')
+  const countEl = $('umBulkSelectedCount')
+  if (countEl) countEl.textContent = n === 0 ? 'No contractors selected' : `${n} contractor${n !== 1 ? 's' : ''} selected`
+  if (btn) btn.disabled = n === 0 || umBulkState.submitting
+}
+
+async function umBulkSubmit() {
+  if (umBulkState.submitting) return
+  const selected = umBulkState.contractors.filter(c => umBulkState.selected.has(c.id))
+  if (!selected.length) return
+
+  const errEl = $('umBulkError')
+  errEl.classList.add('hidden')
+
+  umBulkState.submitting = true
+  const btn = $('umBulkSubmitBtn')
+  btn.disabled = true
+  btn.innerHTML = '<div class="spinner !w-4 !h-4 !border-2"></div> Creating…'
+
+  try {
+    const payload = selected.map(c => ({
+      contractor_id: c.id,
+      name: c.name,
+      email: c.work_email || c.email,  // prefer work email for portal login
+    }))
+    const res = await api('/api/admin/users/bulk-portal-setup', {
+      method: 'POST',
+      body: JSON.stringify({ contractors: payload }),
+    })
+
+    // Refresh user list in state
+    umState.users = await api('/api/admin/users')
+
+    umBulkShowResults(res.results || [])
+  } catch(e) {
+    errEl.textContent = 'Error: ' + e.message
+    errEl.classList.remove('hidden')
+    btn.disabled = false
+    btn.innerHTML = '<i class="fas fa-rocket"></i> Create Portal Accounts'
+    umBulkState.submitting = false
+  }
+}
+
+function umBulkShowResults(results) {
+  $('umBulkList').classList.add('hidden')
+  const created   = results.filter(r => r.status === 'created')
+  const existing  = results.filter(r => r.status === 'already_exists')
+  const skipped   = results.filter(r => r.status === 'skipped_no_email')
+
+  const origin = window.location.origin
+  const itemsEl = $('umBulkResultItems')
+  itemsEl.innerHTML = [
+    ...created.map(r => {
+      const link = origin + '/?token=' + r.invite_token
+      const emailStatusHtml = `<button onclick="umSendInviteEmail(this, ${r.user_id}, '${escHtml(r.name).replace(/'/g,"&#39;")}')"
+           class="text-xs px-3 py-1 rounded-lg bg-indigo-600 text-white font-semibold hover:bg-indigo-700 transition-colors flex-shrink-0">
+           <i class="fas fa-envelope mr-1"></i>Send Email
+         </button>`
+      return `
+        <div class="flex items-start gap-3 p-3 bg-white rounded-xl border border-green-200">
+          <div class="w-7 h-7 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0 mt-0.5">
+            <i class="fas fa-check text-green-600 text-xs"></i>
+          </div>
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-2 flex-wrap">
+              <div class="text-sm font-semibold text-gray-800">${escHtml(r.name)}</div>
+              <span class="text-xs font-bold text-green-600 bg-green-50 px-2 py-0.5 rounded-full">Created</span>
+            </div>
+            <div class="text-xs text-gray-400 truncate mb-2">${escHtml(r.email)}</div>
+            <div class="flex items-center gap-2 flex-wrap">
+              <input type="text" readonly value="${escHtml(link)}"
+                onclick="this.select()"
+                class="flex-1 text-xs font-mono bg-gray-50 text-gray-600 border border-gray-200 rounded-lg px-2 py-1 cursor-pointer min-w-0"/>
+              <button onclick="umBulkCopyLink(this,'${escHtml(link)}')"
+                class="flex-shrink-0 px-3 py-1 rounded-lg bg-purple-600 text-white text-xs font-semibold hover:bg-purple-700 transition-colors">
+                <i class="fas fa-copy mr-1"></i>Copy
+              </button>
+              ${emailStatusHtml}
+            </div>
+          </div>
+        </div>`
+    }),
+    ...existing.map(r => `
+      <div class="flex items-center gap-3 p-3 bg-white rounded-xl border border-blue-100">
+        <div class="w-7 h-7 rounded-full bg-blue-100 flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-info text-blue-500 text-xs"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-semibold text-gray-800">${escHtml(r.name)}</div>
+          <div class="text-xs text-gray-400">${escHtml(r.email)}</div>
+        </div>
+        <span class="text-xs font-bold text-blue-600 bg-blue-50 px-2 py-0.5 rounded-full flex-shrink-0">Already exists</span>
+      </div>`),
+    ...skipped.map(r => `
+      <div class="flex items-center gap-3 p-3 bg-white rounded-xl border border-orange-100">
+        <div class="w-7 h-7 rounded-full bg-orange-100 flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-exclamation text-orange-500 text-xs"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-semibold text-gray-800">${escHtml(r.name || '—')}</div>
+          <div class="text-xs text-orange-400">No email on file</div>
+        </div>
+        <span class="text-xs font-bold text-orange-600 bg-orange-50 px-2 py-0.5 rounded-full flex-shrink-0">Skipped</span>
+      </div>`),
+  ].join('')
+
+  $('umBulkResults').classList.remove('hidden')
+
+  // Summary toast
+  if (created.length) showToast(`${created.length} portal account${created.length !== 1 ? 's' : ''} created! Send invite emails using the buttons below.`, 'success')
+  else showToast('No new accounts created.', 'info')
+}
+
+async function umSendInviteEmail(btn, userId, name) {
+  const orig = btn.innerHTML
+  btn.disabled = true
+  btn.innerHTML = '<div class="spinner !w-3 !h-3 !border-2 inline-block"></div>'
+  try {
+    await api('/api/admin/send-invite-email', { method: 'POST', body: JSON.stringify({ user_id: userId }) })
+    btn.outerHTML = `<span class="text-xs text-green-600 font-semibold"><i class="fas fa-paper-plane mr-1"></i>Invite emailed</span>`
+    showToast(`Invite email sent to ${name}!`, 'success')
+  } catch(e) {
+    btn.disabled = false
+    btn.innerHTML = orig
+    showToast('Email failed: ' + e.message, 'error')
+  }
+}
+
+// Send invite email from contractor detail panel (existing portal user)
+async function ctSendInviteEmail(btn, userId, name) {
+  const orig = btn.innerHTML
+  btn.disabled = true
+  btn.innerHTML = '<div class="spinner !w-3 !h-3 !border-2 inline-block"></div>'
+  try {
+    await api('/api/admin/send-invite-email', { method: 'POST', body: JSON.stringify({ user_id: userId }) })
+    btn.innerHTML = '<i class="fas fa-check mr-1"></i>Sent!'
+    btn.classList.replace('bg-white', 'bg-green-50')
+    btn.classList.replace('text-blue-700', 'text-green-700')
+    btn.classList.replace('border-blue-300', 'border-green-300')
+    showToast(`Invite email sent to ${name}!`, 'success')
+    setTimeout(() => { btn.disabled = false; btn.innerHTML = orig }, 3000)
+  } catch(e) {
+    btn.disabled = false
+    btn.innerHTML = orig
+    showToast('Email failed: ' + e.message, 'error')
+  }
+}
+
+// Create portal account + send invite from contractor detail panel (no account yet)
+async function ctCreateAndSendInvite(btn, contractorId, name, email) {
+  if (!confirm(`Create a portal account for ${name} and send an invite email to ${email}?`)) return
+  const orig = btn.innerHTML
+  btn.disabled = true
+  btn.innerHTML = '<div class="spinner !w-3 !h-3 !border-2 inline-block"></div>'
+  try {
+    const res = await api('/api/admin/users/bulk-portal-setup', {
+      method: 'POST',
+      body: JSON.stringify({ contractors: [{ contractor_id: contractorId, name, email }] })
+    })
+    const r = (res.results || [])[0]
+    if (!r) throw new Error('No result returned')
+    if (r.status === 'already_exists') {
+      showToast(`${name} already has a portal account.`, 'info')
+    } else if (r.status === 'created') {
+      if (r.email_sent) {
+        showToast(`Portal account created and invite emailed to ${name}!`, 'success')
+      } else {
+        showToast(`Portal account created for ${name}. Email could not be sent — copy the link manually.`, 'info')
+      }
+    }
+    // Refresh the detail panel
+    if (ctDetailState.contractorId) obOpenContractorDetail(ctDetailState.contractorId)
+  } catch(e) {
+    btn.disabled = false
+    btn.innerHTML = orig
+    showToast('Error: ' + e.message, 'error')
+  }
+}
+
+function umBulkCopyLink(btn, link) {
+  navigator.clipboard.writeText(link).then(() => {
+    const orig = btn.innerHTML
+    btn.innerHTML = '<i class="fas fa-check mr-1"></i>Copied!'
+    btn.classList.replace('bg-purple-600', 'bg-green-600')
+    btn.classList.replace('hover:bg-purple-700', 'hover:bg-green-700')
+    setTimeout(() => {
+      btn.innerHTML = orig
+      btn.classList.replace('bg-green-600', 'bg-purple-600')
+      btn.classList.replace('hover:bg-green-700', 'hover:bg-purple-700')
+    }, 2000)
+  }).catch(() => showToast('Copy failed — please copy manually', 'error'))
+}
+// ── End Bulk Portal Setup ──────────────────────────────────────────
+
+function umRoleBadge(role) {
+  if (role === 'admin') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-800">👑 Admin</span>'
+  if (role === 'carevalidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">Legacy</span>'
+  if (role === 'provider') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-purple-100 text-purple-800">🩺 Provider</span>'
+  if (role === 'candidate') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-sky-100 text-sky-800">📋 Applicant</span>'
+  if (role === 'manager') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-teal-100 text-teal-800">🗂️ Manager</span>'
+  if (role === 'license_editor') return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-100 text-indigo-800">📜 Lic. Editor</span>'
+  return '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-emerald-100 text-emerald-800">🟢 Onboarding</span>'
+}
+
+// Load contractor list into the provider link dropdown
+async function umLoadContractors() {
+  if (umState.contractors.length > 0) return
+  try {
+    const data = await api('/api/contractors')
+    umState.contractors = (data || []).filter(c => c.is_active !== 0)
+  } catch(_) {}
+}
+
+function umHandleRoleChange(role) {
+  const pf = $('umProviderField')
+  const mf = $('umManagerField')
+  if (pf) pf.classList.add('hidden')
+  if (mf) mf.classList.add('hidden')
+
+  if (role === 'provider') {
+    if (pf) pf.classList.remove('hidden')
+    umLoadContractors().then(() => {
+      const sel = $('umContractorId')
+      if (!sel) return
+      const cur = sel.value
+      sel.innerHTML = '<option value="">— No link yet —</option>' +
+        umState.contractors.map(c => `<option value="${c.id}" ${cur==c.id?'selected':''}>${escHtml(c.name)}</option>`).join('')
+    })
+  } else if (role === 'manager') {
+    if (mf) mf.classList.remove('hidden')
+    umLoadContractors().then(() => umDrawMgrContractorList())
+  }
+}
+
+function umDrawMgrContractorList() {
+  const list = $('umMgrContractorList')
+  if (!list) return
+  const allChecked = $('umManagedAll')?.checked
+  if (allChecked) {
+    list.innerHTML = '<p class="text-xs text-teal-600 text-center py-3 font-medium"><i class="fas fa-check-circle mr-1"></i>All contractors will be accessible</p>'
+    return
+  }
+  const selected = (umState.editManagedIds || [])
+  list.innerHTML = umState.contractors.length === 0
+    ? '<p class="text-xs text-gray-400 text-center py-3">No active contractors found.</p>'
+    : umState.contractors.map(c => `
+      <label class="flex items-center gap-2 px-2 py-1.5 rounded-lg hover:bg-teal-50 cursor-pointer text-sm">
+        <input type="checkbox" class="umMgrCheck accent-teal-600" value="${c.id}" ${selected.includes(c.id)?'checked':''}>
+        <span class="text-gray-700">${escHtml(c.name)}</span>
+      </label>`).join('')
+}
+
+function umToggleManagedAll(checked) {
+  umDrawMgrContractorList()
+}
+
+function umOpenAdd() {
+  umState.editId = null
+  umState.editManagedIds = []
+  $('umFormTitle').textContent = 'Add New User'
+  $('umSaveBtn').textContent = 'Create User'
+  $('umPwNote').textContent = '(leave blank to send invite link)'
+  $('umName').value = ''; $('umEmail').value = ''; $('umRole').value = 'admin'; $('umPassword').value = ''
+  $('umEmail').disabled = false
+  $('umFormError').classList.add('hidden')
+  $('umInviteBox').classList.add('hidden')
+  $('umProviderField').classList.add('hidden')
+  $('umManagerField').classList.add('hidden')
+  $('umManagedAll').checked = false
+  $('umContractorId').value = ''
+  $('umForm').classList.remove('hidden')
+  $('umName').focus()
+}
+
+async function umOpenEdit(id) {
+  const u = umState.users.find(x => x.id === id)
+  if (!u) return
+  umState.editId = id
+  umState.editManagedIds = []
+  $('umFormTitle').textContent = 'Edit User'
+  $('umSaveBtn').textContent = 'Save Changes'
+  $('umPwNote').textContent = '(leave blank to keep current password)'
+  $('umName').value = u.name; $('umEmail').value = u.email; $('umRole').value = u.role; $('umPassword').value = ''
+  $('umEmail').disabled = false
+  $('umFormError').classList.add('hidden')
+  $('umInviteBox').classList.add('hidden')
+  $('umProviderField').classList.add('hidden')
+  $('umManagerField').classList.add('hidden')
+  $('umManagedAll').checked = false
+  $('umContractorId').value = ''
+
+  if (u.role === 'provider') {
+    $('umProviderField').classList.remove('hidden')
+    await umLoadContractors()
+    const sel = $('umContractorId')
+    sel.innerHTML = '<option value="">— No link yet —</option>' +
+      umState.contractors.map(c => `<option value="${c.id}" ${u.contractor_id==c.id?'selected':''}>${escHtml(c.name)}</option>`).join('')
+  } else if (u.role === 'manager') {
+    $('umManagerField').classList.remove('hidden')
+    // Parse existing managed_contractor_ids
+    const raw = (u.managed_contractor_ids || '').trim()
+    umState.editManagedIds = raw ? raw.split(',').map(Number).filter(Boolean) : []
+    const managedAll = u.managed_all === 1 || u.managed_all === '1'
+    $('umManagedAll').checked = managedAll
+    await umLoadContractors()
+    umDrawMgrContractorList()
+  }
+  $('umForm').classList.remove('hidden')
+  $('umName').focus()
+}
+
+function umCloseForm() {
+  $('umForm').classList.add('hidden')
+  umState.editId = null
+}
+
+async function umSave() {
+  const name  = ($('umName').value || '').trim()
+  const email = ($('umEmail').value || '').trim()
+  const role  = $('umRole').value
+  const pw    = ($('umPassword').value || '').trim()
+  const errEl = $('umFormError')
+  const contractorId = role === 'provider' ? ($('umContractorId').value || null) : null
+  errEl.classList.add('hidden')
+
+  if (!name || !email) { errEl.textContent = 'Name and email are required.'; errEl.classList.remove('hidden'); return }
+  if (pw && pw.length < 8) { errEl.textContent = 'Password must be at least 8 characters.'; errEl.classList.remove('hidden'); return }
+
+  // Collect manager scope fields
+  let managed_all = 0
+  let managed_contractor_ids = ''
+  if (role === 'manager') {
+    managed_all = $('umManagedAll')?.checked ? 1 : 0
+    if (!managed_all) {
+      const checks = document.querySelectorAll('.umMgrCheck:checked')
+      managed_contractor_ids = Array.from(checks).map(cb => cb.value).join(',')
+    }
+  }
+
+  try {
+    if (umState.editId) {
+      const body = { name, role }
+      if (pw) body.password = pw
+      if (role === 'manager') { body.managed_all = managed_all; body.managed_contractor_ids = managed_contractor_ids }
+      await api(`/api/admin/users/${umState.editId}`, { method: 'PUT', body: JSON.stringify(body) })
+      if (role === 'provider') {
+        await api(`/api/admin/users/${umState.editId}/link-contractor`, { method: 'PUT', body: JSON.stringify({ contractor_id: contractorId ? parseInt(contractorId) : null }) })
+      }
+      showToast('User updated!', 'success')
+      umCloseForm()
+    } else {
+      const body = { name, email, role }
+      if (pw) body.password = pw
+      if (role === 'manager') { body.managed_all = managed_all; body.managed_contractor_ids = managed_contractor_ids }
+      const result = await api('/api/admin/users', { method: 'POST', body: JSON.stringify(body) })
+      if (role === 'provider' && contractorId && result.id) {
+        await api(`/api/admin/users/${result.id}/link-contractor`, { method: 'PUT', body: JSON.stringify({ contractor_id: parseInt(contractorId) }) })
+      }
+      showToast('User created!', 'success')
+      umCloseForm()
+      if (result.invite_token) {
+        const link = window.location.origin + '/?token=' + result.invite_token
+        umState.users = await api('/api/admin/users')
+        umDrawPage()
+        showInviteModal(link)
+        return
+      }
+    }
+    umState.users = await api('/api/admin/users')
+    umDrawPage()
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden') }
+}
+
+async function umToggleActive(id, currentActive, name) {
+  if (!confirm(`${currentActive ? 'Deactivate' : 'Activate'} user "${name}"?`)) return
+  try {
+    await api(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify({ is_active: currentActive ? 0 : 1 }) })
+    showToast(`User ${currentActive ? 'deactivated' : 'activated'}.`, 'success')
+    umState.users = await api('/api/admin/users')
+    umDrawPage()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+async function umDelete(id, name) {
+  if (!confirm(`Permanently delete user "${name}"? This cannot be undone.`)) return
+  try {
+    await api(`/api/admin/users/${id}`, { method: 'DELETE' })
+    showToast('User deleted.', 'success')
+    umState.users = await api('/api/admin/users')
+    umDrawPage()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+async function umEmailInvite(btn, id, name) {
+  if (!confirm(`Send a portal invite email to "${name}"?\n\nThis will generate a new invite link and email it directly to them.`)) return
+  const orig = btn.innerHTML
+  btn.disabled = true
+  btn.innerHTML = '<div class="spinner !w-3 !h-3 !border-2 inline-block"></div>'
+  try {
+    // First reset/generate token, then send email
+    await api(`/api/admin/users/${id}/reset-invite`, { method: 'POST' })
+    await api('/api/admin/send-invite-email', { method: 'POST', body: JSON.stringify({ user_id: id }) })
+    btn.innerHTML = '<i class="fas fa-check text-xs"></i>'
+    btn.classList.replace('text-indigo-400', 'text-green-500')
+    btn.classList.replace('hover:text-indigo-600', 'hover:text-green-600')
+    showToast(`Invite email sent to ${name}!`, 'success')
+    setTimeout(() => {
+      btn.disabled = false
+      btn.innerHTML = orig
+      btn.classList.replace('text-green-500', 'text-indigo-400')
+      btn.classList.replace('hover:text-green-600', 'hover:text-indigo-600')
+    }, 3000)
+  } catch(e) {
+    btn.disabled = false
+    btn.innerHTML = orig
+    showToast('Failed to send invite: ' + e.message, 'error')
+  }
+}
+
+async function umResendInvite(id, name) {
+  if (!confirm(`Generate a new invite link for "${name}"? Any previous link will be invalidated.`)) return
+  try {
+    const result = await api(`/api/admin/users/${id}/reset-invite`, { method: 'POST' })
+    umState.users = await api('/api/admin/users')
+    umDrawPage()
+    if (result.invite_token) {
+      const link = window.location.origin + '/?token=' + result.invite_token
+      showInviteModal(link)
+      return
+    }
+    showToast('New invite link generated!', 'success')
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+function showInviteModal(link) {
+  $('inviteModalLink').value = link
+  $('inviteModalCopyBtn').innerHTML = '<i class="fas fa-copy"></i> Copy Link to Clipboard'
+  $('inviteModalCopyBtn').style.background = ''
+  $('inviteModal').classList.remove('hidden')
+}
+
+function inviteModalCopy() {
+  const link = $('inviteModalLink').value
+  if (!link) return
+  const btn = $('inviteModalCopyBtn')
+  const doFlash = () => {
+    btn.innerHTML = '<i class="fas fa-check"></i> Copied!'
+    btn.style.background = '#16a34a'
+    showToast('Invite link copied!', 'success')
+    setTimeout(() => {
+      btn.innerHTML = '<i class="fas fa-copy"></i> Copy Link to Clipboard'
+      btn.style.background = ''
+    }, 2500)
+  }
+  if (navigator.clipboard && window.isSecureContext) {
+    navigator.clipboard.writeText(link).then(doFlash).catch(() => {
+      $('inviteModalLink').select(); document.execCommand('copy'); doFlash()
+    })
+  } else {
+    $('inviteModalLink').select(); document.execCommand('copy'); doFlash()
+  }
+}
+
+// Legacy — kept so any remaining inline refs don't crash
+function umCopyInvite() { inviteModalCopy() }
+
+// ════════════════════════════════════════════════════════════════════
+// CLIENT PAYMENTS MODULE  (admin-only)
+// ════════════════════════════════════════════════════════════════════
+
+const cpState = {
+  clients: [],          // all clients from DB
+  entries: [],          // entries for current period
+  summary: null,        // { byPeriod, byClient }
+  currentPeriod: '',    // 'YYYY-MM'
+  view: 'monthly',      // 'monthly' | 'clients'
+  search: '',
+  seeded: false,
+}
+
+// ── helpers ──────────────────────────────────────────────────────────
+
+function cpFmt(amount) {
+  if (amount === null || amount === undefined) return '—'
+  return '$' + Number(amount).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+function cpStatusBadge(status, amount) {
+  const map = {
+    paid:       { cls: 'bg-emerald-100 text-emerald-800', label: 'Paid' },
+    cancelled:  { cls: 'bg-gray-100 text-gray-500',       label: 'Cancelled' },
+    past_due:   { cls: 'bg-red-100 text-red-700',         label: 'Past Due' },
+    venmo:      { cls: 'bg-purple-100 text-purple-700',   label: 'Venmo' },
+    pending:    { cls: 'bg-yellow-100 text-yellow-700',   label: 'Pending' },
+    no_payment: { cls: 'bg-slate-100 text-slate-500',     label: 'No Payment' },
+  }
+  const s = map[status] || { cls: 'bg-gray-100 text-gray-500', label: status || '—' }
+  return `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${s.cls}">${s.label}</span>`
+}
+
+function cpPeriodLabel(key) {
+  if (!key) return ''
+  const [y, m] = key.split('-')
+  const names = ['','Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
+  return `${names[parseInt(m)]} ${y}`
+}
+
+function cpAvailablePeriods() {
+  if (!cpState.summary || !cpState.summary.byPeriod) return []
+  return cpState.summary.byPeriod.map(p => p.period_key)
+}
+
+// Generate list of months from Aug-2025 through current month
+function cpAllPeriods() {
+  const periods = []
+  const now = new Date()
+  const start = new Date(2025, 7, 1) // Aug 2025
+  let d = new Date(start)
+  while (d <= now) {
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    periods.push(`${y}-${m}`)
+    d.setMonth(d.getMonth() + 1)
+  }
+  return periods.reverse() // newest first
+}
+
+// ── main render ──────────────────────────────────────────────────────
+
+async function renderClientPayments() {
+  const mc = $('mainContent')
+  mc.innerHTML = `
+    <div class="flex items-center justify-between mb-5 flex-wrap gap-3">
+      <div class="flex items-center gap-3 flex-wrap">
+        <div class="inline-flex rounded-lg overflow-hidden border border-gray-200 bg-white shadow-sm">
+          <button onclick="cpSetView('monthly')" id="cpViewMonthly"
+            class="px-4 py-2 text-sm font-medium flex items-center gap-2">
+            <i class="fas fa-calendar-alt"></i> Monthly View
+          </button>
+          <button onclick="cpSetView('clients')" id="cpViewClients"
+            class="px-4 py-2 text-sm font-medium flex items-center gap-2">
+            <i class="fas fa-list-ul"></i> Clients View
+          </button>
+        </div>
+        <div id="cpPeriodPickerWrap" class="flex items-center gap-2">
+          <select id="cpPeriodSelect" onchange="cpChangePeriod(this.value)"
+            class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </select>
+        </div>
+        <div id="cpSearchWrap" class="hidden">
+          <input id="cpSearch" type="text" placeholder="Search clients…"
+            oninput="cpState.search=this.value; cpRenderClientList()"
+            class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm w-52 focus:ring-2 focus:ring-blue-500 focus:outline-none">
+        </div>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button onclick="cpExportXlsx()" title="Export to Excel"
+          class="flex items-center gap-2 px-3 py-2 bg-green-600 hover:bg-green-700 text-white text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-file-excel"></i> Export XLSX
+        </button>
+        <button onclick="cpSeedData()" id="cpSeedBtn" title="Import all historical data from Excel"
+          class="flex items-center gap-2 px-3 py-2 bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-database"></i> Seed Data
+        </button>
+        <button onclick="cpQuickAdd()"
+          class="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-bolt"></i> Quick Add Payment
+        </button>
+        <button onclick="cpOpenAddClient()"
+          class="flex items-center gap-2 px-3 py-2 bg-white hover:bg-gray-50 text-gray-700 border border-gray-200 text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-user-plus"></i> Add Client
+        </button>
+      </div>
+    </div>
+
+    <!-- Stats bar -->
+    <div id="cpStats" class="grid grid-cols-2 md:grid-cols-5 gap-3 mb-5"></div>
+
+    <!-- Main content area -->
+    <div id="cpBody"></div>
+
+    <!-- Edit Entry Modal -->
+    <div id="cpEntryModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center justify-between mb-4">
+          <h3 class="text-lg font-semibold text-gray-900" id="cpEntryModalTitle">Edit Payment</h3>
+          <button onclick="cpCloseEntryModal()" class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client</label>
+            <div id="cpEntryClientName" class="text-sm text-gray-900 font-semibold bg-gray-50 px-3 py-2 rounded-lg border border-gray-200"></div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Period</label>
+            <div id="cpEntryPeriodLabel" class="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200"></div>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Payment Date <span class="text-gray-400 font-normal">(optional)</span></label>
+            <input id="cpEntryPaymentDate" type="date"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+            <select id="cpEntryStatus" onchange="cpToggleAmountField()"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <option value="paid">Paid</option>
+              <option value="pending">Pending</option>
+              <option value="past_due">Past Due</option>
+              <option value="venmo">Venmo</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="no_payment">No Payment</option>
+            </select>
+          </div>
+          <div id="cpAmountWrap">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Amount ($)</label>
+            <input id="cpEntryAmount" type="number" step="0.01" min="0" placeholder="0.00"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Notes <span class="text-gray-400 font-normal">(breakdown, reference…)</span></label>
+            <input id="cpEntryNotes" type="text" placeholder="e.g. Invoice #1234"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+        </div>
+        <div class="flex items-center justify-between mt-6">
+          <button id="cpEntryDeleteBtn" onclick="cpDeleteCurrentEntry()" class="hidden text-xs text-red-500 hover:text-red-700 px-3 py-2 rounded-lg hover:bg-red-50 transition">
+            <i class="fas fa-trash mr-1"></i>Delete
+          </button>
+          <div class="flex gap-3 ml-auto">
+            <button onclick="cpCloseEntryModal()"
+              class="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">Cancel</button>
+            <button onclick="cpSaveEntry()"
+              class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Quick Add Payment Modal -->
+    <div id="cpQuickModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center justify-between mb-5">
+          <h3 class="text-lg font-semibold text-gray-900">Quick Add Payment</h3>
+          <button onclick="cpCloseQuickModal()" class="text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100 transition"><i class="fas fa-times"></i></button>
+        </div>
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client *</label>
+            <select id="cpQClient"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <option value="">— Select client —</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Month *</label>
+            <select id="cpQPeriod"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+            </select>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Status</label>
+            <select id="cpQStatus" onchange="cpQToggleAmount()"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+              <option value="paid">Paid</option>
+              <option value="pending">Pending</option>
+              <option value="past_due">Past Due</option>
+              <option value="venmo">Venmo</option>
+              <option value="cancelled">Cancelled</option>
+              <option value="no_payment">No Payment</option>
+            </select>
+          </div>
+          <div id="cpQAmountWrap">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Amount ($)</label>
+            <input id="cpQAmount" type="number" step="0.01" min="0" placeholder="0.00"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Payment Date <span class="text-gray-400 font-normal">(optional)</span></label>
+            <input id="cpQPaymentDate" type="date"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Notes <span class="text-gray-400 font-normal">(breakdown, reference…)</span></label>
+            <input id="cpQNotes" type="text" placeholder="e.g. Invoice #1234"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6">
+          <button onclick="cpCloseQuickModal()"
+            class="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">Cancel</button>
+          <button onclick="cpSaveQuick()"
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">Save Payment</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Add / Edit Client Modal -->
+    <div id="cpClientModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6">
+        <h3 id="cpClientModalTitle" class="text-lg font-semibold text-gray-900 mb-4">Add Client</h3>
+        <input id="cpClientEditId" type="hidden" value="">
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Client Name *</label>
+            <input id="cpClientName" type="text" placeholder="e.g. Blue Sage Wellness"
+              onkeydown="if(event.key==='Enter'){event.preventDefault();cpSaveClient()}"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+          <div id="cpClientNotesRow">
+            <label class="block text-sm font-medium text-gray-700 mb-1">Notes</label>
+            <input id="cpClientNotes" type="text" placeholder="Optional notes"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6">
+          <button onclick="cpCloseClientModal()"
+            class="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">Cancel</button>
+          <button onclick="cpSaveClient()"
+            id="cpClientSaveBtn"
+            class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg transition">Save</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Merge Client Modal -->
+    <div id="cpMergeModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+      <div class="bg-white rounded-xl shadow-2xl w-full max-w-sm p-6">
+        <h3 class="text-lg font-semibold text-gray-900 mb-1">Merge Client</h3>
+        <p class="text-sm text-gray-500 mb-4">Merge <strong id="cpMergeSourceName"></strong> into another client. Payment entries that don't conflict will be moved; duplicate-period entries will be discarded. The source client will be permanently deleted.</p>
+        <input id="cpMergeSourceId" type="hidden" value="">
+        <div class="space-y-3">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Merge into *</label>
+            <select id="cpMergeTargetId"
+              class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-amber-500 focus:outline-none">
+            </select>
+          </div>
+        </div>
+        <div class="flex justify-end gap-3 mt-6">
+          <button onclick="cpCloseMergeModal()"
+            class="px-4 py-2 border border-gray-300 text-gray-700 text-sm font-medium rounded-lg hover:bg-gray-50 transition">Cancel</button>
+          <button onclick="cpSaveMerge()"
+            class="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-white text-sm font-medium rounded-lg transition">
+            <i class="fas fa-code-merge mr-1"></i>Merge
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Permanent Delete Warning Modal (shared: clients + contractors) -->
+    <div id="permDeleteModal" class="hidden fixed inset-0 bg-black/60 z-[70] flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-trash text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-gray-900">Permanently Delete</h3>
+            <p class="text-xs text-gray-400 mt-0.5">This action cannot be undone</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-1.5">
+          <p class="font-semibold">You are about to permanently delete:</p>
+          <p class="font-bold text-red-900 text-base" id="permDeleteItemName"></p>
+          <p id="permDeleteWarningText" class="text-xs mt-2"></p>
+        </div>
+        <p class="text-xs text-gray-500 mb-5">Type <strong id="permDeleteConfirmWord" class="font-mono text-gray-800"></strong> to confirm:</p>
+        <input id="permDeleteInput" type="text" placeholder="Type to confirm…"
+          oninput="permDeleteCheckInput()"
+          class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm mb-5 focus:ring-2 focus:ring-red-500 focus:outline-none font-mono">
+        <div class="flex gap-3">
+          <button onclick="permDeleteClose()"
+            class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button id="permDeleteConfirmBtn" onclick="permDeleteConfirm()" disabled
+            class="flex-1 px-4 py-2.5 bg-red-600 text-white text-sm font-bold rounded-xl transition opacity-40 cursor-not-allowed">
+            <i class="fas fa-trash mr-1.5"></i>Delete Forever
+          </button>
+        </div>
+      </div>
+    </div>
+  `
+
+  // load data
+  await cpLoadData()
+}
+
+async function cpLoadData() {
+  try {
+    const [clients, summary] = await Promise.all([
+      api('/api/client-payments/clients'),
+      api('/api/client-payments/summary'),
+    ])
+    cpState.clients = clients || []
+    cpState.summary = summary || { byPeriod: [], byClient: [] }
+
+    // default period = most recent with data, else current month
+    if (!cpState.currentPeriod) {
+      const periods = cpAllPeriods()
+      const withData = cpAvailablePeriods()
+      cpState.currentPeriod = withData[0] || periods[0] || ''
+    }
+
+    cpPopulatePeriodSelect()
+    cpRenderStats()
+    await cpLoadEntries()
+    cpSetView(cpState.view)
+  } catch(e) {
+    $('cpBody').innerHTML = `<div class="text-red-500 p-4">Error loading data: ${e.message}</div>`
+  }
+}
+
+function cpPopulatePeriodSelect() {
+  const sel = $('cpPeriodSelect')
+  if (!sel) return
+  const all = cpAllPeriods()
+  sel.innerHTML = all.map(p =>
+    `<option value="${p}" ${p === cpState.currentPeriod ? 'selected' : ''}>${cpPeriodLabel(p)}</option>`
+  ).join('')
+}
+
+function cpRenderStats() {
+  const el = $('cpStats')
+  if (!el || !cpState.summary) return
+  const bp = cpState.summary.byPeriod || []
+  const cur = bp.find(p => p.period_key === cpState.currentPeriod)
+  const totalClients = cpState.clients.length
+
+  // lifetime totals across all periods
+  const lifetimePaid = bp.reduce((s, p) => s + (p.total_amount || 0), 0)
+  const paidCount  = cur ? cur.paid_count : 0
+  const pendingCount = cur ? (cur.pending_count || 0) : 0
+  const pastDueCount = cur ? cur.past_due_count : 0
+  const curTotal   = cur ? cur.total_amount : 0
+
+  el.innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+      <div class="text-xs text-gray-500 font-medium mb-1">Total Clients</div>
+      <div class="text-2xl font-bold text-gray-900">${totalClients}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+      <div class="text-xs text-gray-500 font-medium mb-1">${cpPeriodLabel(cpState.currentPeriod)} Revenue</div>
+      <div class="text-2xl font-bold text-emerald-600">${cpFmt(curTotal)}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+      <div class="text-xs text-gray-500 font-medium mb-1">Paid This Month</div>
+      <div class="text-2xl font-bold text-blue-600">${paidCount}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+      <div class="text-xs text-gray-500 font-medium mb-1">Past Due</div>
+      <div class="text-2xl font-bold text-red-500">${pastDueCount}</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-4 shadow-sm">
+      <div class="text-xs text-gray-500 font-medium mb-1">All-Time Revenue</div>
+      <div class="text-2xl font-bold text-purple-600">${cpFmt(lifetimePaid)}</div>
+    </div>
+  `
+}
+
+async function cpLoadEntries() {
+  const entries = await api(`/api/client-payments/entries?period=${cpState.currentPeriod}`)
+  cpState.entries = entries || []
+}
+
+function cpSetView(v) {
+  cpState.view = v
+
+  // toggle view buttons
+  const btnM = $('cpViewMonthly'), btnC = $('cpViewClients')
+  if (btnM && btnC) {
+    const active   = 'bg-blue-600 text-white'
+    const inactive = 'text-gray-600 hover:bg-gray-50'
+    btnM.className = `px-4 py-2 text-sm font-medium flex items-center gap-2 ${v==='monthly' ? active : inactive}`
+    btnC.className = `px-4 py-2 text-sm font-medium flex items-center gap-2 ${v==='clients' ? active : inactive}`
+  }
+
+  const periodWrap = $('cpPeriodPickerWrap')
+  const searchWrap = $('cpSearchWrap')
+  if (periodWrap) periodWrap.classList.toggle('hidden', v !== 'monthly')
+  if (searchWrap) searchWrap.classList.toggle('hidden', v !== 'clients')
+
+  if (v === 'monthly') cpRenderMonthly()
+  else cpRenderClientList()
+}
+
+async function cpChangePeriod(val) {
+  cpState.currentPeriod = val
+  cpRenderStats()
+  await cpLoadEntries()
+  cpRenderMonthly()
+}
+
+// ── MONTHLY VIEW ─────────────────────────────────────────────────────
+
+function cpRenderMonthly() {
+  const body = $('cpBody')
+  if (!body) return
+
+  const entries = cpState.entries
+  const clients = cpState.clients
+
+  // Build a map: client_id → array of entries (multiple payments per month allowed)
+  const entryMap = {}
+  for (const e of entries) {
+    if (!entryMap[e.client_id]) entryMap[e.client_id] = []
+    entryMap[e.client_id].push(e)
+  }
+
+  const inactive = [], paid = [], attention = [], cancelled = [], missing = []
+
+  for (const cl of clients) {
+    const clientEntries = entryMap[cl.id] || []
+    const realEntries = clientEntries.filter(e => e.id !== null)
+    const ghostEntry = clientEntries.find(e => e._ghost)
+    const isInact = realEntries.some(e => e.is_active === 0 || e.is_active === '0')
+
+    if (isInact && realEntries.length > 0) {
+      inactive.push({ client: cl, entries: realEntries })
+    } else if (realEntries.length === 0 && ghostEntry) {
+      cancelled.push({ client: cl, entries: [ghostEntry] })
+    } else if (realEntries.length === 0) {
+      missing.push({ client: cl, entries: [] })
+    } else {
+      const hasPaid = realEntries.some(e => e.status === 'paid' || e.status === 'venmo')
+      const allCancelledOrNo = realEntries.every(e => e.status === 'cancelled' || e.status === 'no_payment')
+      if (allCancelledOrNo) {
+        cancelled.push({ client: cl, entries: realEntries })
+      } else if (hasPaid) {
+        paid.push({ client: cl, entries: realEntries })
+      } else {
+        attention.push({ client: cl, entries: realEntries })
+      }
+    }
+  }
+
+  const totalPaid = paid.reduce((s, r) => s + r.entries.reduce((ss, e) => ss + (e.amount || 0), 0), 0)
+
+  function row(item, isInactive) {
+    const { client, entries: clientEntries } = item
+    const safeName = client.name.replace(/'/g,"\'")
+    const displayName = client.name
+    const realEntries = clientEntries.filter(e => e.id !== null)
+    const ghostEntry = clientEntries.find(e => e._ghost)
+    const firstEntry = realEntries[0] || ghostEntry
+    const totalAmt = realEntries.filter(e => e.status==='paid'||e.status==='venmo').reduce((s,e)=>s+(e.amount||0),0)
+    const hasMultiple = realEntries.length > 1
+    const primaryBadge = hasMultiple
+      ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700"><i class="fas fa-layer-group text-[10px]"></i> ${realEntries.length} payments</span>`
+      : (firstEntry ? cpStatusBadge(firstEntry.status, firstEntry.amount) : cpStatusBadge('pending', null))
+    const amtDisplay = totalAmt > 0 ? cpFmt(totalAmt) : '—'
+    const allNotes = realEntries.map(e => {
+      const parts = []
+      if (e.payment_date) parts.push(new Date(e.payment_date+'T12:00:00').toLocaleDateString('en-US',{month:'numeric',day:'numeric'}))
+      if (e.notes) parts.push(e.notes)
+      return parts.join(': ')
+    }).filter(Boolean).join(' | ')
+    const inactiveBtn = isInactive && firstEntry?.id
+      ? `<button onclick="cpToggleClientActive('${firstEntry.id}',0); event.stopPropagation()" title="Reactivate this client for future periods" class="text-xs text-emerald-600 hover:text-emerald-800 transition px-2 py-1 rounded hover:bg-emerald-50 mr-1 border border-emerald-200 bg-emerald-50"><i class="fas fa-redo mr-1"></i>Reactivate</button>`
+      : ''
+    return `
+      <tr class="hover:bg-gray-50 transition group">
+        <td class="py-3 pl-4 pr-2">
+          <button onclick="cpOpenClientDetail(${client.id},'${safeName}')" class="font-medium ${isInactive ? 'text-gray-400 hover:text-gray-600' : 'text-blue-600 hover:text-blue-800'} hover:underline text-sm text-left">${displayName}</button>
+        </td>
+        <td class="py-3 px-2">${isInactive ? '<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-gray-100 text-gray-500"><i class="fas fa-moon"></i> Inactive</span>' : primaryBadge}</td>
+        <td class="py-3 px-2 text-sm font-semibold ${totalAmt > 0 && !isInactive ? 'text-emerald-700' : 'text-gray-400'}">${isInactive ? '—' : amtDisplay}</td>
+        <td class="py-3 px-2 text-sm text-gray-500 max-w-xs truncate" title="${allNotes}">${allNotes}</td>
+        <td class="py-3 pl-2 pr-4 text-right whitespace-nowrap">
+          ${inactiveBtn}
+          <button onclick="cpOpenClientDetail(${client.id},'${safeName}')" class="text-xs text-blue-500 hover:text-blue-700 transition px-2 py-1 rounded hover:bg-blue-50"><i class="fas fa-eye mr-1"></i>View</button>
+          <button onclick="cpOpenAddEntry(${client.id},'${safeName}')" class="text-xs text-emerald-500 hover:text-emerald-700 transition px-2 py-1 rounded hover:bg-emerald-50 ml-1"><i class="fas fa-plus mr-1"></i>Add</button>
+        </td>
+      </tr>`
+  }
+
+  function section(title, items, colorClass, icon, showTotal, total, isInactive) {
+    if (items.length === 0) return ''
+    const rows = items.map(item => row(item, !!isInactive)).join('')
+    const totalRow = showTotal ? `
+      <tr class="bg-gray-50 border-t border-gray-200">
+        <td class="py-2 pl-4 text-xs font-semibold text-gray-500 uppercase tracking-wide" colspan="2">Total</td>
+        <td class="py-2 px-2 text-sm font-bold text-emerald-700">${cpFmt(total)}</td>
+        <td colspan="2"></td>
+      </tr>` : ''
+    return `
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm mb-4 overflow-hidden">
+        <div class="flex items-center gap-2 px-4 py-3 border-b border-gray-100 ${colorClass}">
+          <i class="fas ${icon} text-sm"></i>
+          <span class="font-semibold text-sm">${title}</span>
+          ${showTotal && total > 0 ? `<span class="ml-auto text-xs font-bold">${cpFmt(total)}</span>` : '<span class="ml-auto"></span>'}
+        </div>
+        <table class="w-full">
+          <thead>
+            <tr class="text-xs text-gray-400 uppercase tracking-wide border-b border-gray-100">
+              <th class="py-2 pl-4 pr-2 text-left font-medium">Client</th>
+              <th class="py-2 px-2 text-left font-medium">Status</th>
+              <th class="py-2 px-2 text-left font-medium">Amount</th>
+              <th class="py-2 px-2 text-left font-medium">Notes / Dates</th>
+              <th class="py-2 pl-2 pr-4"></th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">${rows}${totalRow}</tbody>
+        </table>
+      </div>`
+  }
+
+  body.innerHTML = `
+    ${section('Paid', paid, 'bg-emerald-50 text-emerald-800', 'fa-check-circle', true, totalPaid, false)}
+    ${attention.length ? section('Needs Attention', attention, 'bg-amber-50 text-amber-800', 'fa-exclamation-triangle', false, 0, false) : ''}
+    ${cancelled.length ? section('Cancelled / No Payment', cancelled, 'bg-gray-50 text-gray-600', 'fa-ban', false, 0, false) : ''}
+    ${missing.length ? section('Not Recorded', missing, 'bg-slate-50 text-slate-500', 'fa-clock', false, 0, false) : ''}
+    ${inactive.length ? section('Inactive', inactive, 'bg-purple-50 text-purple-700', 'fa-moon', false, 0, true) : ''}
+    ${paid.length === 0 && attention.length === 0 && cancelled.length === 0 && missing.length === 0 && inactive.length === 0
+      ? `<div class="text-center py-12 text-gray-400"><i class="fas fa-inbox text-3xl mb-3"></i><p>No data for ${cpPeriodLabel(cpState.currentPeriod)}. Select a period or seed historical data.</p></div>`
+      : ''}
+  `
+}
+// ── CLIENTS VIEW ─────────────────────────────────────────────────────
+
+function cpRenderClientList() {
+  const body = $('cpBody')
+  if (!body) return
+
+  const term = (cpState.search || '').toLowerCase()
+  const clients = cpState.clients.filter(c => !term || c.name.toLowerCase().includes(term))
+  const summary = (cpState.summary?.byClient || [])
+  const summaryMap = {}
+  for (const s of summary) summaryMap[s.id] = s
+
+  if (clients.length === 0) {
+    body.innerHTML = `<div class="text-center py-12 text-gray-400"><i class="fas fa-search text-3xl mb-3"></i><p>No clients found.</p></div>`
+    return
+  }
+
+  body.innerHTML = `
+    <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+      <table id="cpClientListTable" class="w-full">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200 text-xs text-gray-500 uppercase tracking-wide">
+            <th class="py-3 pl-4 pr-2 text-left font-medium">Client</th>
+            <th class="py-3 px-2 text-right font-medium">Months Tracked</th>
+            <th class="py-3 px-2 text-right font-medium">Months Paid</th>
+            <th class="py-3 px-2 text-right font-medium">Lifetime Total</th>
+            <th class="py-3 pl-2 pr-4 text-right font-medium">Actions</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-100">
+          ${clients.map(cl => {
+            const s = summaryMap[cl.id] || {}
+            const tracked = s.months_tracked || 0
+            const paid_months = s.months_paid || 0
+            const lifetime = s.lifetime_total || 0
+            const paidPct = tracked > 0 ? Math.round((paid_months / tracked) * 100) : 0
+            const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
+            const displayName = cl.name
+            return `
+              <tr class="hover:bg-gray-50 transition group">
+                <td class="py-3 pl-4 pr-2">
+                  <button data-action="detail" data-id="${cl.id}" data-name="${esc(cl.name)}"
+                    class="font-medium text-blue-600 hover:text-blue-800 hover:underline text-sm text-left">${esc(displayName)}</button>
+                  ${cl.notes ? `<div class="text-xs text-gray-400 mt-0.5">${esc(cl.notes)}</div>` : ''}
+                </td>
+                <td class="py-3 px-2 text-sm text-gray-500 text-right">${tracked}</td>
+                <td class="py-3 px-2 text-right">
+                  <div class="text-sm font-medium text-gray-700">${paid_months}</div>
+                  ${tracked > 0 ? `<div class="w-full bg-gray-200 rounded-full h-1 mt-1"><div class="bg-emerald-500 h-1 rounded-full" style="width:${paidPct}%"></div></div>` : ''}
+                </td>
+                <td class="py-3 px-2 text-sm font-semibold text-right ${lifetime > 0 ? 'text-emerald-700' : 'text-gray-400'}">${cpFmt(lifetime)}</td>
+                <td class="py-3 pl-2 pr-4 text-right">
+                  <div class="flex items-center justify-end gap-1">
+                    <button data-action="add-entry" data-id="${cl.id}" data-name="${esc(cl.name)}"
+                      title="Add payment entry"
+                      class="text-xs text-blue-600 hover:text-blue-800 px-2 py-1 rounded hover:bg-blue-50 transition">
+                      <i class="fas fa-plus-circle mr-1"></i>Add
+                    </button>
+                    <button data-action="rename" data-id="${cl.id}" data-name="${esc(cl.name)}"
+                      title="Rename client"
+                      class="text-xs text-indigo-500 hover:text-indigo-700 px-2 py-1 rounded hover:bg-indigo-50 transition">
+                      <i class="fas fa-pen"></i>
+                    </button>
+                    <button data-action="merge" data-id="${cl.id}" data-name="${esc(cl.name)}"
+                      title="Merge into another client"
+                      class="text-xs text-amber-500 hover:text-amber-700 px-2 py-1 rounded hover:bg-amber-50 transition">
+                      <i class="fas fa-object-group"></i>
+                    </button>
+                    <button data-action="delete" data-id="${cl.id}" data-name="${esc(cl.name)}"
+                      title="Delete client"
+                      class="text-xs text-red-400 hover:text-red-600 px-2 py-1 rounded hover:bg-red-50 transition">
+                      <i class="fas fa-trash"></i>
+                    </button>
+                  </div>
+                </td>
+              </tr>`
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  `
+
+  // Delegated click handler — reads id/name from data attributes, avoids any quoting issues
+  const table = $('cpClientListTable')
+  if (table) {
+    table.addEventListener('click', function(e) {
+      const btn = e.target.closest('[data-action]')
+      if (!btn) return
+      e.stopPropagation()
+      const action = btn.dataset.action
+      const id = Number(btn.dataset.id)
+      const name = btn.dataset.name   // decoded from HTML attribute — safe, no escaping issues
+      if (action === 'detail')     cpOpenClientDetail(id, name)
+      else if (action === 'add-entry') cpOpenAddEntry(id, name)
+      else if (action === 'rename')    cpEditClient(id, name)
+      else if (action === 'merge')     cpOpenMerge(id, name)
+      else if (action === 'delete')    cpDeleteClient(id, name)
+    })
+  }
+}
+
+// ── CLIENT DETAIL PANEL ─────────────────────────────────────────────
+
+async function cpOpenClientDetail(clientId, clientName) {
+  // Create overlay + panel if missing
+  if (!$('cpDetailOverlay')) {
+    const overlay = document.createElement('div')
+    overlay.id = 'cpDetailOverlay'
+    overlay.className = 'fixed inset-0 bg-black/40 z-40 hidden'
+    overlay.onclick = cpCloseClientDetail
+    document.body.appendChild(overlay)
+
+    const panel = document.createElement('div')
+    panel.id = 'cpDetailPanel'
+    panel.className = 'fixed top-0 right-0 h-full w-full max-w-xl bg-white shadow-2xl z-50 flex flex-col translate-x-full transition-transform duration-300'
+    panel.innerHTML = `
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-200 flex-shrink-0">
+        <div>
+          <div id="cpDetailName" class="text-lg font-bold text-gray-900"></div>
+          <div id="cpDetailSub" class="text-xs text-gray-400 mt-0.5"></div>
+        </div>
+        <div class="flex items-center gap-1">
+          <button id="cpDetailEditBtn" onclick="cpDetailEditName()" title="Rename client"
+            class="text-xs text-indigo-600 hover:text-indigo-800 px-2 py-1.5 rounded-lg hover:bg-indigo-50 transition hidden">
+            <i class="fas fa-pen mr-1"></i>Rename
+          </button>
+          <button id="cpDetailToggleBtn" onclick="cpDetailToggleActive()" title="Toggle active/inactive for current period"
+            class="text-xs text-purple-600 hover:text-purple-800 px-2 py-1.5 rounded-lg hover:bg-purple-50 transition hidden">
+            <i class="fas fa-moon mr-1"></i>Toggle Inactive
+          </button>
+          <button onclick="cpCloseClientDetail()" class="text-gray-400 hover:text-gray-600 p-2 rounded-lg hover:bg-gray-100 transition ml-1">
+            <i class="fas fa-times text-lg"></i>
+          </button>
+        </div>
+      </div>
+      <div id="cpDetailBody" class="flex-1 overflow-y-auto px-6 py-4"></div>
+    `
+    document.body.appendChild(panel)
+  }
+
+  // Show overlay & slide panel in
+  $('cpDetailOverlay').classList.remove('hidden')
+  requestAnimationFrame(() => {
+    $('cpDetailPanel').classList.remove('translate-x-full')
+  })
+
+  $('cpDetailName').textContent = clientName
+  $('cpDetailSub').textContent = 'Loading…'
+  $('cpDetailBody').innerHTML = `<div class="flex justify-center py-12"><i class="fas fa-spinner fa-spin text-2xl text-gray-400"></i></div>`
+
+  // Store for header button callbacks
+  cpDetailState.clientId = clientId
+  cpDetailState.clientName = clientName
+
+  try {
+    // Fetch ALL entries for this client (no period filter)
+    const all = await api('/api/client-payments/entries')
+    const entries = (all || []).filter(e => e.client_id == clientId)
+
+    // Sort by period descending
+    entries.sort((a, b) => b.period_key.localeCompare(a.period_key))
+
+    // Find the current period entry to wire the toggle button
+    const curEntry = entries.find(e => e.period_key === cpState.currentPeriod)
+    cpDetailState.currentEntry = curEntry || null
+
+    // Show header action buttons
+    const editBtn = $('cpDetailEditBtn')
+    const toggleBtn = $('cpDetailToggleBtn')
+    if (editBtn) editBtn.classList.remove('hidden')
+    if (toggleBtn) {
+      toggleBtn.classList.remove('hidden')
+      if (curEntry) {
+        const isInactive = curEntry.is_active === 0 || curEntry.is_active === '0'
+        toggleBtn.innerHTML = isInactive
+          ? '<i class="fas fa-sun mr-1"></i>Reactivate'
+          : '<i class="fas fa-moon mr-1"></i>Mark Inactive'
+        toggleBtn.className = isInactive
+          ? 'text-xs text-emerald-600 hover:text-emerald-800 px-2 py-1.5 rounded-lg hover:bg-emerald-50 transition'
+          : 'text-xs text-purple-600 hover:text-purple-800 px-2 py-1.5 rounded-lg hover:bg-purple-50 transition'
+      }
+    }
+
+    // Stats — count unique periods, not individual entries
+    const paidEntries = entries.filter(e => e.status === 'paid')
+    const lifetime = paidEntries.reduce((s, e) => s + (e.amount || 0), 0)
+    const uniquePeriods = new Set(entries.map(e => e.period_key)).size
+    const paidPeriods   = new Set(paidEntries.map(e => e.period_key)).size
+
+    $('cpDetailSub').textContent = `${uniquePeriods} months tracked · ${paidPeriods} paid · ${cpFmt(lifetime)} lifetime`
+
+    if (entries.length === 0) {
+      $('cpDetailBody').innerHTML = `<div class="text-center py-12 text-gray-400"><i class="fas fa-inbox text-3xl mb-3"></i><p>No payment records found.</p></div>`
+      return
+    }
+
+    // Group by period (YYYY-MM) then by year for visual separation
+    // Multiple entries per period are now possible (multi-payment)
+    const byPeriod = {}
+    for (const e of entries) {
+      const pk = e.period_key
+      if (!byPeriod[pk]) byPeriod[pk] = []
+      byPeriod[pk].push(e)
+    }
+
+    // Get sorted unique periods descending
+    const sortedPeriods = Object.keys(byPeriod).sort().reverse()
+
+    // Group periods by year
+    const byYear = {}
+    for (const pk of sortedPeriods) {
+      const yr = pk.slice(0, 4)
+      if (!byYear[yr]) byYear[yr] = []
+      byYear[yr].push(pk)
+    }
+
+    let html = ''
+    for (const yr of Object.keys(byYear).sort().reverse()) {
+      const yearPeriods = byYear[yr]
+      // Sum all paid entries for the year
+      const yearTotal = yearPeriods.flatMap(pk => byPeriod[pk]).filter(e => e.status === 'paid').reduce((s, e) => s + (e.amount || 0), 0)
+      html += `
+        <div class="mb-5">
+          <div class="flex items-center justify-between mb-2">
+            <span class="text-xs font-bold text-gray-400 uppercase tracking-widest">${yr}</span>
+            ${yearTotal > 0 ? `<span class="text-xs font-semibold text-emerald-600">${cpFmt(yearTotal)}</span>` : ''}
+          </div>
+          <div class="bg-white rounded-xl border border-gray-200 overflow-hidden shadow-sm">`
+
+      for (const pk of yearPeriods) {
+        const periodEntries = byPeriod[pk]
+        const hasMultiple = periodEntries.length > 1
+        const safeCN = clientName.replace(/'/g,"\\'")
+
+        html += `<table class="w-full ${hasMultiple ? 'border-b-2 border-blue-100' : ''}">
+              <thead>
+                <tr class="bg-gray-50 border-b border-gray-100">
+                  <th class="py-2 pl-4 pr-2 text-left text-xs text-gray-400 font-bold uppercase tracking-wide" colspan="2">
+                    ${cpPeriodLabel(pk)}
+                    ${hasMultiple ? `<span class="ml-2 bg-blue-100 text-blue-600 text-xs px-1.5 py-0.5 rounded-full font-semibold">${periodEntries.length} payments</span>` : ''}
+                  </th>
+                  <th class="py-2 px-2 text-right text-xs text-gray-400 font-medium">Amount</th>
+                  <th class="py-2 pl-2 pr-4 text-left text-xs text-gray-400 font-medium">Date / Notes</th>
+                </tr>
+              </thead>
+              <tbody class="divide-y divide-gray-50">
+                ${periodEntries.map(e => {
+                  const eInactive = e.is_active === 0 || e.is_active === '0'
+                  const dateStr = e.payment_date ? new Date(e.payment_date + 'T12:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric'}) : ''
+                  return `
+                  <tr class="hover:bg-gray-50 transition group ${eInactive ? 'opacity-60' : ''}">
+                    <td class="py-2.5 pl-4 pr-2 w-4">
+                      ${eInactive ? '<i class="fas fa-moon text-purple-400 text-xs"></i>' : cpStatusBadge(e.status, e.amount)}
+                    </td>
+                    <td class="py-2.5 px-1 text-xs text-gray-500 w-20">
+                      ${eInactive ? '<span class="text-gray-400">Inactive</span>' : (e.status === 'cancelled' ? '<span class="text-red-500 font-semibold">Cancelled</span>' : '')}
+                    </td>
+                    <td class="py-2.5 px-2 text-sm font-semibold text-right ${e.status === 'paid' && !eInactive ? 'text-emerald-700' : 'text-gray-400'}">${(e.status === 'paid' || e.status === 'venmo') && !eInactive ? cpFmt(e.amount) : '—'}</td>
+                    <td class="py-2.5 pl-2 pr-2 text-xs text-gray-400">
+                      <div class="flex items-center justify-between gap-2">
+                        <span>${dateStr ? `<span class="text-gray-600 font-medium">${dateStr}</span>${e.notes ? ' · ' : ''}` : ''}${escHtml(e.notes || '')}</span>
+                        <div class="opacity-0 group-hover:opacity-100 flex items-center gap-1 flex-shrink-0">
+                          <button onclick="cpToggleClientActive('${e.id}',${eInactive ? 0 : 1}); event.stopPropagation()"
+                            title="${eInactive ? 'Reactivate' : 'Mark inactive'}"
+                            class="flex-shrink-0 ${eInactive ? 'text-emerald-600 hover:text-emerald-800 hover:bg-emerald-50' : 'text-purple-500 hover:text-purple-700 hover:bg-purple-50'} px-1.5 py-0.5 rounded transition text-xs">
+                            <i class="fas ${eInactive ? 'fa-sun' : 'fa-moon'}"></i>
+                          </button>
+                          <button onclick="cpOpenEntryFromDetail(${e.client_id},'${safeCN}',${e.id}); event.stopPropagation()"
+                            class="flex-shrink-0 text-blue-600 hover:text-blue-800 px-1.5 py-0.5 rounded hover:bg-blue-50 transition text-xs">
+                            <i class="fas fa-edit"></i>
+                          </button>
+                        </div>
+                      </div>
+                    </td>
+                  </tr>`
+                }).join('')}
+              </tbody>
+            </table>`
+      }
+
+      html += `</div></div>`
+    }
+
+    // Add entry button at bottom
+    html += `
+      <button onclick="cpOpenAddEntryFromDetail(${clientId},'${clientName.replace(/'/g,"\\'")}')"
+        class="w-full mt-2 py-3 border-2 border-dashed border-gray-200 rounded-xl text-sm text-gray-400 hover:border-blue-300 hover:text-blue-500 transition flex items-center justify-center gap-2">
+        <i class="fas fa-plus-circle"></i> Add Payment Entry
+      </button>`
+
+    $('cpDetailBody').innerHTML = html
+  } catch(e) {
+    $('cpDetailBody').innerHTML = `<div class="text-red-500 p-4">Error: ${e.message}</div>`
+  }
+}
+
+function cpCloseClientDetail() {
+  const panel = $('cpDetailPanel')
+  const overlay = $('cpDetailOverlay')
+  if (panel) panel.classList.add('translate-x-full')
+  if (overlay) overlay.classList.add('hidden')
+  // Hide header action buttons
+  const editBtn = $('cpDetailEditBtn')
+  const toggleBtn = $('cpDetailToggleBtn')
+  if (editBtn) editBtn.classList.add('hidden')
+  if (toggleBtn) toggleBtn.classList.add('hidden')
+  cpDetailState.clientId = null
+  cpDetailState.clientName = null
+  cpDetailState.currentEntry = null
+}
+
+function cpOpenEntryFromDetail(clientId, clientName, entryId) {
+  cpEntryContext = { clientId, clientName, entryId, period: cpState.currentPeriod }
+  api('/api/client-payments/entries').then(all => {
+    const entry = (all || []).find(e => e.id == entryId)
+    $('cpEntryModalTitle').textContent = 'Edit Payment Entry'
+    $('cpEntryClientName').textContent = clientName
+    $('cpEntryPeriodLabel').textContent = entry ? cpPeriodLabel(entry.period_key) : ''
+    cpEntryContext.period = entry ? entry.period_key : cpState.currentPeriod
+    $('cpEntryStatus').value = entry?.status || 'paid'
+    $('cpEntryAmount').value = entry?.amount != null ? entry.amount : ''
+    $('cpEntryNotes').value = entry?.notes || ''
+    $('cpEntryPaymentDate').value = entry?.payment_date || ''
+    cpToggleAmountField()
+    const delBtn = $('cpEntryDeleteBtn')
+    if (delBtn) delBtn.classList.remove('hidden')
+    $('cpEntryModal').classList.remove('hidden')
+  })
+}
+
+function cpOpenAddEntryFromDetail(clientId, clientName) {
+  cpEntryContext = { clientId, clientName, entryId: null, period: cpState.currentPeriod }
+  $('cpEntryModalTitle').textContent = 'Add Payment Entry'
+  $('cpEntryClientName').textContent = clientName
+  // Replace static period label with a dropdown so user can pick the month
+  const periodEl = $('cpEntryPeriodLabel')
+  if (periodEl && periodEl.tagName !== 'SELECT') {
+    periodEl.outerHTML = `<select id="cpEntryPeriodLabel" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">${cpAllPeriods().map(p => `<option value="${p}" ${p===cpState.currentPeriod?'selected':''}>${cpPeriodLabel(p)}</option>`).join('')}</select>`
+  }
+  $('cpEntryStatus').value = 'paid'
+  $('cpEntryAmount').value = ''
+  $('cpEntryNotes').value = ''
+  $('cpEntryPaymentDate').value = ''
+  cpToggleAmountField()
+  const delBtn = $('cpEntryDeleteBtn')
+  if (delBtn) delBtn.classList.add('hidden')
+  $('cpEntryModal').classList.remove('hidden')
+}
+
+// ── ENTRY MODAL ──────────────────────────────────────────────────────
+
+let cpEntryContext = null  // { clientId, clientName, entryId, period }
+
+function cpOpenEntry(clientId, clientName, entryId) {
+  const entry = entryId
+    ? cpState.entries.find(e => e.id == entryId)
+    : cpState.entries.find(e => e.client_id == clientId && e.period_key === cpState.currentPeriod) || null
+  const realEntryId = entry?.id || null
+  cpEntryContext = { clientId, clientName, entryId: realEntryId, period: cpState.currentPeriod }
+  $('cpEntryModalTitle').textContent = realEntryId ? 'Edit Payment Entry' : 'Add Payment Entry'
+  $('cpEntryClientName').textContent = clientName
+  $('cpEntryPeriodLabel').textContent = cpPeriodLabel(cpState.currentPeriod)
+  $('cpEntryStatus').value = entry?.status || 'paid'
+  $('cpEntryAmount').value = entry?.amount != null ? entry.amount : ''
+  $('cpEntryNotes').value = entry?.notes || ''
+  $('cpEntryPaymentDate').value = entry?.payment_date || ''
+  cpToggleAmountField()
+  const delBtn = $('cpEntryDeleteBtn')
+  if (delBtn) delBtn.classList.toggle('hidden', !realEntryId)
+  $('cpEntryModal').classList.remove('hidden')
+}
+
+function cpOpenAddEntry(clientId, clientName) {
+  cpEntryContext = { clientId, clientName, entryId: null, period: cpState.currentPeriod }
+  $('cpEntryModalTitle').textContent = 'Add Payment Entry'
+  $('cpEntryClientName').textContent = clientName
+  // Restore period label to static div if it was swapped to a select
+  const periodEl = $('cpEntryPeriodLabel')
+  if (periodEl && periodEl.tagName === 'SELECT') {
+    periodEl.outerHTML = `<div id="cpEntryPeriodLabel" class="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200">${cpPeriodLabel(cpState.currentPeriod)}</div>`
+  } else if (periodEl) {
+    periodEl.textContent = cpPeriodLabel(cpState.currentPeriod)
+  }
+  $('cpEntryStatus').value = 'paid'
+  $('cpEntryAmount').value = ''
+  $('cpEntryNotes').value = ''
+  $('cpEntryPaymentDate').value = ''
+  cpToggleAmountField()
+  const delBtn = $('cpEntryDeleteBtn')
+  if (delBtn) delBtn.classList.add('hidden')
+  $('cpEntryModal').classList.remove('hidden')
+}
+
+function cpCloseEntryModal() {
+  $('cpEntryModal').classList.add('hidden')
+  // Restore period label to static div if it was swapped to a select
+  const periodEl = $('cpEntryPeriodLabel')
+  if (periodEl && periodEl.tagName === 'SELECT') {
+    periodEl.outerHTML = `<div id="cpEntryPeriodLabel" class="text-sm text-gray-600 bg-gray-50 px-3 py-2 rounded-lg border border-gray-200"></div>`
+  }
+}
+
+function cpToggleAmountField() {
+  const status = $('cpEntryStatus')?.value
+  const wrap = $('cpAmountWrap')
+  if (!wrap) return
+  wrap.classList.toggle('hidden', status !== 'paid' && status !== 'venmo')
+}
+
+async function cpDeleteCurrentEntry() {
+  if (!cpEntryContext?.entryId) return
+  if (!confirm('Delete this payment entry? This cannot be undone.')) return
+  try {
+    await api(`/api/client-payments/entries/${cpEntryContext.entryId}`, { method: 'DELETE' })
+    cpCloseEntryModal()
+    showToast('Payment entry deleted', 'success')
+    const [entries, summary] = await Promise.all([
+      api(`/api/client-payments/entries?period=${cpState.currentPeriod}`),
+      api('/api/client-payments/summary'),
+    ])
+    cpState.entries = entries || []
+    cpState.summary = summary || cpState.summary
+    cpRenderStats()
+    if (cpState.view === 'monthly') cpRenderMonthly()
+    else cpRenderClientList()
+    if ($('cpDetailPanel') && !$('cpDetailPanel').classList.contains('translate-x-full') && cpEntryContext) {
+      cpOpenClientDetail(cpEntryContext.clientId, cpEntryContext.clientName)
+    }
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function cpSaveEntry() {
+  if (!cpEntryContext) return
+  const status = $('cpEntryStatus').value
+  const amount = (status === 'paid' || status === 'venmo') ? parseFloat($('cpEntryAmount').value) || null : null
+  const notes  = $('cpEntryNotes').value.trim()
+  const payment_date = $('cpEntryPaymentDate').value || null
+  // If period label was replaced with a dropdown (add-from-detail), read its value
+  const periodEl = $('cpEntryPeriodLabel')
+  const period = (periodEl && periodEl.tagName === 'SELECT') ? periodEl.value : cpEntryContext.period
+  const { clientId, entryId } = cpEntryContext
+
+  try {
+    if (entryId) {
+      await api(`/api/client-payments/entries/${entryId}`, {
+        method: 'PUT',
+        body: JSON.stringify({ amount, status, notes, payment_date })
+      })
+    } else {
+      await api('/api/client-payments/entries', {
+        method: 'POST',
+        body: JSON.stringify({ client_id: clientId, period_key: period, amount, status, notes, payment_date })
+      })
+    }
+    cpCloseEntryModal()
+    showToast('Payment entry saved', 'success')
+    // Reload
+    const [entries, summary] = await Promise.all([
+      api(`/api/client-payments/entries?period=${cpState.currentPeriod}`),
+      api('/api/client-payments/summary'),
+    ])
+    cpState.entries = entries || []
+    cpState.summary = summary || cpState.summary
+    cpRenderStats()
+    if (cpState.view === 'monthly') cpRenderMonthly()
+    else cpRenderClientList()
+    // Refresh the detail panel if it's open for this client
+    if ($('cpDetailPanel') && !$('cpDetailPanel').classList.contains('translate-x-full') && cpEntryContext) {
+      cpOpenClientDetail(cpEntryContext.clientId, cpEntryContext.clientName)
+    }
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── QUICK ADD PAYMENT ─────────────────────────────────────────────────
+
+function cpQuickAdd() {
+  // Populate client dropdown
+  const sel = $('cpQClient')
+  sel.innerHTML = '<option value="">— Select client —</option>' +
+    cpState.clients.map(cl => `<option value="${cl.id}">${cl.name}</option>`).join('')
+
+  // Populate period dropdown, default to current period
+  const pSel = $('cpQPeriod')
+  pSel.innerHTML = cpAllPeriods().map(p =>
+    `<option value="${p}" ${p === cpState.currentPeriod ? 'selected' : ''}>${cpPeriodLabel(p)}</option>`
+  ).join('')
+
+  // Reset fields
+  $('cpQStatus').value = 'paid'
+  $('cpQAmount').value = ''
+  $('cpQNotes').value = ''
+  cpQToggleAmount()
+  $('cpQuickModal').classList.remove('hidden')
+  setTimeout(() => $('cpQClient').focus(), 50)
+}
+
+function cpCloseQuickModal() { $('cpQuickModal').classList.add('hidden') }
+
+function cpQToggleAmount() {
+  const status = $('cpQStatus')?.value
+  $('cpQAmountWrap').classList.toggle('hidden', status !== 'paid' && status !== 'venmo')
+}
+
+async function cpSaveQuick() {
+  const clientId    = $('cpQClient').value
+  const period      = $('cpQPeriod').value
+  const status      = $('cpQStatus').value
+  const amount      = (status === 'paid' || status === 'venmo') ? parseFloat($('cpQAmount').value) || null : null
+  const notes       = $('cpQNotes').value.trim()
+  const payment_date = $('cpQPaymentDate')?.value || null
+
+  if (!clientId) { showToast('Please select a client', 'error'); return }
+
+  try {
+    await api('/api/client-payments/entries', {
+      method: 'POST',
+      body: JSON.stringify({ client_id: clientId, period_key: period, amount, status, notes, payment_date })
+    })
+    cpCloseQuickModal()
+    const clientName = cpState.clients.find(c => c.id == clientId)?.name || ''
+    showToast(`✅ Payment recorded for ${clientName} — ${cpPeriodLabel(period)}`, 'success')
+
+    // Reload data & re-render
+    const [entries, summary] = await Promise.all([
+      api(`/api/client-payments/entries?period=${cpState.currentPeriod}`),
+      api('/api/client-payments/summary'),
+    ])
+    cpState.entries = entries || []
+    cpState.summary = summary || cpState.summary
+    cpRenderStats()
+    if (cpState.view === 'monthly') cpRenderMonthly()
+    else cpRenderClientList()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── CLIENT MODAL ──────────────────────────────────────────────────────
+
+// Shared state for the detail panel header buttons
+const cpDetailState = { clientId: null, clientName: null, currentEntry: null }
+
+function cpOpenAddClient() {
+  $('cpClientModalTitle').textContent = 'Add Client'
+  $('cpClientEditId').value = ''
+  $('cpClientName').value = ''
+  $('cpClientNotes').value = ''
+  $('cpClientSaveBtn').textContent = 'Save'
+  const notesRow = $('cpClientNotesRow')
+  if (notesRow) notesRow.classList.remove('hidden')
+  $('cpClientModal').classList.remove('hidden')
+  setTimeout(() => $('cpClientName').focus(), 50)
+}
+
+function cpEditClient(id, name) {
+  const editIdInput = $('cpClientEditId')
+  const nameInput = $('cpClientName')
+  const modal = $('cpClientModal')
+  if (!editIdInput || !nameInput || !modal) {
+    showToast('UI error: please navigate away and back to the Payments page, then try again', 'error')
+    return
+  }
+  const modalTitle = $('cpClientModalTitle')
+  if (modalTitle) modalTitle.textContent = 'Rename Client'
+  editIdInput.value = String(id)
+  nameInput.value = name
+  const notesField = $('cpClientNotes')
+  if (notesField) notesField.value = ''
+  const saveBtn = $('cpClientSaveBtn')
+  if (saveBtn) saveBtn.textContent = 'Rename'
+  const notesRow = $('cpClientNotesRow')
+  if (notesRow) notesRow.classList.add('hidden')
+  modal.classList.remove('hidden')
+  setTimeout(() => { const inp = $('cpClientName'); if (inp) { inp.focus(); inp.select() } }, 50)
+}
+
+function cpCloseClientModal() { $('cpClientModal').classList.add('hidden') }
+
+async function cpSaveClient() {
+  const nameInput = $('cpClientName')
+  const name = (nameInput?.value || '').trim()
+  if (!name) { showToast('Client name is required', 'error'); return }
+  const editIdRaw = ($('cpClientEditId')?.value || '').trim()
+  const editId = (editIdRaw && editIdRaw !== 'null') ? editIdRaw : ''
+
+  // Disable save button to prevent double-submit
+  const saveBtn = $('cpClientSaveBtn')
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…' }
+
+  try {
+    if (editId) {
+      // Fetch current record so we don't blank notes or flip is_active
+      const existing = cpState.clients.find(c => String(c.id) === String(editId))
+      await api(`/api/client-payments/clients/${editId}`, {
+        method: 'PUT',
+        body: JSON.stringify({
+          name,
+          notes: existing?.notes || '',
+          is_active: existing?.is_active ?? 1,
+        })
+      })
+      showToast('Client renamed to "' + name + '"', 'success')
+    } else {
+      const notes = ($('cpClientNotes')?.value || '').trim()
+      await api('/api/client-payments/clients', { method: 'POST', body: JSON.stringify({ name, notes }) })
+      showToast('Client "' + name + '" added', 'success')
+    }
+    cpCloseClientModal()
+    await cpRefreshClientsAndRender()
+  } catch(e) {
+    showToast('Save failed: ' + e.message, 'error')
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = editId ? 'Rename' : 'Save' }
+  }
+}
+
+function cpDeleteClient(id, name) {
+  permDeleteOpen({
+    itemName: name,
+    warningText: 'All payment entries for this client across every billing period will be permanently removed. This cannot be recovered.',
+    confirmWord: 'DELETE',
+    onConfirm: async () => {
+      try {
+        await api(`/api/client-payments/clients/${id}`, { method: 'DELETE' })
+        showToast(`Client "${name}" permanently deleted.`, 'success')
+        await cpRefreshClientsAndRender()
+      } catch(e) { showToast('Error: ' + e.message, 'error') }
+    }
+  })
+}
+
+// ── MERGE MODAL ───────────────────────────────────────────────────────
+
+function cpOpenMerge(sourceId, sourceName) {
+  $('cpMergeSourceId').value = sourceId
+  $('cpMergeSourceName').textContent = sourceName
+  // Populate target dropdown with all clients except the source
+  const sel = $('cpMergeTargetId')
+  sel.innerHTML = cpState.clients
+    .filter(cl => cl.id != sourceId)
+    .map(cl => `<option value="${cl.id}">${cl.name}</option>`)
+    .join('')
+  $('cpMergeModal').classList.remove('hidden')
+}
+
+function cpCloseMergeModal() { $('cpMergeModal').classList.add('hidden') }
+
+// ── Permanent Delete Modal (shared: clients + contractors) ────────────────────
+let _permDeleteCallback = null
+let _permDeleteWord = ''
+
+function permDeleteOpen({ itemName, warningText, confirmWord, onConfirm }) {
+  _permDeleteCallback = onConfirm
+  _permDeleteWord = (confirmWord || 'DELETE').toUpperCase()
+  $('permDeleteItemName').textContent = itemName
+  $('permDeleteWarningText').textContent = warningText
+  $('permDeleteConfirmWord').textContent = _permDeleteWord
+  $('permDeleteInput').value = ''
+  const btn = $('permDeleteConfirmBtn')
+  btn.disabled = true
+  btn.classList.add('opacity-40', 'cursor-not-allowed')
+  $('permDeleteModal').classList.remove('hidden')
+  setTimeout(() => $('permDeleteInput').focus(), 50)
+}
+
+function permDeleteClose() {
+  $('permDeleteModal').classList.add('hidden')
+  _permDeleteCallback = null
+}
+
+function permDeleteCheckInput() {
+  const val = ($('permDeleteInput').value || '').toUpperCase().trim()
+  const btn = $('permDeleteConfirmBtn')
+  if (val === _permDeleteWord) {
+    btn.disabled = false
+    btn.classList.remove('opacity-40', 'cursor-not-allowed')
+  } else {
+    btn.disabled = true
+    btn.classList.add('opacity-40', 'cursor-not-allowed')
+  }
+}
+
+async function permDeleteConfirm() {
+  if (!_permDeleteCallback) return
+  const cb = _permDeleteCallback   // save before close nulls it
+  permDeleteClose()
+  await cb()
+}
+
+async function cpSaveMerge() {
+  const sourceId = $('cpMergeSourceId').value
+  const targetId = $('cpMergeTargetId').value
+  const sourceName = $('cpMergeSourceName').textContent
+  const targetName = cpState.clients.find(c => c.id == targetId)?.name || targetId
+  if (!confirm(`Merge "${sourceName}" into "${targetName}"? Non-conflicting entries will be moved and "${sourceName}" will be deleted.`)) return
+  try {
+    await api(`/api/client-payments/clients/${sourceId}/merge`, { method: 'POST', body: JSON.stringify({ target_id: parseInt(targetId) }) })
+    cpCloseMergeModal()
+    showToast(`Merged "${sourceName}" into "${targetName}"`, 'success')
+    await cpRefreshClientsAndRender()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── INACTIVE TOGGLE ───────────────────────────────────────────────────
+
+async function cpToggleClientActive(entryId, currentActive) {
+  // currentActive: 1 = currently active (mark inactive), 0 = currently inactive (reactivate)
+  const newActive = currentActive === 0 ? 1 : 0
+  try {
+    await api(`/api/client-payments/entries/${entryId}/active`, {
+      method: 'PATCH',
+      body: JSON.stringify({ is_active: newActive })
+    })
+    showToast(newActive === 0 ? 'Client marked inactive (carries forward)' : 'Client reactivated', 'success')
+    await cpLoadEntries()
+    if (cpState.view === 'monthly') cpRenderMonthly()
+    else cpRenderClientList()
+    // Refresh detail panel if open
+    if (cpDetailState.clientId) cpOpenClientDetail(cpDetailState.clientId, cpDetailState.clientName)
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── DETAIL PANEL HEADER ACTIONS ───────────────────────────────────────
+
+function cpDetailEditName() {
+  if (!cpDetailState.clientId) return
+  // Capture BEFORE cpCloseClientDetail nulls the state
+  const id = cpDetailState.clientId
+  const name = cpDetailState.clientName
+  cpCloseClientDetail()
+  cpEditClient(id, name)
+}
+
+async function cpDetailToggleActive() {
+  if (!cpDetailState.currentEntry) {
+    showToast('No entry for the current period — add an entry first', 'error')
+    return
+  }
+  const e = cpDetailState.currentEntry
+  if (!e.id) {
+    showToast('No real entry exists yet for this period — add a payment first', 'error')
+    return
+  }
+  const isInactive = e.is_active === 0 || e.is_active === '0'
+  await cpToggleClientActive(e.id, isInactive ? 0 : 1)
+}
+
+// ── SHARED REFRESH HELPER ─────────────────────────────────────────────
+
+async function cpRefreshClientsAndRender() {
+  const [clients, summary] = await Promise.all([
+    api('/api/client-payments/clients'),
+    api('/api/client-payments/summary'),
+  ])
+  cpState.clients = clients || []
+  cpState.summary = summary || cpState.summary
+  cpRenderStats()
+  await cpLoadEntries()
+  if (cpState.view === 'monthly') cpRenderMonthly()
+  else cpRenderClientList()
+}
+
+// ── SEED ──────────────────────────────────────────────────────────────
+
+async function cpSeedData() {
+  if (!confirm('Import all historical payment data (Aug 2025 – May 2026) from the Excel chart? This will not overwrite existing entries.')) return
+  const btn = $('cpSeedBtn')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Seeding…' }
+  try {
+    const r = await api('/api/client-payments/seed', { method: 'POST', body: '{}' })
+    showToast(`✅ Seeded ${r.clients} clients, ${r.entries_inserted} entries`, 'success')
+    cpState.currentPeriod = ''
+    cpState.seeded = true
+    await cpLoadData()
+  } catch(e) {
+    showToast('Seed error: ' + e.message, 'error')
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-database mr-2"></i>Seed Data' }
+  }
+}
+
+// ── XLSX EXPORT ───────────────────────────────────────────────────────
+
+function cpExportXlsx() {
+  if (!window.XLSX) { showToast('XLSX library not loaded', 'error'); return }
+  const wb = XLSX.utils.book_new()
+  const date = new Date().toISOString().slice(0,10)
+
+  if (cpState.view === 'monthly') {
+    // Export current month — one sheet, all clients
+    const period = cpState.currentPeriod
+    const entryMap = {}
+    for (const e of cpState.entries) entryMap[e.client_id] = e
+    const rows = [['Client', 'Status', 'Amount', 'Notes']]
+    for (const cl of cpState.clients) {
+      const e = entryMap[cl.id]
+      rows.push([
+        cl.name,
+        e ? e.status : 'not recorded',
+        e?.amount ?? '',
+        e?.notes ?? '',
+      ])
+    }
+    const ws = XLSX.utils.aoa_to_sheet(rows)
+    ws['!cols'] = [{wch:35},{wch:14},{wch:14},{wch:40}]
+    XLSX.utils.book_append_sheet(wb, ws, cpPeriodLabel(period))
+  } else {
+    // Export clients summary — one sheet
+    const bySummary = cpState.summary?.byClient || []
+    const summaryMap = {}
+    for (const s of bySummary) summaryMap[s.id] = s
+    const rows = [['Client', 'Months Tracked', 'Months Paid', 'Lifetime Total ($)']]
+    for (const cl of cpState.clients) {
+      const s = summaryMap[cl.id] || {}
+      rows.push([cl.name, s.months_tracked||0, s.months_paid||0, s.lifetime_total||0])
+    }
+    const ws = XLSX.utils.aoa_to_sheet(rows)
+    ws['!cols'] = [{wch:35},{wch:16},{wch:14},{wch:20}]
+    XLSX.utils.book_append_sheet(wb, ws, 'Client Summary')
+  }
+
+  XLSX.writeFile(wb, `LionMD_ClientPayments_${date}.xlsx`)
+  showToast(`Exported ${cpState.view === 'monthly' ? cpPeriodLabel(cpState.currentPeriod) : 'client summary'} to XLSX`, 'success')
+}
+
+// ════════════════════════════════════════════════════════════════════
+// PROVIDER SELF-SERVICE PORTAL
+// ════════════════════════════════════════════════════════════════════
+
+// ══════════════════════════════════════════════════════════════════
+// CANDIDATE PORTAL — read-only onboarding status view
+// ══════════════════════════════════════════════════════════════════
+
+const candPortalState = { data: null }
+
+async function renderCandidatePortal() {
+  state.currentPage = 'candidate_status'
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const navEl = $('nav_candidate_status'); if (navEl) navEl.classList.add('active')
+  $('pageTitle').textContent = 'My Application'
+  renderCandidateStatus()
+}
+
+async function renderCandidateStatus() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/candidate/status')
+    candPortalState.data = data
+    const c = data.candidate
+    const meetings = data.meetings || []
+    const docs = data.docs || []
+
+    // Status pipeline definition
+    const STATUS_PIPELINE = [
+      { key: 'new',                  label: 'Application Received',    icon: 'fa-paper-plane',      color: 'bg-gray-100 text-gray-600' },
+      { key: 'contacted',            label: 'Contacted by Team',       icon: 'fa-phone',             color: 'bg-purple-100 text-purple-700' },
+      { key: 'interview_scheduled',  label: 'Interview Scheduled',     icon: 'fa-calendar-check',   color: 'bg-yellow-100 text-yellow-700' },
+      { key: 'interviewed',          label: 'Interview Completed',     icon: 'fa-comments',          color: 'bg-orange-100 text-orange-700' },
+      { key: 'hired',                label: 'Hired — Onboarding',      icon: 'fa-user-check',        color: 'bg-green-100 text-green-700' },
+    ]
+    const currentIdx = STATUS_PIPELINE.findIndex(s => s.key === c.status)
+    const isRejected = c.status === 'rejected'
+
+    // Hired checklist items
+    const checklist = [
+      { key: 'payroll_sent',        label: 'Payroll Setup Sent',       done_at: c.payroll_sent_at,         done: c.payroll_sent },
+      { key: 'contract_sent',       label: 'Contract Sent',            done_at: c.contract_sent_at,        done: c.contract_sent },
+      { key: 'contract_signed',     label: 'Contract Signed',          done_at: c.contract_signed_at,      done: c.contract_signed },
+      { key: 'training_scheduled',  label: 'Training Scheduled',       done_at: c.training_scheduled_at,   done: c.training_scheduled },
+      { key: 'training_completed',  label: 'Training Completed',       done_at: c.training_completed_at,   done: c.training_completed },
+      { key: 'docs_received',       label: 'Documents Received',       done_at: c.docs_received_at,        done: c.docs_received },
+    ]
+
+    const nextMeeting = meetings.find(m => m.status === 'scheduled' && m.scheduled_at && new Date(m.scheduled_at) > new Date())
+
+    mc.innerHTML = `
+    <div class="max-w-2xl space-y-5">
+
+      <!-- Welcome banner -->
+      <div class="card p-5" style="background:linear-gradient(135deg,#1a1a2e 0%,#16213e 100%);color:#fff;">
+        <div class="flex items-center gap-4">
+          <div class="w-14 h-14 rounded-2xl flex items-center justify-center text-white text-2xl font-bold flex-shrink-0" style="background:#d4a017;">
+            ${(c.full_name||'?')[0].toUpperCase()}
+          </div>
+          <div>
+            <div class="text-lg font-bold">${escHtml(c.full_name)}</div>
+            <div class="text-sm text-blue-200 mt-0.5">${escHtml(c.specialty || c.role_group || 'Provider Applicant')}</div>
+            ${isRejected
+              ? `<div class="mt-1 inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-red-500/20 text-red-300"><i class="fas fa-times-circle"></i> Application Closed</div>`
+              : `<div class="mt-1 inline-flex items-center gap-1.5 text-xs font-semibold px-2.5 py-1 rounded-full bg-green-500/20 text-green-300"><i class="fas fa-circle"></i> Application Active</div>`
+            }
+          </div>
+        </div>
+      </div>
+
+      ${nextMeeting ? `
+      <!-- Upcoming meeting alert -->
+      <div class="card p-4 border-l-4 border-yellow-400" style="background:#fffbeb;">
+        <div class="flex items-start gap-3">
+          <i class="fas fa-calendar-check text-yellow-500 mt-0.5"></i>
+          <div>
+            <div class="font-semibold text-yellow-800 text-sm">${escHtml(nextMeeting.title || 'Upcoming Meeting')}</div>
+            <div class="text-yellow-700 text-xs mt-0.5">${new Date(nextMeeting.scheduled_at).toLocaleString('en-US',{weekday:'long',month:'long',day:'numeric',hour:'numeric',minute:'2-digit'})} · ${nextMeeting.duration_min} min</div>
+            ${nextMeeting.meeting_link ? `<a href="${escHtml(nextMeeting.meeting_link)}" target="_blank" class="text-xs text-yellow-600 underline mt-1 inline-block"><i class="fas fa-video mr-1"></i>Join Meeting</a>` : ''}
+          </div>
+        </div>
+      </div>` : ''}
+
+      <!-- Application Progress -->
+      <div class="card p-5">
+        <h3 class="font-bold text-gray-800 mb-4 flex items-center gap-2"><i class="fas fa-route text-blue-500"></i> Application Progress</h3>
+        ${isRejected ? `
+          <div class="text-center py-6 text-gray-400">
+            <i class="fas fa-times-circle text-4xl text-red-300 mb-3 block"></i>
+            <p class="text-sm">Thank you for your interest in Lion MD. Your application was not selected at this time.</p>
+            <p class="text-xs text-gray-300 mt-2">Please contact us if you have questions.</p>
+          </div>
+        ` : `
+        <div class="flex items-start gap-0">
+          ${STATUS_PIPELINE.map((step, idx) => {
+            const done    = idx < currentIdx
+            const current = idx === currentIdx
+            const future  = idx > currentIdx
+            return `
+            <div class="flex-1 flex flex-col items-center text-center" style="min-width:0">
+              <div class="relative w-full flex items-center justify-center mb-2">
+                ${idx > 0 ? `<div class="absolute left-0 top-1/2 -translate-y-1/2 h-0.5 w-1/2 ${done || current ? 'bg-green-400' : 'bg-gray-200'}"></div>` : ''}
+                ${idx < STATUS_PIPELINE.length-1 ? `<div class="absolute right-0 top-1/2 -translate-y-1/2 h-0.5 w-1/2 ${done ? 'bg-green-400' : 'bg-gray-200'}"></div>` : ''}
+                <div class="relative z-10 w-9 h-9 rounded-full flex items-center justify-center text-sm font-bold shadow
+                  ${done    ? 'bg-green-500 text-white' :
+                    current ? 'bg-blue-600 text-white ring-4 ring-blue-100' :
+                              'bg-gray-100 text-gray-400'}">
+                  ${done ? '<i class="fas fa-check text-xs"></i>' : `<i class="fas ${step.icon} text-xs"></i>`}
+                </div>
+              </div>
+              <div class="text-xs font-medium leading-tight px-1 ${done ? 'text-green-600' : current ? 'text-blue-700 font-bold' : 'text-gray-400'}">${step.label}</div>
+            </div>`
+          }).join('')}
+        </div>`}
+      </div>
+
+      ${c.status === 'hired' ? `
+      <!-- Onboarding Checklist -->
+      <div class="card p-5">
+        <h3 class="font-bold text-gray-800 mb-4 flex items-center gap-2"><i class="fas fa-tasks text-green-500"></i> Onboarding Checklist</h3>
+        <div class="space-y-2">
+          ${checklist.map(item => `
+          <div class="flex items-center gap-3 p-3 rounded-lg ${item.done ? 'bg-green-50' : 'bg-gray-50'}">
+            <div class="w-6 h-6 rounded-full flex items-center justify-center flex-shrink-0 ${item.done ? 'bg-green-500' : 'bg-gray-200'}">
+              ${item.done ? '<i class="fas fa-check text-white text-xs"></i>' : '<i class="fas fa-clock text-gray-400 text-xs"></i>'}
+            </div>
+            <div class="flex-1">
+              <div class="text-sm font-medium ${item.done ? 'text-green-800' : 'text-gray-600'}">${item.label}</div>
+              ${item.done && item.done_at ? `<div class="text-xs text-green-500 mt-0.5">${new Date(item.done_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>` : ''}
+            </div>
+            <div class="text-xs font-semibold ${item.done ? 'text-green-600' : 'text-gray-400'}">${item.done ? 'Done' : 'Pending'}</div>
+          </div>`).join('')}
+        </div>
+        ${c.converted_at ? `<div class="mt-3 p-3 rounded-lg bg-blue-50 text-xs text-blue-700 flex items-center gap-2"><i class="fas fa-star text-blue-400"></i> <strong>Welcome aboard!</strong> You were added as an active contractor on ${new Date(c.converted_at).toLocaleDateString('en-US',{month:'long',day:'numeric',year:'numeric'})}.</div>` : ''}
+      </div>` : ''}
+
+      <!-- Meetings history -->
+      ${meetings.length > 0 ? `
+      <div class="card p-5">
+        <h3 class="font-bold text-gray-800 mb-4 flex items-center gap-2"><i class="fas fa-calendar-alt text-purple-500"></i> Meetings & Interviews</h3>
+        <div class="space-y-2">
+          ${meetings.map(m => {
+            const isPast = m.scheduled_at && new Date(m.scheduled_at) < new Date()
+            return `<div class="flex items-start gap-3 p-3 rounded-lg bg-gray-50">
+              <div class="w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 ${isPast ? 'bg-gray-200' : 'bg-purple-100'}">
+                <i class="fas fa-${isPast ? 'check' : 'calendar'} text-xs ${isPast ? 'text-gray-500' : 'text-purple-600'}"></i>
+              </div>
+              <div class="flex-1 min-w-0">
+                <div class="text-sm font-medium text-gray-800">${escHtml(m.title || m.meeting_type || 'Meeting')}</div>
+                ${m.scheduled_at ? `<div class="text-xs text-gray-500 mt-0.5">${new Date(m.scheduled_at).toLocaleString('en-US',{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'})}</div>` : ''}
+                ${m.notes ? `<div class="text-xs text-gray-400 mt-1 italic">${escHtml(m.notes)}</div>` : ''}
+              </div>
+              <span class="text-xs px-2 py-0.5 rounded-full font-semibold ${isPast ? 'bg-gray-100 text-gray-500' : 'bg-purple-100 text-purple-700'}">${isPast ? 'Completed' : 'Upcoming'}</span>
+            </div>`
+          }).join('')}
+        </div>
+      </div>` : ''}
+
+      <!-- Contact footer -->
+      <div class="text-center text-xs text-gray-400 pb-4">
+        <i class="fas fa-envelope mr-1"></i> Questions? Contact your onboarding coordinator.
+      </div>
+    </div>`
+  } catch(e) {
+    mc.innerHTML = `<div class="max-w-lg mx-auto mt-10 text-center">
+      <div class="card p-8">
+        <i class="fas fa-exclamation-circle text-5xl text-red-200 mb-4 block"></i>
+        <h3 class="font-bold text-gray-700 text-lg mb-2">Unable to Load Status</h3>
+        <p class="text-gray-400 text-sm">${escHtml(e.message || 'An error occurred')}</p>
+      </div>
+    </div>`
+  }
+}
+
+async function renderCandidateDocuments() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = candPortalState.data || await api('/api/candidate/status')
+    candPortalState.data = data
+    const docs = data.docs || []
+    mc.innerHTML = `
+    <div class="max-w-2xl">
+      <div class="card p-5">
+        <h3 class="font-bold text-gray-800 mb-1 flex items-center gap-2"><i class="fas fa-file-alt text-blue-500"></i> Submitted Documents</h3>
+        <p class="text-xs text-gray-400 mb-4">Documents you have submitted during the onboarding process.</p>
+        ${docs.length === 0 ? `<div class="text-center py-10 text-gray-300"><i class="fas fa-folder-open text-4xl mb-3 block"></i><p class="text-sm">No documents on file yet.</p></div>` : `
+        <div class="space-y-2">
+          ${docs.map(d => `
+          <div class="flex items-center gap-3 p-3 rounded-lg bg-gray-50">
+            <div class="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+              <i class="fas fa-file text-blue-500 text-xs"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-medium text-gray-800 truncate">${escHtml(d.file_name)}</div>
+              <div class="text-xs text-gray-400">${escHtml(d.doc_type)} · ${d.file_size ? Math.round(d.file_size/1024) + ' KB · ' : ''}${new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
+            </div>
+            <i class="fas fa-check-circle text-green-400 text-sm"></i>
+          </div>`).join('')}
+        </div>`}
+      </div>
+    </div>`
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Candidate Licenses tab ─────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const candLicState = { licenses: [] }
+
+const LIC_TYPES_CAND = [
+  'MD','DO','NP','PA','CRNA','CNM','CNS','RN','LPN','LCSW','LMFT','LPC',
+  'PharmD','DPM','DC','OD','PT','OT','SLP','Other'
+]
+
+async function renderCandidateLicenses() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/candidate/licenses')
+    candLicState.licenses = data.licenses || []
+    candLicDraw(mc)
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function candLicDraw(mc) {
+  const lics = candLicState.licenses
+  mc.innerHTML = `
+  <div class="max-w-4xl">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+          <i class="fas fa-certificate text-blue-500"></i> My State Licenses
+        </h2>
+        <p class="text-xs text-gray-400 mt-0.5">Add all active state licenses. Collab agreements are handled separately.</p>
+      </div>
+      <div class="flex gap-2">
+        <button id="candLicTemplateBtn" class="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1">
+          <i class="fas fa-download"></i> Template
+        </button>
+        <button id="candLicImportBtn" class="btn-secondary text-xs px-3 py-1.5 flex items-center gap-1">
+          <i class="fas fa-file-excel"></i> Import
+        </button>
+        <button id="candLicAddBtn" class="btn-primary text-xs px-3 py-1.5 flex items-center gap-1">
+          <i class="fas fa-plus"></i> Add License
+        </button>
+      </div>
+    </div>
+
+    ${lics.length === 0 ? `
+    <div class="card p-10 text-center text-gray-300">
+      <i class="fas fa-certificate text-5xl mb-3 block"></i>
+      <p class="text-sm font-medium text-gray-400">No licenses added yet</p>
+      <p class="text-xs text-gray-300 mt-1">Click "Add License" to get started, or use Import for bulk entry.</p>
+    </div>` : `
+    <div class="card overflow-hidden">
+      <table class="w-full text-sm">
+        <thead class="bg-gray-50 border-b border-gray-100">
+          <tr>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">State</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Type</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">License #</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Expiry</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Status</th>
+            <th class="text-left px-4 py-2.5 text-xs font-semibold text-gray-500 uppercase tracking-wide">Document</th>
+            <th class="px-4 py-2.5"></th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          ${lics.map(l => {
+            const expDate = l.expiry_date ? new Date(l.expiry_date) : null
+            const today = new Date()
+            const daysLeft = expDate ? Math.ceil((expDate - today) / 86400000) : null
+            let expiryBadge = ''
+            if (daysLeft !== null) {
+              if (daysLeft < 0) expiryBadge = `<span class="ml-1 text-xs text-red-500 font-medium">(Expired)</span>`
+              else if (daysLeft <= 30) expiryBadge = `<span class="ml-1 text-xs text-orange-500 font-medium">(${daysLeft}d)</span>`
+              else if (daysLeft <= 60) expiryBadge = `<span class="ml-1 text-xs text-yellow-500 font-medium">(${daysLeft}d)</span>`
+            }
+            return `<tr class="hover:bg-gray-50 transition-colors">
+              <td class="px-4 py-3 font-semibold text-gray-800">${escHtml(l.state)}</td>
+              <td class="px-4 py-3 text-gray-600">${escHtml(l.license_type||'—')}</td>
+              <td class="px-4 py-3 text-gray-600 font-mono text-xs">${escHtml(l.license_number||'—')}</td>
+              <td class="px-4 py-3 text-gray-600">${l.expiry_date ? l.expiry_date + expiryBadge : '—'}</td>
+              <td class="px-4 py-3">
+                <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium ${l.status==='active'?'bg-green-100 text-green-700':l.status==='expired'?'bg-red-100 text-red-700':'bg-gray-100 text-gray-500'}">
+                  ${escHtml(l.status||'active')}
+                </span>
+              </td>
+              <td class="px-4 py-3">
+                ${l.license_file_name ? `<button class="text-blue-500 hover:text-blue-700 text-xs underline candlic-view-file" data-id="${l.id}" data-name="${escHtml(l.license_file_name)}">${escHtml(l.license_file_name)}</button>` : `<span class="text-gray-300 text-xs">No file</span>`}
+              </td>
+              <td class="px-4 py-3 text-right flex items-center gap-2 justify-end">
+                <button class="text-blue-400 hover:text-blue-600 candlic-edit-btn" data-id="${l.id}" title="Edit"><i class="fas fa-pencil-alt text-xs"></i></button>
+                <button class="text-red-400 hover:text-red-600 candlic-del-btn" data-id="${l.id}" title="Delete"><i class="fas fa-trash text-xs"></i></button>
+              </td>
+            </tr>`
+          }).join('')}
+        </tbody>
+      </table>
+    </div>`}
+  </div>`
+
+  // Wire buttons
+  document.getElementById('candLicAddBtn')?.addEventListener('click', () => candLicOpenModal(null))
+  document.getElementById('candLicTemplateBtn')?.addEventListener('click', candLicDownloadTemplate)
+  document.getElementById('candLicImportBtn')?.addEventListener('click', candLicOpenImport)
+
+  document.querySelectorAll('.candlic-edit-btn').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const lic = candLicState.licenses.find(l => l.id == btn.dataset.id)
+      if (lic) candLicOpenModal(lic)
+    })
+  })
+  document.querySelectorAll('.candlic-del-btn').forEach(btn => {
+    btn.addEventListener('click', () => candLicDelete(btn.dataset.id))
+  })
+  document.querySelectorAll('.candlic-view-file').forEach(btn => {
+    btn.addEventListener('click', () => {
+      window.open(`/api/candidate/licenses/${btn.dataset.id}/file`, '_blank')
+    })
+  })
+}
+
+function candLicOpenModal(lic) {
+  const isEdit = !!lic
+  const overlay = document.createElement('div')
+  overlay.className = 'fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50'
+  overlay.id = 'candLicModal'
+  overlay.innerHTML = `
+  <div class="bg-white rounded-xl shadow-2xl w-full max-w-xl mx-4 max-h-[90vh] overflow-y-auto">
+    <div class="flex items-center justify-between p-5 border-b border-gray-100">
+      <h3 class="font-bold text-gray-800 text-base flex items-center gap-2">
+        <i class="fas fa-certificate text-blue-500"></i>
+        ${isEdit ? 'Edit License' : 'Add New License'}
+      </h3>
+      <button id="candLicModalClose" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <form id="candLicForm" class="p-5 space-y-4" autocomplete="off">
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State <span class="text-red-500">*</span></label>
+          <select name="state" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">Select state…</option>
+            ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Type <span class="text-red-500">*</span></label>
+          <select name="license_type" required class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="">Select type…</option>
+            ${LIC_TYPES_CAND.map(t => `<option value="${t}" ${lic?.license_type===t?'selected':''}>${t}</option>`).join('')}
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Number</label>
+          <input type="text" name="license_number" value="${escHtml(lic?.license_number||'')}" placeholder="e.g. MD-12345"
+            class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Expiry Date</label>
+          <input type="date" name="expiry_date" value="${escHtml(lic?.expiry_date||'')}"
+            class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select name="status" class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+            <option value="active" ${(!lic||lic.status==='active')?'selected':''}>Active</option>
+            <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+            <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+            <option value="inactive" ${lic?.status==='inactive'?'selected':''}>Inactive</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+          <input type="text" name="practice_type" value="${escHtml(lic?.practice_type||'')}" placeholder="e.g. Full, Restricted"
+            class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions</label>
+        <input type="text" name="permitted_actions" value="${escHtml(lic?.permitted_actions||'')}" placeholder="e.g. Prescribe, Diagnose"
+          class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300">
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+        <textarea name="notes" rows="2" placeholder="Any additional notes…"
+          class="w-full border border-gray-200 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-300 resize-none">${escHtml(lic?.notes||'')}</textarea>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Document ${isEdit && lic.license_file_name ? `<span class="text-gray-400 font-normal">(current: ${escHtml(lic.license_file_name)})</span>` : ''}</label>
+        <div class="border-2 border-dashed border-gray-200 rounded-lg p-4 text-center hover:border-blue-300 transition-colors cursor-pointer" id="candLicDropZone">
+          <input type="file" id="candLicFileInput" accept=".pdf,.jpg,.jpeg,.png,.gif,.webp" class="hidden">
+          <i class="fas fa-cloud-upload-alt text-gray-300 text-2xl mb-1 block"></i>
+          <p class="text-xs text-gray-400">Click to upload or drag & drop</p>
+          <p class="text-xs text-gray-300">PDF, JPG, PNG — max 10 MB</p>
+          <p id="candLicFileName" class="text-xs text-blue-500 mt-1 hidden"></p>
+        </div>
+      </div>
+      <div id="candLicModalErr" class="text-red-500 text-xs hidden"></div>
+      <div class="flex gap-3 pt-2">
+        <button type="submit" id="candLicSaveBtn" class="btn-primary flex-1 py-2 text-sm flex items-center justify-center gap-2">
+          <i class="fas fa-save"></i> ${isEdit ? 'Save Changes' : 'Add License'}
+        </button>
+        <button type="button" id="candLicCancelBtn" class="btn-secondary flex-1 py-2 text-sm">Cancel</button>
+      </div>
+    </form>
+  </div>`
+
+  document.body.appendChild(overlay)
+
+  // File picker
+  const dropZone = document.getElementById('candLicDropZone')
+  const fileInput = document.getElementById('candLicFileInput')
+  const fileNameEl = document.getElementById('candLicFileName')
+  let selectedFile = null
+
+  dropZone.addEventListener('click', () => fileInput.click())
+  dropZone.addEventListener('dragover', e => { e.preventDefault(); dropZone.classList.add('border-blue-400') })
+  dropZone.addEventListener('dragleave', () => dropZone.classList.remove('border-blue-400'))
+  dropZone.addEventListener('drop', e => {
+    e.preventDefault()
+    dropZone.classList.remove('border-blue-400')
+    if (e.dataTransfer.files[0]) {
+      selectedFile = e.dataTransfer.files[0]
+      fileNameEl.textContent = selectedFile.name
+      fileNameEl.classList.remove('hidden')
+    }
+  })
+  fileInput.addEventListener('change', () => {
+    if (fileInput.files[0]) {
+      selectedFile = fileInput.files[0]
+      fileNameEl.textContent = selectedFile.name
+      fileNameEl.classList.remove('hidden')
+    }
+  })
+
+  // Close
+  document.getElementById('candLicModalClose').addEventListener('click', () => overlay.remove())
+  document.getElementById('candLicCancelBtn').addEventListener('click', () => overlay.remove())
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+
+  // Submit
+  document.getElementById('candLicForm').addEventListener('submit', async e => {
+    e.preventDefault()
+    const errEl = document.getElementById('candLicModalErr')
+    const saveBtn = document.getElementById('candLicSaveBtn')
+    errEl.classList.add('hidden')
+    const fd = new FormData(e.target)
+    const payload = {
+      state: fd.get('state'),
+      license_type: fd.get('license_type'),
+      license_number: fd.get('license_number') || '',
+      expiry_date: fd.get('expiry_date') || '',
+      status: fd.get('status') || 'active',
+      practice_type: fd.get('practice_type') || '',
+      permitted_actions: fd.get('permitted_actions') || '',
+      notes: fd.get('notes') || '',
+    }
+
+    if (!payload.state) { errEl.textContent = 'State is required.'; errEl.classList.remove('hidden'); return }
+    if (!payload.license_type) { errEl.textContent = 'License type is required.'; errEl.classList.remove('hidden'); return }
+
+    // File → base64
+    if (selectedFile) {
+      if (selectedFile.size > 10 * 1024 * 1024) {
+        errEl.textContent = 'File is too large (max 10 MB).'
+        errEl.classList.remove('hidden')
+        return
+      }
+      const b64 = await new Promise(res => {
+        const reader = new FileReader()
+        reader.onload = ev => res(ev.target.result.split(',')[1])
+        reader.readAsDataURL(selectedFile)
+      })
+      payload.license_file_name = selectedFile.name
+      payload.license_file_data = b64
+      payload.license_file_mime = selectedFile.type || 'application/octet-stream'
+    }
+
+    saveBtn.disabled = true
+    saveBtn.innerHTML = `<div class="spinner-sm"></div> Saving…`
+    try {
+      if (isEdit) {
+        await api(`/api/candidate/licenses/${lic.id}`, { method: 'PUT', body: JSON.stringify(payload) })
+      } else {
+        await api('/api/candidate/licenses', { method: 'POST', body: JSON.stringify(payload) })
+      }
+      overlay.remove()
+      // Refresh
+      const refreshData = await api('/api/candidate/licenses')
+      candLicState.licenses = refreshData.licenses || []
+      candLicDraw($('mainContent'))
+    } catch(err) {
+      errEl.textContent = err.message || 'Save failed.'
+      errEl.classList.remove('hidden')
+      saveBtn.disabled = false
+      saveBtn.innerHTML = `<i class="fas fa-save"></i> ${isEdit ? 'Save Changes' : 'Add License'}`
+    }
+  })
+}
+
+async function candLicDelete(id) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  try {
+    await api(`/api/candidate/licenses/${id}`, { method: 'DELETE' })
+    const refreshData = await api('/api/candidate/licenses')
+    candLicState.licenses = refreshData.licenses || []
+    candLicDraw($('mainContent'))
+  } catch(e) {
+    alert('Delete failed: ' + e.message)
+  }
+}
+
+function candLicDownloadTemplate() {
+  const wb = XLSX.utils.book_new()
+  // Instructions sheet
+  const instrRows = [
+    ['Candidate License Import Template — LionMD'],
+    [''],
+    ['INSTRUCTIONS:'],
+    ['1. Fill in the "Licenses" sheet with your license information.'],
+    ['2. State: Use 2-letter abbreviation (e.g. CA, NY, TX). Required.'],
+    ['3. License Type: Use one of: MD, DO, NP, PA, CRNA, CNM, CNS, RN, LPN, LCSW, LMFT, LPC, PharmD, DPM, DC, OD, PT, OT, SLP, Other. Required.'],
+    ['4. License Number: Your license number for that state.'],
+    ['5. Expiry Date: Format YYYY-MM-DD (e.g. 2026-12-31).'],
+    ['6. Status: active, pending, expired, or inactive.'],
+    ['7. Practice Type: e.g. Full, Restricted, Supervised.'],
+    ['8. Permitted Actions: e.g. Prescribe, Diagnose, Order Labs.'],
+    ['9. Notes: Any additional notes.'],
+    [''],
+    ['DO NOT include Collab Agreements — those are handled separately.'],
+    ['DO NOT rename the "Licenses" sheet.'],
+  ]
+  const instrSheet = XLSX.utils.aoa_to_sheet(instrRows)
+  instrSheet['!cols'] = [{wch:80}]
+  XLSX.utils.book_append_sheet(wb, instrSheet, 'Instructions')
+
+  // Licenses sheet
+  const headers = ['state','license_type','license_number','expiry_date','status','practice_type','permitted_actions','notes']
+  const rows = [headers]
+  // Pre-fill with existing licenses
+  candLicState.licenses.forEach(l => {
+    rows.push([l.state,l.license_type,l.license_number,l.expiry_date,l.status||'active',l.practice_type||'',l.permitted_actions||'',l.notes||''])
+  })
+  if (rows.length === 1) {
+    // Add a sample row
+    rows.push(['CA','MD','MD-12345','2026-12-31','active','Full','Prescribe, Diagnose',''])
+  }
+  const licSheet = XLSX.utils.aoa_to_sheet(rows)
+  licSheet['!cols'] = [{wch:8},{wch:14},{wch:18},{wch:14},{wch:10},{wch:14},{wch:24},{wch:30}]
+  XLSX.utils.book_append_sheet(wb, licSheet, 'Licenses')
+
+  XLSX.writeFile(wb, 'candidate_licenses_template.xlsx')
+}
+
+function candLicOpenImport() {
+  const overlay = document.createElement('div')
+  overlay.className = 'fixed inset-0 bg-black bg-opacity-40 flex items-center justify-center z-50'
+  overlay.id = 'candLicImportModal'
+  overlay.innerHTML = `
+  <div class="bg-white rounded-xl shadow-2xl w-full max-w-lg mx-4">
+    <div class="flex items-center justify-between p-5 border-b border-gray-100">
+      <h3 class="font-bold text-gray-800 text-base flex items-center gap-2">
+        <i class="fas fa-file-excel text-green-500"></i> Import Licenses from Excel
+      </h3>
+      <button id="candLicImportClose" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+    </div>
+    <div class="p-5 space-y-4">
+      <p class="text-xs text-gray-500">Upload the filled template XLSX. Existing licenses are matched by State + License Type and updated; new entries are added.</p>
+      <div class="border-2 border-dashed border-gray-200 rounded-lg p-6 text-center hover:border-green-300 transition-colors cursor-pointer" id="candLicImportDrop">
+        <input type="file" id="candLicImportFile" accept=".xlsx,.xls,.csv" class="hidden">
+        <i class="fas fa-file-upload text-gray-300 text-3xl mb-2 block"></i>
+        <p class="text-sm text-gray-500">Click to choose file or drag & drop</p>
+        <p class="text-xs text-gray-300">.xlsx, .xls, .csv</p>
+        <p id="candLicImportFileName" class="text-xs text-green-600 mt-1 hidden"></p>
+      </div>
+      <div id="candLicImportPreview" class="hidden"></div>
+      <div id="candLicImportErr" class="text-red-500 text-xs hidden"></div>
+      <div class="flex gap-3">
+        <button id="candLicImportSubmitBtn" class="btn-primary flex-1 py-2 text-sm hidden flex items-center justify-center gap-2">
+          <i class="fas fa-upload"></i> Import Licenses
+        </button>
+        <button id="candLicImportCancelBtn" class="btn-secondary flex-1 py-2 text-sm">Cancel</button>
+      </div>
+    </div>
+  </div>`
+
+  document.body.appendChild(overlay)
+
+  const dropEl = document.getElementById('candLicImportDrop')
+  const fileEl = document.getElementById('candLicImportFile')
+  const fileNameEl = document.getElementById('candLicImportFileName')
+
+  dropEl.addEventListener('click', () => fileEl.click())
+  dropEl.addEventListener('dragover', e => { e.preventDefault(); dropEl.classList.add('border-green-400') })
+  dropEl.addEventListener('dragleave', () => dropEl.classList.remove('border-green-400'))
+  dropEl.addEventListener('drop', e => {
+    e.preventDefault()
+    dropEl.classList.remove('border-green-400')
+    if (e.dataTransfer.files[0]) {
+      fileNameEl.textContent = e.dataTransfer.files[0].name
+      fileNameEl.classList.remove('hidden')
+      candLicParseImport(e.dataTransfer.files[0])
+    }
+  })
+  fileEl.addEventListener('change', () => {
+    if (fileEl.files[0]) {
+      fileNameEl.textContent = fileEl.files[0].name
+      fileNameEl.classList.remove('hidden')
+      candLicParseImport(fileEl.files[0])
+    }
+  })
+
+  document.getElementById('candLicImportClose').addEventListener('click', () => overlay.remove())
+  document.getElementById('candLicImportCancelBtn').addEventListener('click', () => overlay.remove())
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove() })
+}
+
+function candLicParseImport(file) {
+  const errEl = document.getElementById('candLicImportErr')
+  const previewEl = document.getElementById('candLicImportPreview')
+  const submitBtn = document.getElementById('candLicImportSubmitBtn')
+  errEl.classList.add('hidden')
+  previewEl.classList.add('hidden')
+  submitBtn.classList.add('hidden')
+
+  const reader = new FileReader()
+  reader.onload = e => {
+    try {
+      const wb = XLSX.read(e.target.result, { type: 'array' })
+      // Find "Licenses" sheet or use first
+      const sheetName = wb.SheetNames.includes('Licenses') ? 'Licenses' : wb.SheetNames[0]
+      const ws = wb.Sheets[sheetName]
+      const raw = XLSX.utils.sheet_to_json(ws, { defval: '' })
+
+      if (!raw.length) throw new Error('No data rows found in sheet.')
+
+      const requiredCols = ['state','license_type']
+      const first = raw[0]
+      for (const col of requiredCols) {
+        if (!(col in first)) throw new Error(`Missing required column: "${col}"`)
+      }
+
+      // Filter out collab agreements
+      const rows = raw.filter(r => {
+        const lt = (r.license_type||'').toString().trim().toUpperCase()
+        return lt !== 'COLLAB' && lt !== 'COLLABORATIVE AGREEMENT' && lt !== 'CA'
+      })
+
+      if (!rows.length) throw new Error('No valid license rows found (collab agreements are excluded).')
+
+      const mapped = rows.map(r => ({
+        state: (r.state||'').toString().trim().toUpperCase(),
+        license_type: (r.license_type||'').toString().trim(),
+        license_number: (r.license_number||'').toString().trim(),
+        expiry_date: (r.expiry_date||'').toString().trim(),
+        status: (r.status||'active').toString().trim() || 'active',
+        practice_type: (r.practice_type||'').toString().trim(),
+        permitted_actions: (r.permitted_actions||'').toString().trim(),
+        notes: (r.notes||'').toString().trim(),
+      })).filter(r => r.state && r.license_type)
+
+      if (!mapped.length) throw new Error('No valid rows after filtering. Ensure State and License Type are filled.')
+
+      // Show preview
+      previewEl.innerHTML = `
+      <div class="border border-gray-100 rounded-lg overflow-hidden">
+        <div class="bg-gray-50 px-3 py-2 text-xs font-semibold text-gray-500 border-b border-gray-100">
+          Preview — ${mapped.length} license${mapped.length!==1?'s':''} to import
+        </div>
+        <div class="overflow-x-auto max-h-52">
+          <table class="w-full text-xs">
+            <thead class="bg-gray-50">
+              <tr>
+                <th class="text-left px-3 py-1.5 text-gray-400">State</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">Type</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">License #</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">Expiry</th>
+                <th class="text-left px-3 py-1.5 text-gray-400">Status</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-50">
+              ${mapped.map(r => `<tr>
+                <td class="px-3 py-1.5 font-semibold">${escHtml(r.state)}</td>
+                <td class="px-3 py-1.5">${escHtml(r.license_type)}</td>
+                <td class="px-3 py-1.5 font-mono">${escHtml(r.license_number||'—')}</td>
+                <td class="px-3 py-1.5">${escHtml(r.expiry_date||'—')}</td>
+                <td class="px-3 py-1.5">${escHtml(r.status)}</td>
+              </tr>`).join('')}
+            </tbody>
+          </table>
+        </div>
+      </div>`
+      previewEl.classList.remove('hidden')
+      submitBtn.classList.remove('hidden')
+
+      // Wire submit
+      const newBtn = submitBtn.cloneNode(true)
+      submitBtn.parentNode.replaceChild(newBtn, submitBtn)
+      newBtn.classList.remove('hidden')
+      newBtn.addEventListener('click', () => candLicSubmitImport(mapped))
+    } catch(err) {
+      errEl.textContent = err.message
+      errEl.classList.remove('hidden')
+    }
+  }
+  reader.readAsArrayBuffer(file)
+}
+
+async function candLicSubmitImport(rows) {
+  const errEl = document.getElementById('candLicImportErr')
+  const submitBtn = document.getElementById('candLicImportSubmitBtn') || document.querySelector('#candLicImportModal .btn-primary')
+  errEl?.classList.add('hidden')
+  if (submitBtn) { submitBtn.disabled = true; submitBtn.innerHTML = `<div class="spinner-sm"></div> Importing…` }
+  try {
+    const result = await api('/api/candidate/licenses/import', {
+      method: 'POST',
+      body: JSON.stringify({ licenses: rows })
+    })
+    document.getElementById('candLicImportModal')?.remove()
+    // Refresh list
+    const refreshData = await api('/api/candidate/licenses')
+    candLicState.licenses = refreshData.licenses || []
+    candLicDraw($('mainContent'))
+    // Show success toast
+    const toast = document.createElement('div')
+    toast.className = 'fixed bottom-6 right-6 bg-green-600 text-white text-sm px-5 py-3 rounded-xl shadow-lg z-50 flex items-center gap-2'
+    toast.innerHTML = `<i class="fas fa-check-circle"></i> Imported ${result.inserted||0} new, updated ${result.updated||0} licenses.`
+    document.body.appendChild(toast)
+    setTimeout(() => toast.remove(), 4000)
+  } catch(err) {
+    if (errEl) { errEl.textContent = err.message || 'Import failed.'; errEl.classList.remove('hidden') }
+    if (submitBtn) { submitBtn.disabled = false; submitBtn.innerHTML = `<i class="fas fa-upload"></i> Import Licenses` }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+
+const ppState = {
+  profile: null,     // { contractor, licenses, portal_user }
+  tab: 'profile',    // active sub-tab when inside renderProviderPortal
+}
+
+async function renderProviderPortal() {
+  // Land on My Profile by default
+  state.currentPage = 'provider_profile'
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const navEl = $('nav_provider_profile'); if (navEl) navEl.classList.add('active')
+  $('pageTitle').textContent = 'My Profile'
+  renderProviderProfile()
+}
+
+async function ppLoadProfile() {
+  const data = await api('/api/provider/profile')
+  ppState.profile = data
+  return data
+}
+
+// ── My Profile tab ────────────────────────────────────────────────
+async function renderProviderProfile() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await ppLoadProfile()
+    ppDrawProfile(data)
+  } catch(e) {
+    mc.innerHTML = `
+      <div class="max-w-lg mx-auto mt-10 text-center">
+        <div class="card p-8">
+          <i class="fas fa-user-slash text-5xl text-gray-200 mb-4 block"></i>
+          <h3 class="font-bold text-gray-700 text-lg mb-2">Profile Not Linked</h3>
+          <p class="text-gray-400 text-sm">Your account hasn't been linked to a contractor profile yet. Please contact an admin to set this up.</p>
+        </div>
+      </div>`
+  }
+}
+
+function ppDrawProfile(data) {
+  const mc = $('mainContent')
+  const { contractor: ct, portal_user: pu, licenses, ob_candidate: ob, collab_agreements, collab_providers } = data
+  if (!ct) { mc.innerHTML = '<p class="text-red-500 p-4">No profile linked.</p>'; return }
+
+  // Resolve photo: contractor row first, then onboarding candidate as fallback
+  const photoData = ct.photo_data || ob?.photo_data || ''
+  const photoMime = ct.photo_mime || ob?.photo_mime || 'image/jpeg'
+  const photoSrc  = photoData ? `data:${photoMime};base64,${photoData}` : ''
+
+  const expiringSoon = (licenses || []).filter(l => {
+    if (!l.expiry_date || l.status !== 'active') return false
+    const d = new Date(l.expiry_date); const now = new Date()
+    return d > now && d < new Date(now.getTime() + 60*24*60*60*1000)
+  })
+
+  // Profile completeness — check required fields
+  const deaLicenses = (licenses || []).filter(l => l.license_type === 'DEA')
+  const missingFields = []
+  if (!ct.first_name || !ct.last_name) missingFields.push('Full Legal Name (first & last)')
+  if (!ct.dob) missingFields.push('Date of Birth')
+  if (!ct.npi) missingFields.push('NPI Number')
+  if (!ct.states_licensed && (licenses||[]).filter(l=>l.license_type!=='DEA').length===0) missingFields.push('States Licensed')
+  if (deaLicenses.length === 0) missingFields.push('DEA Number(s)')
+  if (!ct.languages) missingFields.push('Languages Spoken')
+  if (ct.bmi_max === null || ct.bmi_max === undefined || ct.bmi_max === '') missingFields.push('Max BMI')
+  if (ct.bmi_min === null || ct.bmi_min === undefined || ct.bmi_min === '') missingFields.push('Min BMI')
+
+  mc.innerHTML = `
+  <div class="max-w-2xl">
+    <!-- Profile header card -->
+    <div class="card p-6 mb-5">
+      <div class="flex items-start gap-5">
+        <!-- Avatar: real photo or gold initial -->
+        <div class="relative flex-shrink-0 group">
+          ${photoSrc
+            ? `<img src="${photoSrc}" alt="${escHtml(ct.name)}" class="w-20 h-20 rounded-2xl object-cover border-2 border-yellow-300 shadow">`
+            : `<div class="w-20 h-20 rounded-2xl flex items-center justify-center text-white text-3xl font-bold shadow" style="background:var(--lion-gold)">${(ct.name||'?')[0].toUpperCase()}</div>`
+          }
+          <label for="ppPhotoUpload" class="absolute inset-0 flex items-center justify-center rounded-2xl bg-black/40 opacity-0 group-hover:opacity-100 cursor-pointer transition-opacity" title="Change photo">
+            <i class="fas fa-camera text-white text-lg"></i>
+          </label>
+          <input id="ppPhotoUpload" type="file" accept="image/jpeg,image/png,image/webp" class="hidden" onchange="ppUploadPhoto(this)">
+        </div>
+        <div class="flex-1 min-w-0">
+          <h2 class="text-xl font-bold text-gray-900">${escHtml(ct.name)}</h2>
+          ${ct.company ? `<p class="text-gray-500 text-sm mt-0.5">${escHtml(ct.company)}</p>` : ''}
+          ${ct.specialty || ob?.specialty ? `<p class="text-sm text-purple-600 mt-0.5 font-medium"><i class="fas fa-stethoscope mr-1 text-xs"></i>${escHtml(ct.specialty || ob?.specialty || '')}</p>` : ''}
+          <div class="flex items-center gap-2 mt-2 flex-wrap">
+            <span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-purple-100 text-purple-700"><i class="fas fa-id-badge mr-1"></i>${escHtml(ct.role_group || 'Provider')}</span>
+            ${ct.npi ? `<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-gray-100 text-gray-600">NPI: ${escHtml(ct.npi)}</span>` : ''}
+            ${(licenses||[]).length > 0 ? `<span class="px-2.5 py-1 rounded-full text-xs font-semibold bg-blue-100 text-blue-700"><i class="fas fa-map-marker-alt mr-1"></i>${licenses.length} State${licenses.length!==1?'s':''} Licensed</span>` : ''}
+          </div>
+        </div>
+        <button onclick="ppOpenEditProfile()" class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2 flex-shrink-0">
+          <i class="fas fa-pencil"></i> Edit
+        </button>
+      </div>
+    </div>
+
+    <!-- Profile completeness banner -->
+    ${missingFields.length > 0 ? `
+    <div class="mb-4 p-4 rounded-xl bg-amber-50 border border-amber-300">
+      <div class="flex items-start gap-3">
+        <i class="fas fa-clipboard-list text-amber-500 mt-0.5 flex-shrink-0 text-base"></i>
+        <div class="flex-1">
+          <p class="font-semibold text-amber-900 text-sm">Profile incomplete — please keep your profile up to date</p>
+          <p class="text-xs text-amber-700 mt-1 mb-2">LionMDs requires all providers to maintain accurate, complete profile information at all times for compliance and patient safety. Please fill in the missing fields below.</p>
+          <div class="flex flex-wrap gap-1.5">
+            ${missingFields.map(f => `<span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-amber-100 border border-amber-300 text-amber-800"><i class="fas fa-exclamation-circle text-[10px]"></i>${f}</span>`).join('')}
+          </div>
+          <button onclick="ppOpenEditProfile()" class="mt-3 text-xs font-semibold text-amber-800 hover:text-amber-900 underline underline-offset-2">Update my profile →</button>
+        </div>
+      </div>
+    </div>` : `
+    <div class="mb-4 p-3 rounded-xl bg-green-50 border border-green-200 flex items-center gap-3">
+      <i class="fas fa-check-circle text-green-500 flex-shrink-0"></i>
+      <p class="text-sm font-semibold text-green-800">Profile complete — all required fields on file. Thank you for keeping your profile up to date!</p>
+    </div>`}
+
+    <!-- License expiry alerts -->
+    ${expiringSoon.length > 0 ? `
+    <div class="mb-4 p-4 rounded-xl bg-orange-50 border border-orange-200 flex items-start gap-3">
+      <i class="fas fa-exclamation-triangle text-orange-500 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold text-orange-800 text-sm">License expiring within 60 days</p>
+        <p class="text-xs text-orange-600 mt-0.5">${expiringSoon.map(l => l.state + (l.expiry_date ? ' (exp. ' + l.expiry_date + ')' : '')).join(' · ')}</p>
+      </div>
+    </div>` : ''}
+
+    <!-- Contact & Details -->
+    <div class="card p-5 mb-5">
+      <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider mb-4">Contact Information</h3>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">Email</p>
+          <p class="text-sm text-gray-700">${escHtml(pu?.email || ct.email || '—')}</p>
+        </div>
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">Phone</p>
+          <p class="text-sm text-gray-700">${escHtml(ct.phone || '—')} ${!ct.phone ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}</p>
+        </div>
+        <div class="md:col-span-2">
+          <p class="text-xs text-gray-400 font-medium mb-1">Address</p>
+          <p class="text-sm text-gray-700">${escHtml(ct.address || '—')} ${!ct.address ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}</p>
+        </div>
+        ${ct.bio ? `
+        <div class="md:col-span-2">
+          <p class="text-xs text-gray-400 font-medium mb-1">Bio / Professional Summary</p>
+          <p class="text-sm text-gray-600 leading-relaxed">${escHtml(ct.bio)}</p>
+        </div>` : ''}
+      </div>
+    </div>
+
+    <!-- Professional Details -->
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">Professional Details</h3>
+        <button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline">Edit →</button>
+      </div>
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+
+        <!-- Full Legal Name -->
+        <div class="md:col-span-2">
+          <p class="text-xs text-gray-400 font-medium mb-1">Full Legal Name</p>
+          <p class="text-sm text-gray-700">
+            ${(ct.first_name || ct.last_name) ? escHtml([ct.first_name, ct.last_name].filter(Boolean).join(' ')) : `<span class="text-gray-400">—</span>`}
+            ${!(ct.first_name && ct.last_name) ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}
+          </p>
+        </div>
+
+        <!-- DOB -->
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">Date of Birth</p>
+          <p class="text-sm text-gray-700">
+            ${ct.dob ? escHtml(ct.dob) : `<span class="text-gray-400">—</span>`}
+            ${!ct.dob ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}
+          </p>
+        </div>
+
+        <!-- Specialty -->
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">Specialty</p>
+          <p class="text-sm text-gray-700">${escHtml(ct.specialty || ob?.specialty || '—')} ${!(ct.specialty||ob?.specialty) ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}</p>
+        </div>
+
+        <!-- NPI -->
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">NPI Number</p>
+          <p class="text-sm font-mono text-gray-700">${escHtml(ct.npi || '—')} ${!ct.npi ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}</p>
+        </div>
+
+        <!-- States Licensed -->
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">States Licensed</p>
+          <p class="text-sm text-gray-700">
+            ${(licenses||[]).filter(l=>l.license_type!=='DEA').length > 0
+              ? (licenses||[]).filter(l=>l.license_type!=='DEA').map(l=>`<span class="inline-block px-1.5 py-0.5 rounded text-xs font-semibold mr-1 ${l.status==='expired'?'bg-red-100 text-red-700':l.status==='pending'?'bg-yellow-100 text-yellow-700':'bg-green-100 text-green-700'}">${escHtml(l.state)}</span>`).join('')
+              : escHtml(ct.states_licensed || '—')
+            }
+          </p>
+        </div>
+
+        <!-- DEA Numbers -->
+        <div class="md:col-span-2">
+          <p class="text-xs text-gray-400 font-medium mb-1">DEA Number(s)</p>
+          ${deaLicenses.length > 0
+            ? `<div class="flex flex-wrap gap-2">
+                ${deaLicenses.map(d => `
+                  <div class="inline-flex items-center gap-2 px-3 py-1.5 rounded-xl bg-blue-50 border border-blue-200">
+                    <span class="text-xs font-bold text-blue-700">${escHtml(d.state)}</span>
+                    <span class="text-xs font-mono text-gray-700">${escHtml(d.license_number || '—')}</span>
+                    ${d.expiry_date ? `<span class="text-[10px] text-gray-400">exp. ${escHtml(d.expiry_date)}</span>` : ''}
+                    <span class="text-[10px] px-1.5 py-0.5 rounded-full font-semibold ${d.status==='expired'?'bg-red-100 text-red-600':d.status==='pending'?'bg-yellow-100 text-yellow-700':'bg-green-100 text-green-700'}">${escHtml(d.status)}</span>
+                  </div>`).join('')}
+              </div>`
+            : `<p class="text-sm text-gray-400">None on file <button onclick="navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline ml-1">Add via Licenses →</button></p>`
+          }
+        </div>
+
+        <!-- Languages Spoken -->
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">Languages Spoken</p>
+          <p class="text-sm text-gray-700">
+            ${ct.languages ? escHtml(ct.languages) : `<span class="text-gray-400">—</span>`}
+            ${!ct.languages ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}
+          </p>
+        </div>
+
+        <!-- BMI Range -->
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-1">Patient BMI Range</p>
+          <p class="text-sm text-gray-700">
+            ${(ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '') || (ct.bmi_max !== null && ct.bmi_max !== undefined && ct.bmi_max !== '')
+              ? `Min <span class="font-semibold">${ct.bmi_min ?? '—'}</span> &nbsp;·&nbsp; Max <span class="font-semibold">${ct.bmi_max ?? '—'}</span>`
+              : `<span class="text-gray-400">—</span>`}
+            ${(ct.bmi_min === null || ct.bmi_min === undefined || ct.bmi_min === '') ? '<button onclick="ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline ml-1">+ Add</button>' : ''}
+          </p>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- CV / Document Upload -->
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-4">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">CV / Résumé</h3>
+        <label for="ppCvUpload" class="cursor-pointer text-xs px-3 py-1.5 rounded-lg bg-gray-100 hover:bg-gray-200 text-gray-600 font-semibold transition-colors">
+          <i class="fas fa-upload mr-1"></i> Upload New
+        </label>
+        <input id="ppCvUpload" type="file" accept=".pdf,.doc,.docx" class="hidden" onchange="ppUploadCV(this)">
+      </div>
+      ${ct.cv_filename ? `
+      <div class="flex items-center gap-3 p-3 bg-green-50 rounded-xl border border-green-200">
+        <i class="fas fa-file-pdf text-green-500 text-xl flex-shrink-0"></i>
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-semibold text-gray-800 truncate">${escHtml(ct.cv_filename)}</p>
+          ${ct.cv_updated_at ? `<p class="text-xs text-gray-400">Updated ${new Date(ct.cv_updated_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</p>` : ''}
+        </div>
+        ${ct.cv_url ? `<a href="${ct.cv_url}" download="${escHtml(ct.cv_filename)}" class="text-xs px-3 py-1.5 rounded-lg bg-white border border-green-300 text-green-700 hover:bg-green-100 flex-shrink-0">
+          <i class="fas fa-download mr-1"></i>Download
+        </a>` : ''}
+      </div>` : `
+      <div class="text-center py-6 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
+        <i class="fas fa-file-upload text-3xl text-gray-300 mb-2 block"></i>
+        <p class="text-sm text-gray-400">No CV on file</p>
+        <label for="ppCvUpload2" class="mt-2 inline-block cursor-pointer text-xs px-4 py-2 rounded-lg btn-primary font-semibold">
+          <i class="fas fa-upload mr-1"></i> Upload CV
+        </label>
+        <input id="ppCvUpload2" type="file" accept=".pdf,.doc,.docx" class="hidden" onchange="ppUploadCV(this)">
+      </div>`}
+    </div>
+
+    <!-- Licensing summary snippet -->
+    ${(licenses||[]).length > 0 ? `
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider">State Licenses (${licenses.length})</h3>
+        <button onclick="navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline">Manage All →</button>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        ${licenses.map(l => {
+          const cls = l.status === 'expired' ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : 'bg-green-100 text-green-700'
+          return `<span class="px-2.5 py-1 rounded-full text-xs font-semibold ${cls}">${escHtml(l.state)}</span>`
+        }).join('')}
+      </div>
+    </div>` : ''}
+
+    <!-- Collaborating Agreements: states where this provider has a collab MD -->
+    ${(collab_agreements||[]).length > 0 ? `
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider"><i class="fas fa-handshake mr-1 text-purple-400"></i>Collaborating Agreements (${collab_agreements.length} state${collab_agreements.length!==1?'s':''})</h3>
+        <button onclick="navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline">Edit →</button>
+      </div>
+      <div class="space-y-2">
+        ${collab_agreements.map(l => {
+          const expSoon = l.collab_expiry && (() => { const d=new Date(l.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+          const expPast = l.collab_expiry && new Date(l.collab_expiry) < new Date()
+          return `<div class="p-2.5 rounded-xl bg-purple-50 border border-purple-100 space-y-1.5">
+            <div class="flex items-center gap-3">
+              <span class="w-10 text-center text-xs font-bold text-purple-700 bg-white border border-purple-200 rounded-lg py-1 flex-shrink-0">${escHtml(l.state)}</span>
+              <div class="flex-1 min-w-0">
+                <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+                ${l.collab_expiry ? `<span class="ml-2 text-xs ${expPast?'text-red-500 font-semibold':expSoon?'text-orange-500 font-semibold':'text-gray-400'}"><i class="fas fa-calendar mr-0.5 text-[10px]"></i>Exp. ${l.collab_expiry}${expPast?' ⚠️':expSoon?' ⏰':''}</span>` : ''}
+              </div>
+              ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+            </div>
+            ${l.notes ? `<div class="pl-13"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : ''}
+          </div>`
+        }).join('')}
+      </div>
+    </div>` : ''}
+
+    <!-- Collaborating Providers: NPs/PAs who list this MD as their collab physician -->
+    <!-- Provider names are admin-only — show state coverage only, no names -->
+    ${(collab_providers||[]).length > 0 ? `
+    <div class="card p-5 mb-5">
+      <div class="flex items-center justify-between mb-3">
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider"><i class="fas fa-users mr-1 text-indigo-400"></i>Providers Under My Agreement (${[...new Set((collab_providers||[]).map(p=>p.contractor_id))].length})</h3>
+      </div>
+      ${(() => {
+        // Group by contractor_id — names are not included (admin-only)
+        const byProvider = {}
+        for (const r of (collab_providers||[])) {
+          if (!byProvider[r.contractor_id]) byProvider[r.contractor_id] = { states: [] }
+          byProvider[r.contractor_id].states.push(r)
+        }
+        return Object.values(byProvider).map((prov, idx) => `
+          <div class="mb-2 p-3 rounded-xl bg-indigo-50 border border-indigo-100">
+            <p class="text-sm font-semibold text-gray-800 mb-2"><i class="fas fa-user-nurse mr-1.5 text-indigo-400"></i>Provider ${idx + 1}</p>
+            <div class="flex flex-wrap gap-1.5">
+              ${prov.states.map(s => {
+                const expPast = s.collab_expiry && new Date(s.collab_expiry) < new Date()
+                const expSoon = s.collab_expiry && (() => { const d=new Date(s.collab_expiry),n=new Date(); return d>n && d<new Date(n.getTime()+60*24*60*60*1000) })()
+                return `<span class="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-semibold bg-white border border-indigo-200 text-indigo-700" title="${escHtml(s.collab_expiry?'Exp. '+s.collab_expiry:'')}">${escHtml(s.state)}${expPast?' ⚠️':expSoon?' ⏰':''}</span>`
+              }).join('')}
+            </div>
+          </div>
+        `).join('')
+      })()}
+    </div>` : ''}
+  </div>
+  `
+}
+
+function ppOpenEditProfile() {
+  const data = ppState.profile
+  if (!data) return
+  const { contractor: ct, portal_user: pu, ob_candidate: ob } = data
+  let modal = $('ppEditModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'ppEditModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100 flex-shrink-0">
+        <h3 class="font-bold text-gray-800">Edit My Profile</h3>
+        <button onclick="$('ppEditModal').classList.add('hidden')" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4 overflow-y-auto">
+        <div class="p-3 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-2 -mt-1 mb-1">
+          <i class="fas fa-info-circle text-amber-500 flex-shrink-0 mt-0.5 text-sm"></i>
+          <p class="text-xs text-amber-800">All fields below are required for compliance. Please keep this information accurate and up to date. Changes are immediately visible to your admin.</p>
+        </div>
+
+        <!-- Section: Legal Identity -->
+        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-1">Legal Identity</p>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">First Name <span class="text-red-400">*</span></label>
+            <input id="ppEditFirstName" type="text" placeholder="Legal first name" value="${escHtml(ct.first_name||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Last Name <span class="text-red-400">*</span></label>
+            <input id="ppEditLastName" type="text" placeholder="Legal last name" value="${escHtml(ct.last_name||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Date of Birth <span class="text-red-400">*</span></label>
+            <input id="ppEditDob" type="date" value="${escHtml(ct.dob||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">NPI Number <span class="text-red-400">*</span></label>
+            <input id="ppEditNpi" type="text" placeholder="1234567890" value="${escHtml(ct.npi||'')}" class="w-full text-sm"/>
+          </div>
+        </div>
+
+        <!-- Section: Contact -->
+        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-1">Contact</p>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Phone</label>
+            <input id="ppEditPhone" type="tel" placeholder="(555) 123-4567" value="${escHtml(ct.phone||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Languages Spoken <span class="text-red-400">*</span></label>
+            <input id="ppEditLanguages" type="text" placeholder="e.g. English, Spanish" value="${escHtml(ct.languages||'')}" class="w-full text-sm"/>
+          </div>
+          <div class="col-span-2">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Street Address</label>
+            <input id="ppEditAddress" type="text" placeholder="123 Main St, City, State ZIP" value="${escHtml(ct.address||'')}" class="w-full text-sm"/>
+          </div>
+        </div>
+
+        <!-- Section: Professional -->
+        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-1">Professional</p>
+        <div class="grid grid-cols-2 gap-3">
+          <div class="col-span-2">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Specialty / Clinical Focus</label>
+            <input id="ppEditSpecialty" type="text" placeholder="e.g. Family Medicine, Psychiatry" value="${escHtml(ct.specialty || ob?.specialty || '')}" class="w-full text-sm"/>
+          </div>
+          <div class="col-span-2 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-500">
+            <i class="fas fa-map-marker-alt mr-1 text-gray-400"></i>
+            <strong class="text-gray-600">States Licensed</strong> are managed via your <button type="button" onclick="$('ppEditModal').classList.add('hidden'); navigate('provider_licenses')" class="text-blue-500 hover:underline font-semibold">State Licenses</button> page. Add or update state licenses there.
+          </div>
+          <div class="col-span-2">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Bio / Professional Summary</label>
+            <textarea id="ppEditBio" rows="3" placeholder="Brief professional background, specialties…" class="w-full text-sm resize-none">${escHtml(ct.bio||'')}</textarea>
+          </div>
+        </div>
+
+        <!-- Section: Patient Parameters -->
+        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider pt-1">Patient Parameters</p>
+        <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 text-xs text-blue-700 -mb-1">
+          <i class="fas fa-weight mr-1"></i>Set your BMI limits so the platform can match you with appropriate patients.
+        </div>
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Min BMI <span class="text-red-400">*</span></label>
+            <input id="ppEditBmiMin" type="number" step="0.1" min="0" max="100" placeholder="e.g. 18.5" value="${ct.bmi_min !== null && ct.bmi_min !== undefined && ct.bmi_min !== '' ? ct.bmi_min : ''}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Max BMI <span class="text-red-400">*</span></label>
+            <input id="ppEditBmiMax" type="number" step="0.1" min="0" max="200" placeholder="e.g. 60.0" value="${ct.bmi_max !== null && ct.bmi_max !== undefined && ct.bmi_max !== '' ? ct.bmi_max : ''}" class="w-full text-sm"/>
+          </div>
+        </div>
+
+        <!-- DEA note -->
+        <div class="p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-500">
+          <i class="fas fa-prescription-bottle-alt mr-1 text-gray-400"></i>
+          <strong class="text-gray-600">DEA Numbers</strong> are managed via your <button onclick="$('ppEditModal').classList.add('hidden'); navigate('provider_licenses')" class="text-blue-500 hover:underline font-semibold">State Licenses</button> page. Add or update DEA entries there.
+        </div>
+
+        <div id="ppEditError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+        <div class="flex gap-3 pt-1">
+          <button onclick="$('ppEditModal').classList.add('hidden')" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+          <button onclick="ppSaveProfile()" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">Save Changes</button>
+        </div>
+      </div>
+    </div>
+  `
+  modal.classList.remove('hidden')
+}
+
+async function ppSaveProfile() {
+  const phone          = ($('ppEditPhone').value||'').trim()
+  const address        = ($('ppEditAddress').value||'').trim()
+  const bio            = ($('ppEditBio').value||'').trim()
+  const npi            = ($('ppEditNpi')?.value||'').trim()
+  const specialty      = ($('ppEditSpecialty')?.value||'').trim()
+  const first_name     = ($('ppEditFirstName')?.value||'').trim()
+  const last_name      = ($('ppEditLastName')?.value||'').trim()
+  const dob            = ($('ppEditDob')?.value||'').trim()
+  const languages      = ($('ppEditLanguages')?.value||'').trim()
+  const bmi_min        = ($('ppEditBmiMin')?.value||'').trim()
+  const bmi_max        = ($('ppEditBmiMax')?.value||'').trim()
+  const errEl          = $('ppEditError')
+  errEl.classList.add('hidden')
+  if (bmi_min && bmi_max && parseFloat(bmi_min) >= parseFloat(bmi_max)) {
+    errEl.textContent = 'Min BMI must be less than Max BMI.'
+    errEl.classList.remove('hidden')
+    return
+  }
+  try {
+    await api('/api/provider/profile', { method: 'PUT', body: JSON.stringify({
+      phone, address, bio, npi, specialty,
+      first_name, last_name, dob, languages,
+      bmi_min: bmi_min !== '' ? bmi_min : null,
+      bmi_max: bmi_max !== '' ? bmi_max : null
+    }) })
+    $('ppEditModal').classList.add('hidden')
+    showToast('Profile updated! Admin can see your changes.', 'success')
+    const data = await ppLoadProfile()
+    ppDrawProfile(data)
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden') }
+}
+
+async function ppUploadCV(input) {
+  const file = input.files?.[0]
+  if (!file) return
+  if (file.size > 5 * 1024 * 1024) { showToast('File too large (max 5 MB)', 'error'); return }
+  showLoading('Uploading CV…')
+  try {
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      try {
+        await api('/api/provider/cv', { method: 'POST', body: JSON.stringify({ filename: file.name, data_url: e.target.result }) })
+        hideLoading()
+        showToast('CV uploaded successfully!', 'success')
+        const data = await ppLoadProfile()
+        ppDrawProfile(data)
+      } catch(err) { hideLoading(); showToast('Upload failed: ' + err.message, 'error') }
+    }
+    reader.onerror = () => { hideLoading(); showToast('Failed to read file', 'error') }
+    reader.readAsDataURL(file)
+  } catch(e) { hideLoading(); showToast(e.message, 'error') }
+}
+
+async function ppUploadPhoto(input) {
+  const file = input.files?.[0]
+  if (!file) return
+  if (file.size > 4 * 1024 * 1024) { showToast('Photo too large (max 4 MB)', 'error'); return }
+  if (!file.type.startsWith('image/')) { showToast('Please select an image file', 'error'); return }
+  showLoading('Uploading photo…')
+  try {
+    const reader = new FileReader()
+    reader.onload = async (e) => {
+      try {
+        await api('/api/provider/photo', { method: 'POST', body: JSON.stringify({ data_url: e.target.result, mime: file.type }) })
+        hideLoading()
+        showToast('Profile photo updated!', 'success')
+        const data = await ppLoadProfile()
+        ppDrawProfile(data)
+      } catch(err) { hideLoading(); showToast('Upload failed: ' + err.message, 'error') }
+    }
+    reader.onerror = () => { hideLoading(); showToast('Failed to read image', 'error') }
+    reader.readAsDataURL(file)
+  } catch(e) { hideLoading(); showToast(e.message, 'error') }
+}
+
+// ── State Licenses tab ────────────────────────────────────────────
+async function renderProviderLicenses() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await ppLoadProfile()
+    ppDrawLicenses(data.licenses || [])
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+function ppDrawLicenses(licenses) {
+  const mc = $('mainContent')
+  const isExpiringSoon = (dateStr) => {
+    if (!dateStr) return false
+    const d = new Date(dateStr); const now = new Date()
+    return d > now && d < new Date(now.getTime() + 60*24*60*60*1000)
+  }
+  const isExpired = (dateStr, status) => status === 'expired' || (dateStr && new Date(dateStr) < new Date())
+
+  const licStatusBadge = s => {
+    const map = { active:'bg-green-100 text-green-700', expired:'bg-red-100 text-red-700', pending:'bg-yellow-100 text-yellow-700' }
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${map[s]||'bg-gray-100 text-gray-500'}">${(s||'').charAt(0).toUpperCase()+(s||'').slice(1)}</span>`
+  }
+
+  const byStatus = { active: licenses.filter(l => l.status === 'active'), pending: licenses.filter(l => l.status === 'pending'), expired: licenses.filter(l => l.status === 'expired') }
+
+  mc.innerHTML = `
+  <div class="max-w-2xl">
+    <div class="flex items-center justify-between mb-5">
+      <div>
+        <h2 class="text-lg font-bold text-gray-800">State Licenses</h2>
+        <p class="text-sm text-gray-400 mt-0.5">${licenses.length} license${licenses.length !== 1 ? 's' : ''} on file</p>
+      </div>
+      <div class="flex items-center gap-2 flex-wrap">
+        <button onclick="licDownloadTemplate('provider')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-sm text-blue-700 hover:bg-blue-100 transition">
+          <i class="fas fa-file-download text-xs"></i> Template
+        </button>
+        <button onclick="licOpenImport('provider')" class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-sm text-indigo-700 hover:bg-indigo-100 transition">
+          <i class="fas fa-file-upload text-xs"></i> Import
+        </button>
+        <button onclick="ppOpenAddLicense()" class="btn-primary px-4 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
+          <i class="fas fa-plus"></i> Add License
+        </button>
+      </div>
+    </div>
+
+    <!-- CPA pending alert -->
+    ${licenses.filter(l => cpaPending(l)).length > 0 ? `
+    <div class="mb-4 p-4 rounded-xl bg-amber-50 border border-amber-200 flex items-start gap-3">
+      <i class="fas fa-exclamation-triangle text-amber-500 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold text-amber-800 text-sm">Collaborating Physician Agreement not yet fully signed</p>
+        <p class="text-xs text-amber-700 mt-0.5">The following states are pending before you can be fully active: <strong>${licenses.filter(l => cpaPending(l)).map(l => l.state).join(', ')}</strong></p>
+        <p class="text-xs text-amber-600 mt-1">Please update your <strong>Permitted Actions</strong> for each state so we know what you are authorized to do.</p>
+      </div>
+    </div>` : ''}
+
+    <!-- Expiring soon alert -->
+    ${licenses.filter(l => isExpiringSoon(l.expiry_date)).length > 0 ? `
+    <div class="mb-4 p-4 rounded-xl bg-orange-50 border border-orange-200 flex items-start gap-3">
+      <i class="fas fa-exclamation-triangle text-orange-500 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold text-orange-800 text-sm">Licenses expiring within 60 days</p>
+        <p class="text-xs text-orange-600 mt-0.5">${licenses.filter(l => isExpiringSoon(l.expiry_date)).map(l => l.state + ' (exp. ' + l.expiry_date + ')').join(' · ')}</p>
+      </div>
+    </div>` : ''}
+
+    ${licenses.length === 0 ? `
+    <div class="card p-10 text-center">
+      <i class="fas fa-map-marked-alt text-5xl text-gray-200 mb-4 block"></i>
+      <h3 class="font-bold text-gray-600 text-base mb-1">No licenses on file</h3>
+      <p class="text-sm text-gray-400 mb-4">Add your state medical licenses to keep track of where you're licensed to practice.</p>
+      <button onclick="ppOpenAddLicense()" class="btn-primary px-6 py-2 rounded-xl text-sm font-semibold">
+        <i class="fas fa-plus mr-2"></i>Add First License
+      </button>
+    </div>` : `
+    <div class="space-y-3">
+      ${licenses.map(lic => `
+      <div class="card p-4 hover:shadow-md transition-shadow">
+        <div class="flex items-start justify-between gap-3">
+          <div class="flex items-start gap-3 flex-1 min-w-0">
+            <div class="w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${lic.status === 'expired' ? 'bg-red-100' : lic.status === 'pending' ? 'bg-yellow-100' : 'bg-green-100'}">
+              <i class="fas fa-certificate ${lic.status === 'expired' ? 'text-red-400' : lic.status === 'pending' ? 'text-yellow-500' : 'text-green-500'}"></i>
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="flex items-center gap-2 flex-wrap">
+                <span class="font-bold text-gray-900 text-base">${escHtml(lic.state)}</span>
+                ${licStatusBadge(lic.status)}
+                ${isExpiringSoon(lic.expiry_date) ? '<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-orange-100 text-orange-700"><i class="fas fa-clock mr-0.5"></i>Expiring Soon</span>' : ''}
+                ${cpaPending(lic) ? cpaBadgeHtml(lic.notes) : ''}
+              </div>
+              ${lic.license_type ? `<p class="text-sm text-gray-500 mt-0.5">${escHtml(lic.license_type)}</p>` : ''}
+              <div class="flex items-center gap-4 mt-1.5 text-xs text-gray-400 flex-wrap">
+                ${lic.license_number ? `<span><i class="fas fa-hashtag mr-0.5"></i>${escHtml(lic.license_number)}</span>` : '<span class="text-red-400 font-semibold italic">No license number — please edit</span>'}
+                ${lic.expiry_date ? `<span class="${isExpiringSoon(lic.expiry_date) ? 'text-orange-600 font-semibold' : ''}"><i class="fas fa-calendar mr-0.5"></i>Expires ${lic.expiry_date}</span>` : '<span class="italic">No expiration date</span>'}
+              </div>
+              ${lic.permitted_actions ? `<div class="mt-1.5"><span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${lic.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':lic.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}"><i class="fas fa-stethoscope text-[10px]"></i>${escHtml(lic.permitted_actions)}</span></div>` : (cpaPending(lic) ? `<p class="text-xs text-amber-600 mt-1.5 font-medium"><i class="fas fa-pencil mr-1"></i>Please edit to fill in your permitted actions for this state.</p>` : '')}
+              ${(!cpaPending(lic) && lic.notes) ? `<p class="text-xs text-gray-400 mt-1.5 italic">"${escHtml(lic.notes)}"</p>` : ''}
+              ${lic.license_file_name ? `<button onclick="licDownloadFile(${JSON.stringify(lic.license_file_data||'').replace(/"/g,'&quot;')}, '${escHtml(lic.license_file_name)}', '${escHtml(lic.license_file_mime||'')}');" class="mt-1.5 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"><i class="fas fa-paperclip"></i>${escHtml(lic.license_file_name)}</button>` : ''}
+            </div>
+          </div>
+          <div class="flex items-center gap-1 flex-shrink-0">
+            <button onclick="ppOpenEditLicense(${JSON.stringify(lic).replace(/"/g,'&quot;')})" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-700">
+              <i class="fas fa-pencil text-xs"></i>
+            </button>
+            <button onclick="ppDeleteLicense(${lic.id})" class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500">
+              <i class="fas fa-trash text-xs"></i>
+            </button>
+          </div>
+        </div>
+      </div>`).join('')}
+    </div>`}
+  </div>
+  `
+}
+
+let _ppLicFile = {}
+
+function ppOpenAddLicense()      { ppShowLicenseModal(null) }
+function ppOpenEditLicense(lic)  { ppShowLicenseModal(lic) }
+
+async function ppShowLicenseModal(lic) {
+  _ppLicFile = {}
+  await ensurePhysicianList('provider')
+  const isEdit = !!lic
+  let modal = $('ppLicenseModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'ppLicenseModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md max-h-[90vh] overflow-y-auto">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h3 class="font-bold text-gray-800">${isEdit ? 'Edit License' : 'Add State License'}</h3>
+        <button onclick="$('ppLicenseModal').classList.add('hidden')" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+          <i class="fas fa-times"></i>
+        </button>
+      </div>
+      <div class="p-5 space-y-4">
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+            <select id="ppLicState" class="w-full text-sm">
+              <option value="">Select…</option>
+              ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+            <select id="ppLicStatus" class="w-full text-sm">
+              <option value="active" ${(!lic||lic.status==='active')?'selected':''}>Active</option>
+              <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+              <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+            </select>
+          </div>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+          <input id="ppLicType" type="text" placeholder="e.g. ARNP, MD, DO, NP, DEA" value="${escHtml(lic?.license_type||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Number *</label>
+          <input id="ppLicNum" type="text" placeholder="e.g. AP123456" value="${escHtml(lic?.license_number||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Expiration Date</label>
+          <input id="ppLicExpiry" type="date" value="${lic?.expiry_date||''}" class="w-full text-sm"/>
+        </div>
+        <div class="border-t border-gray-100 pt-3">
+          <p class="text-xs font-semibold text-indigo-600 mb-2 flex items-center gap-1.5">
+            <i class="fas fa-handshake"></i> Collaborating Physician
+            <span class="font-normal text-gray-400">— if required for this state</span>
+          </p>
+          <div class="grid grid-cols-2 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Physician Name</label>
+              <select id="ppLicCollab" class="w-full text-sm">
+                <option value="">— None / Not Required —</option>
+                ${(ppPhysicianList||[]).map(p => `<option value="${escHtml(p.last_name)}" ${(lic?.collab_physician||'')=== p.last_name?'selected':''}>${escHtml(p.last_name)}</option>`).join('')}
+                ${(lic?.collab_physician && !(ppPhysicianList||[]).find(p=>p.last_name===lic.collab_physician)) ? `<option value="${escHtml(lic.collab_physician)}" selected>${escHtml(lic.collab_physician)} (existing)</option>` : ''}
+              </select>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiry</label>
+              <input id="ppLicCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
+            </div>
+          </div>
+          <div class="mt-3">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">CPA Status</label>
+            <select id="ppLicNotes" class="w-full text-sm">
+              <option value="">— No Status —</option>
+              <option value="CPA: Not Required" ${(lic?.notes||'')==='CPA: Not Required'?'selected':''}>CPA: Not Required</option>
+              <option value="CPA: Sent for Signatures" ${(lic?.notes||'')==='CPA: Sent for Signatures'?'selected':''}>CPA: Sent for Signatures</option>
+              <option value="CPA: Signed &amp; Active" ${(lic?.notes||'')==='CPA: Signed & Active'?'selected':''}>CPA: Signed &amp; Active</option>
+              <option value="CPA: Expired" ${(lic?.notes||'')==='CPA: Expired'?'selected':''}>CPA: Expired</option>
+              <option value="CPA: Pending Renewal" ${(lic?.notes||'')==='CPA: Pending Renewal'?'selected':''}>CPA: Pending Renewal</option>
+              <option value="CPA: Needs New MD" ${(lic?.notes||'')==='CPA: Needs New MD'?'selected':''}>CPA: Needs New MD</option>
+              ${(lic?.notes && !['','CPA: Not Required','CPA: Sent for Signatures','CPA: Signed & Active','CPA: Expired','CPA: Pending Renewal','CPA: Needs New MD'].includes(lic.notes)) ? `<option value="${escHtml(lic.notes)}" selected>${escHtml(lic.notes)}</option>` : ''}
+            </select>
+          </div>
+        </div>
+        <!-- Practice Authority — provider self-reports what they can do in this state -->
+        <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
+          <div class="text-xs font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5">
+            <i class="fas fa-stethoscope"></i> Practice Authority
+            <span class="font-normal text-blue-500 normal-case tracking-normal">— What are you authorized to do in this state?</span>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions *</label>
+            <select id="ppLicPermitted" class="w-full text-sm">
+              <option value="" ${!lic?.permitted_actions?'selected':''}>— Select —</option>
+              <option value="Can See Patients + Prescribe" ${lic?.permitted_actions==='Can See Patients + Prescribe'?'selected':''}>✅ Can See Patients + Prescribe (Full CRx)</option>
+              <option value="Can See Patients (No CRx)" ${lic?.permitted_actions==='Can See Patients (No CRx)'?'selected':''}>🟡 Can See Patients (No CRx)</option>
+              <option value="Can See Patients + Prescribe (Collab)" ${lic?.permitted_actions==='Can See Patients + Prescribe (Collab)'?'selected':''}>🤝 Can See Patients + Prescribe (Collab MD)</option>
+              <option value="Can See Patients (No CRx, Collab)" ${lic?.permitted_actions==='Can See Patients (No CRx, Collab)'?'selected':''}>🤝 Can See Patients (No CRx, Collab MD)</option>
+              <option value="Pending License" ${lic?.permitted_actions==='Pending License'?'selected':''}>⏳ Pending License</option>
+              <option value="Not Licensed" ${lic?.permitted_actions==='Not Licensed'?'selected':''}>❌ Not Licensed in This State</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+            <select id="ppLicPracticeType" class="w-full text-sm">
+              <option value="" ${!lic?.practice_type?'selected':''}>— Select —</option>
+              <option value="independent" ${lic?.practice_type==='independent'?'selected':''}>Independent (Full Practice Authority)</option>
+              <option value="collab_md" ${lic?.practice_type==='collab_md'?'selected':''}>Requires Collaborating MD</option>
+              <option value="md_self" ${lic?.practice_type==='md_self'?'selected':''}>Physician (Self-supervised)</option>
+              <option value="unclear" ${lic?.practice_type==='unclear'?'selected':''}>Unclear / Needs Review</option>
+            </select>
+          </div>
+        </div>
+        ${licFileWidgetHtml('ppLicF', lic?.license_file_name||'')}
+        <div id="ppLicError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+        <div class="flex gap-3 pt-1">
+          <button onclick="$('ppLicenseModal').classList.add('hidden')" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+          <button onclick="ppSaveLicense(${isEdit ? lic.id : 'null'})" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+            ${isEdit ? 'Save Changes' : 'Add License'}
+          </button>
+        </div>
+      </div>
+    </div>
+  `
+  modal.classList.remove('hidden')
+}
+
+function ppLicFFileChosen(input) { licFileChosen(input, 'ppLicFLabel', _ppLicFile) }
+function ppLicFRemoveFile() {
+  _ppLicFile = { remove: true }
+  const ex = $('ppLicFExisting'); if (ex) ex.remove()
+  const nf = $('ppLicFNewFile'); if (nf) nf.classList.remove('hidden')
+}
+
+async function ppSaveLicense(licId) {
+  const state      = $('ppLicState').value
+  const status     = $('ppLicStatus').value
+  const type       = ($('ppLicType').value||'').trim()
+  const num        = ($('ppLicNum').value||'').trim()
+  const expiry     = $('ppLicExpiry').value
+  const notes          = ($('ppLicNotes').value||'').trim()
+  const collab         = ($('ppLicCollab')?.value||'').trim()
+  const collabExp      = $('ppLicCollabExp')?.value || ''
+  const permitted_actions = ($('ppLicPermitted')?.value||'').trim()
+  const practice_type     = ($('ppLicPracticeType')?.value||'').trim()
+  const errEl      = $('ppLicError')
+  errEl.classList.add('hidden')
+  if (!state) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  if (!num && status === 'active') { errEl.textContent = 'License number is required for active licenses.'; errEl.classList.remove('hidden'); return }
+  const payload = { state, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp, permitted_actions, practice_type }
+  if (_ppLicFile.file_data) {
+    payload.license_file_name = _ppLicFile.file_name
+    payload.license_file_data = _ppLicFile.file_data
+    payload.license_file_mime = _ppLicFile.file_mime
+  }
+  try {
+    if (licId) {
+      await api(`/api/provider/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(payload) })
+      if (_ppLicFile.remove && !_ppLicFile.file_data) {
+        await api(`/api/provider/licenses/${licId}/file`, { method: 'DELETE' }).catch(() => {})
+      }
+    } else {
+      await api('/api/provider/licenses', { method: 'POST', body: JSON.stringify(payload) })
+    }
+    $('ppLicenseModal').classList.add('hidden')
+    showToast(licId ? 'License updated!' : 'License added!', 'success')
+    const data = await ppLoadProfile()
+    ppDrawLicenses(data.licenses || [])
+  } catch(e) { errEl.textContent = e.message; errEl.classList.remove('hidden') }
+}
+
+async function ppDeleteLicense(id) {
+  if (!confirm('Delete this license?')) return
+  try {
+    await api(`/api/provider/licenses/${id}`, { method: 'DELETE' })
+    showToast('License removed.', 'success')
+    const data = await ppLoadProfile()
+    ppDrawLicenses(data.licenses || [])
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+// ── My Payroll tab ────────────────────────────────────────────────
+async function renderProviderPayroll() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/provider/payroll')
+    ppDrawPayroll(data)
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+function ppDrawPayroll(data) {
+  const mc = $('mainContent')
+  const { periods = [], totals = {} } = data
+  const fmt = n => n != null ? '$' + Number(n).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—'
+  const fmtN = n => Number(n || 0).toLocaleString()
+
+  mc.innerHTML = `
+  <div class="max-w-2xl">
+    <div class="mb-5">
+      <h2 class="text-lg font-bold text-gray-800">My Payroll</h2>
+      <p class="text-sm text-gray-400 mt-0.5">Earnings summary across all pay periods</p>
+    </div>
+
+    <!-- Lifetime KPI cards -->
+    <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
+      <div class="card p-4 text-center">
+        <p class="text-xs text-gray-400 mb-1">Lifetime Earnings</p>
+        <p class="text-xl font-bold" style="color:var(--lion-gold)">${fmt(totals.total_pay)}</p>
+      </div>
+      <div class="card p-4 text-center">
+        <p class="text-xs text-gray-400 mb-1">Total Cases</p>
+        <p class="text-xl font-bold text-gray-700">${fmtN(totals.total_cases)}</p>
+      </div>
+      <div class="card p-4 text-center">
+        <p class="text-xs text-gray-400 mb-1">Approved</p>
+        <p class="text-xl font-bold text-emerald-600">${fmtN(totals.approved_count)}</p>
+      </div>
+      <div class="card p-4 text-center">
+        <p class="text-xs text-gray-400 mb-1">Denied</p>
+        <p class="text-xl font-bold text-red-400">${fmtN(totals.denied_count)}</p>
+      </div>
+    </div>
+
+    <!-- Period breakdown -->
+    <div class="card overflow-hidden">
+      <div class="px-5 py-3 border-b border-gray-100 flex items-center gap-2">
+        <i class="fas fa-calendar-alt text-gray-300"></i>
+        <span class="font-semibold text-gray-700 text-sm">Pay Period History</span>
+        <span class="ml-auto text-xs text-gray-400">${periods.length} period${periods.length !== 1 ? 's' : ''}</span>
+      </div>
+      ${periods.length === 0 ? `
+        <div class="text-center py-12">
+          <i class="fas fa-receipt text-4xl text-gray-200 mb-3 block"></i>
+          <p class="text-gray-400 text-sm">No payroll records yet</p>
+        </div>
+      ` : `
+        <div class="divide-y divide-gray-50">
+          ${periods.map(p => {
+            const pay = Number(p.total_pay || 0)
+            const cases = Number(p.total_cases || 0)
+            const approved = Number(p.approved_count || 0)
+            const denied = Number(p.denied_count || 0)
+            const approvalRate = cases > 0 ? Math.round((approved / cases) * 100) : 0
+            return `
+            <div class="px-5 py-4 hover:bg-gray-50 transition-colors">
+              <div class="flex items-center justify-between mb-2">
+                <div>
+                  <span class="font-semibold text-gray-800">${escHtml(p.period_label || p.period_key || '')}</span>
+                </div>
+                <span class="text-lg font-bold" style="color:var(--lion-gold)">${fmt(pay)}</span>
+              </div>
+              <div class="flex items-center gap-4 text-xs text-gray-400 flex-wrap">
+                <span><i class="fas fa-file-medical mr-1"></i>${fmtN(cases)} case${cases !== 1 ? 's' : ''}</span>
+                <span class="text-emerald-600"><i class="fas fa-check mr-1"></i>${fmtN(approved)} approved</span>
+                ${denied > 0 ? `<span class="text-red-400"><i class="fas fa-times mr-1"></i>${fmtN(denied)} denied</span>` : ''}
+                ${p.async_count > 0   ? `<span>${fmtN(p.async_count)} async</span>` : ''}
+                ${p.sync_count > 0    ? `<span>${fmtN(p.sync_count)} sync</span>` : ''}
+                ${p.orderly_count > 0 ? `<span>${fmtN(p.orderly_count)} Orderly</span>` : ''}
+              </div>
+              <!-- Approval bar -->
+              <div class="mt-2 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div class="h-full bg-emerald-400 rounded-full" style="width:${approvalRate}%"></div>
+              </div>
+              <p class="text-xs text-gray-300 mt-0.5">${approvalRate}% approval rate</p>
+            </div>`
+          }).join('')}
+        </div>
+        <!-- Total row -->
+        <div class="px-5 py-3 bg-gray-50 border-t border-gray-100 flex items-center justify-between">
+          <span class="text-xs font-semibold text-gray-500 uppercase tracking-wide">All Time</span>
+          <span class="font-bold text-base" style="color:var(--lion-gold)">${fmt(totals.total_pay)}</span>
+        </div>
+      `}
+    </div>
+  </div>`
+}
+
+// ── My Consults tab ────────────────────────────────────────────────
+const ppConsultState = {
+  period: '', search: '', page: 1, total: 0, data: [], periods: [],
+  showNames: false,
+  // Filters
+  decisionStatus: '', visitType: '', dateFrom: '', dateTo: '',
+  // Sorting
+  sortBy: 'decision_date', sortDir: 'desc',
+}
+
+// HIPAA name-masking helpers for provider consults
+function ppMaskName(name) {
+  if (ppConsultState.showNames) return name || ''
+  const words = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '—'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+function ppToggleNames() {
+  if (ppConsultState.showNames) {
+    ppConsultState.showNames = false
+    ppUpdateToggleBtn()
+    ppLoadConsults()   // reload without reveal=1
+    return
+  }
+  $('ppHipaaModal').classList.remove('hidden')
+}
+
+function ppConfirmShowNames() {
+  $('ppHipaaModal').classList.add('hidden')
+  ppConsultState.showNames = true
+  ppUpdateToggleBtn()
+  ppLoadConsults()   // reload with reveal=1
+}
+
+function ppUpdateToggleBtn() {
+  const btn = $('ppNamesToggleBtn')
+  if (!btn) return
+  if (ppConsultState.showNames) {
+    btn.innerHTML = '<i class="fas fa-eye-slash mr-1.5"></i>Hide Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 bg-amber-50 border border-amber-300 text-amber-700 hover:bg-amber-100 text-sm font-medium rounded-xl transition whitespace-nowrap'
+  } else {
+    btn.innerHTML = '<i class="fas fa-eye mr-1.5"></i>Show Names'
+    btn.className = 'flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap'
+  }
+}
+
+function ppSetSort(col) {
+  if (ppConsultState.sortBy === col) {
+    ppConsultState.sortDir = ppConsultState.sortDir === 'asc' ? 'desc' : 'asc'
+  } else {
+    ppConsultState.sortBy  = col
+    ppConsultState.sortDir = col === 'contractor_fee' ? 'desc' : 'asc'
+  }
+  ppConsultState.page = 1
+  ppLoadConsults()
+}
+
+function ppFilterConsults() {
+  ppConsultState.decisionStatus = $('ppStatusFilter')?.value || ''
+  ppConsultState.visitType      = $('ppVtFilter')?.value     || ''
+  ppConsultState.dateFrom       = $('ppDateFrom')?.value     || ''
+  ppConsultState.dateTo         = $('ppDateTo')?.value       || ''
+  ppConsultState.page = 1
+  ppLoadConsults()
+}
+
+function ppClearFilters() {
+  ppConsultState.decisionStatus = ''
+  ppConsultState.visitType      = ''
+  ppConsultState.dateFrom       = ''
+  ppConsultState.dateTo         = ''
+  ppConsultState.search         = ''
+  ppConsultState.page           = 1
+  ppLoadConsults()
+}
+
+async function renderProviderConsults() {
+  // Reset transient state on each navigation
+  ppConsultState.showNames      = false
+  ppConsultState.decisionStatus = ''
+  ppConsultState.visitType      = ''
+  ppConsultState.dateFrom       = ''
+  ppConsultState.dateTo         = ''
+  ppConsultState.sortBy         = 'decision_date'
+  ppConsultState.sortDir        = 'desc'
+  ppConsultState.page           = 1
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    // Load periods from payroll endpoint for the filter
+    const payrollData = await api('/api/provider/payroll')
+    ppConsultState.periods = (payrollData.periods || [])
+    if (!ppConsultState.period && ppConsultState.periods.length > 0) {
+      ppConsultState.period = ppConsultState.periods[0].period_key
+    }
+    await ppLoadConsults()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+async function ppLoadConsults() {
+  const qs = new URLSearchParams({ page: ppConsultState.page, limit: 50 })
+  if (ppConsultState.period)         qs.set('period_key',      ppConsultState.period)
+  if (ppConsultState.search)         qs.set('search',          ppConsultState.search)
+  if (ppConsultState.decisionStatus) qs.set('decision_status', ppConsultState.decisionStatus)
+  if (ppConsultState.visitType)      qs.set('visit_type',      ppConsultState.visitType)
+  if (ppConsultState.dateFrom)       qs.set('date_from',       ppConsultState.dateFrom)
+  if (ppConsultState.dateTo)         qs.set('date_to',         ppConsultState.dateTo)
+  qs.set('sort_by',  ppConsultState.sortBy)
+  qs.set('sort_dir', ppConsultState.sortDir)
+  if (ppConsultState.showNames) qs.set('reveal', '1')   // HIPAA: only sent after explicit acknowledgement
+  const data = await api('/api/provider/consults?' + qs.toString())
+  ppConsultState.data  = data.data  || []
+  ppConsultState.total = data.total || 0
+  ppDrawConsults()
+}
+
+function ppDrawConsults() {
+  const mc = $('mainContent')
+  const { data: rows, total, periods, period, search, showNames,
+          decisionStatus, visitType, dateFrom, dateTo, sortBy, sortDir } = ppConsultState
+  const pageCount = Math.ceil(total / 50)
+
+  const vtLabel = vt => {
+    if (!vt) return '—'
+    if (vt === 'ASYNC_TEXT_EMAIL') return 'Async'
+    if (vt === 'NO_SHOW') return 'No Show'
+    if (vt === '_SYNC' || vt.startsWith('SYNC_')) return 'Sync'
+    return vt
+  }
+  const vtBadge = vt => {
+    const cls = vt === 'ASYNC_TEXT_EMAIL' ? 'bg-blue-100 text-blue-700'
+               : vt === 'NO_SHOW'                     ? 'bg-gray-100 text-gray-500'
+               : (vt === '_SYNC' || vt?.startsWith('SYNC_')) ? 'bg-purple-100 text-purple-700'
+               :                                        'bg-gray-100 text-gray-500'
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${vtLabel(vt)}</span>`
+  }
+  const statusBadge = s => {
+    const cls = s === 'Approved' ? 'bg-emerald-100 text-emerald-700'
+               : s === 'Denied'  ? 'bg-red-100 text-red-600'
+               :                   'bg-yellow-100 text-yellow-700'
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-medium ${cls}">${s || '—'}</span>`
+  }
+  const fmt = n => n != null ? '$' + Number(n).toFixed(2) : '—'
+
+  // Sortable column header helper
+  const sortTh = (col, label, alignClass = 'text-left', nowrap = true) => {
+    const isActive = sortBy === col
+    const arrow = isActive
+      ? (sortDir === 'asc'
+          ? '<i class="fas fa-arrow-up text-blue-500 ml-1"></i>'
+          : '<i class="fas fa-arrow-down text-blue-500 ml-1"></i>')
+      : '<i class="fas fa-sort text-gray-300 ml-1 opacity-0 group-hover:opacity-100"></i>'
+    const activeClass = isActive ? 'text-blue-600' : 'text-gray-500'
+    const nwClass = nowrap ? 'whitespace-nowrap' : ''
+    return `<th class="${alignClass} px-4 py-3 font-semibold text-xs ${nwClass} ${activeClass} group cursor-pointer select-none hover:bg-gray-100 transition-colors" onclick="ppSetSort('${col}')" title="Sort by ${label}">${label} ${arrow}</th>`
+  }
+
+  // Active filter chips
+  const chips = []
+  if (decisionStatus) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700 border border-indigo-200">${escHtml(decisionStatus)}<button onclick="ppConsultState.decisionStatus=''; ppConsultState.page=1; ppLoadConsults()" class="ml-1 hover:text-red-500">&times;</button></span>`)
+  if (visitType)      chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-100 text-blue-700 border border-blue-200">${vtLabel(visitType)}<button onclick="ppConsultState.visitType=''; ppConsultState.page=1; ppLoadConsults()" class="ml-1 hover:text-red-500">&times;</button></span>`)
+  if (dateFrom || dateTo) chips.push(`<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-medium bg-violet-100 text-violet-700 border border-violet-200"><i class="fas fa-calendar-alt mr-0.5"></i>${escHtml(dateFrom||'…')} – ${escHtml(dateTo||'…')}<button onclick="ppConsultState.dateFrom=''; ppConsultState.dateTo=''; ppConsultState.page=1; ppLoadConsults()" class="ml-1 hover:text-red-500">&times;</button></span>`)
+
+  mc.innerHTML = `
+  <div class="max-w-full">
+    <!-- Controls -->
+    <div class="card p-4 mb-4 space-y-3">
+      <!-- Row 1: period, search, names toggle, count -->
+      <div class="flex flex-wrap items-center gap-2">
+        <select id="ppCPeriod" onchange="ppConsultState.period=this.value; ppConsultState.page=1; ppLoadConsults()"
+          class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          <option value="">All Periods</option>
+          ${periods.map(p => `<option value="${p.period_key}" ${p.period_key===period?'selected':''}>${escHtml(p.period_label||p.period_key)}</option>`).join('')}
+        </select>
+        <input id="ppCSearch" type="text" placeholder="${showNames ? 'Search case ID, org, or patient name…' : 'Search case ID or org…'}"
+          value="${escHtml(search)}"
+          oninput="ppConsultState.search=this.value; ppConsultState.page=1; clearTimeout(ppConsultState._t); ppConsultState._t=setTimeout(ppLoadConsults,350)"
+          class="border border-gray-200 rounded-lg px-3 py-2 text-sm bg-white shadow-sm w-52 focus:ring-2 focus:ring-blue-500 focus:outline-none"/>
+        <button id="ppNamesToggleBtn" onclick="ppToggleNames()"
+          class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 border-gray-200 text-gray-600 bg-white hover:bg-gray-50 transition whitespace-nowrap">
+          <i class="fas fa-eye mr-1.5"></i>Show Names
+        </button>
+        <span class="text-sm text-gray-400 ml-auto font-medium">${total.toLocaleString()} case${total !== 1 ? 's' : ''}</span>
+      </div>
+      <!-- Row 2: filters -->
+      <div class="flex flex-wrap items-center gap-2">
+        <select id="ppStatusFilter" onchange="ppFilterConsults()"
+          class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          <option value="" ${decisionStatus===''?'selected':''}>All Statuses</option>
+          <option value="Approved" ${decisionStatus==='Approved'?'selected':''}>✅ Approved</option>
+          <option value="Denied"   ${decisionStatus==='Denied'?'selected':''}>❌ Denied</option>
+          <option value="Pending"  ${decisionStatus==='Pending'?'selected':''}>⏳ Pending</option>
+        </select>
+        <select id="ppVtFilter" onchange="ppFilterConsults()"
+          class="border border-gray-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:ring-2 focus:ring-blue-500 focus:outline-none">
+          <option value="" ${visitType===''?'selected':''}>All Types</option>
+          <option value="ASYNC_TEXT_EMAIL" ${visitType==='ASYNC_TEXT_EMAIL'?'selected':''}>Async</option>
+          <option value="_SYNC"            ${visitType==='_SYNC'?'selected':''}>Sync (all)</option>
+          <option value="NO_SHOW"          ${visitType==='NO_SHOW'?'selected':''}>No Show</option>
+        </select>
+        <!-- Date range -->
+        <span class="text-xs text-gray-400 font-medium whitespace-nowrap"><i class="fas fa-calendar-alt mr-1 text-violet-400"></i>From</span>
+        <input type="date" id="ppDateFrom" value="${escHtml(dateFrom)}" onchange="ppFilterConsults()"
+          class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm bg-white focus:ring-2 focus:ring-violet-300 focus:outline-none"/>
+        <span class="text-xs text-gray-400 font-medium">To</span>
+        <input type="date" id="ppDateTo"   value="${escHtml(dateTo)}"   onchange="ppFilterConsults()"
+          class="border border-gray-200 rounded-lg px-2 py-1.5 text-sm bg-white focus:ring-2 focus:ring-violet-300 focus:outline-none"/>
+        ${chips.length > 0 ? `<button onclick="ppClearFilters()" class="text-xs text-red-400 hover:text-red-600 font-medium px-2 py-1 rounded border border-red-200 hover:border-red-300 transition">Clear all</button>` : ''}
+      </div>
+      <!-- Active filter chips -->
+      ${chips.length > 0 ? `<div class="flex flex-wrap items-center gap-1.5"><span class="text-xs text-gray-400 font-semibold uppercase tracking-wider">Active:</span>${chips.join('')}</div>` : ''}
+    </div>
+
+    <!-- HIPAA active banner -->
+    ${showNames ? `
+    <div class="flex items-center gap-2 mb-4 px-4 py-2.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-800">
+      <i class="fas fa-shield-alt text-amber-500"></i>
+      <span><strong>HIPAA Notice:</strong> Patient names are currently visible. Ensure no unauthorized individuals can view your screen. Names will be hidden when you navigate away.</span>
+    </div>` : ''}
+
+    <!-- Table -->
+    <div class="card overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm" style="min-width:680px">
+          <thead>
+            <tr class="border-b border-gray-100 text-left bg-gray-50">
+              ${sortTh('decision_date', 'Date', 'text-left', true)}
+              <th class="px-4 py-3 text-xs font-semibold text-gray-500 text-left">
+                Patient <span class="normal-case font-normal text-gray-400 ml-1">${showNames ? '(full name)' : '(initials only)'}</span>
+              </th>
+              ${sortTh('organization_name', 'Organization', 'text-left', false)}
+              ${sortTh('visit_type', 'Type', 'text-left', true)}
+              ${sortTh('decision_status', 'Decision', 'text-left', true)}
+              ${sortTh('contractor_fee', 'Fee', 'text-right', true)}
+              <th class="px-4 py-3 text-xs font-semibold text-gray-500 text-left whitespace-nowrap">Period</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.length === 0 ? `
+              <tr><td colspan="7" class="px-4 py-12 text-center text-gray-300">
+                <i class="fas fa-file-medical text-4xl mb-3 block"></i>
+                <p class="text-sm text-gray-400">No consults found${decisionStatus || visitType ? ' matching these filters' : period ? ' for this period' : ''}</p>
+                ${chips.length > 0 ? `<button onclick="ppClearFilters()" class="mt-2 text-sm text-blue-500 hover:underline">Clear filters</button>` : ''}
+              </td></tr>` :
+              rows.map(r => `
+              <tr class="border-b border-gray-50 hover:bg-gray-50 transition-colors">
+                <td class="px-4 py-3 text-gray-500 text-xs whitespace-nowrap">${r.decision_date ? new Date(r.decision_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'}</td>
+                <td class="px-4 py-3">
+                  <p class="font-medium ${showNames ? 'text-gray-800' : 'font-mono tracking-wider text-gray-400'}">${escHtml(ppMaskName(r.patient_name) || '—')}</p>
+                  ${r.case_id_short ? `<p class="text-xs text-gray-400">${escHtml(r.case_id_short)}</p>` : ''}
+                </td>
+                <td class="px-4 py-3 text-gray-600 max-w-[160px] truncate">${escHtml(r.organization_name || '—')}</td>
+                <td class="px-4 py-3">${vtBadge(r.visit_type)}</td>
+                <td class="px-4 py-3">${statusBadge(r.decision_status)}</td>
+                <td class="px-4 py-3 text-right font-semibold text-gray-700">${fmt(r.contractor_fee)}</td>
+                <td class="px-4 py-3 text-xs text-gray-400 whitespace-nowrap">${escHtml(r.period_label || r.period_key || '—')}</td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Pagination -->
+      ${pageCount > 1 ? `
+      <div class="px-5 py-3 border-t border-gray-100 flex items-center justify-between bg-gray-50">
+        <button onclick="ppConsultState.page=Math.max(1,ppConsultState.page-1); ppLoadConsults()"
+          class="text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-white disabled:opacity-40"
+          ${ppConsultState.page <= 1 ? 'disabled' : ''}>
+          <i class="fas fa-chevron-left mr-1"></i>Prev
+        </button>
+        <span class="text-xs text-gray-400">Page ${ppConsultState.page} of ${pageCount} &middot; ${total.toLocaleString()} records</span>
+        <button onclick="ppConsultState.page=Math.min(${pageCount},ppConsultState.page+1); ppLoadConsults()"
+          class="text-sm px-3 py-1.5 rounded-lg border border-gray-200 text-gray-600 hover:bg-white disabled:opacity-40"
+          ${ppConsultState.page >= pageCount ? 'disabled' : ''}>
+          Next<i class="fas fa-chevron-right ml-1"></i>
+        </button>
+      </div>` : ''}
+    </div>
+
+    <!-- HIPAA Warning Modal (Provider Consults) -->
+    <div id="ppHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+      <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+        <div class="flex items-center gap-3 mb-4">
+          <div class="w-11 h-11 rounded-full bg-red-100 flex items-center justify-center flex-shrink-0">
+            <i class="fas fa-shield-alt text-red-500 text-lg"></i>
+          </div>
+          <div>
+            <h3 class="text-base font-bold text-gray-900">HIPAA Privacy Notice</h3>
+            <p class="text-xs text-gray-400 mt-0.5">Protected Health Information</p>
+          </div>
+        </div>
+        <div class="bg-red-50 border border-red-200 rounded-xl p-4 mb-5 text-sm text-red-800 space-y-2">
+          <p class="font-semibold">You are about to reveal patient names on screen.</p>
+          <ul class="list-disc list-inside space-y-1 text-xs">
+            <li>Ensure no unauthorized individuals can view your screen</li>
+            <li>Do not take screenshots or record this screen while names are visible</li>
+            <li>Names will be hidden again when you navigate away from this page</li>
+            <li>Access to this information is logged and auditable</li>
+          </ul>
+        </div>
+        <p class="text-xs text-gray-500 mb-5">By clicking <strong>I Acknowledge</strong> you confirm you are authorized to view this information and accept responsibility for its protection under HIPAA.</p>
+        <div class="flex gap-3">
+          <button onclick="$('ppHipaaModal').classList.add('hidden')"
+            class="flex-1 px-4 py-2.5 border border-gray-300 text-gray-700 text-sm font-medium rounded-xl hover:bg-gray-50 transition">
+            Cancel
+          </button>
+          <button onclick="ppConfirmShowNames()"
+            class="flex-1 px-4 py-2.5 bg-red-600 hover:bg-red-700 text-white text-sm font-bold rounded-xl transition">
+            <i class="fas fa-eye mr-1.5"></i>I Acknowledge — Show Names
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>`
+
+  // Sync toggle button state after re-render
+  ppUpdateToggleBtn()
+}
+
+// ── Documents & CV tab ────────────────────────────────────────────
+// Document types shown in the provider documents page
+const PP_DOC_TYPES = [
+  { key: 'resume',         label: 'Resume / CV',            icon: 'fa-file-user',       accept: '.pdf,.doc,.docx' },
+  { key: 'medical_license',label: 'Medical License',        icon: 'fa-id-card',         accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'dea',            label: 'DEA Certificate',        icon: 'fa-certificate',     accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'malpractice',    label: 'Malpractice Insurance',  icon: 'fa-shield-alt',      accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'npi',            label: 'NPI Letter',             icon: 'fa-hospital',        accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'w9',             label: 'W-9 Form',               icon: 'fa-file-invoice',    accept: '.pdf' },
+  { key: 'id',             label: 'Government ID',          icon: 'fa-address-card',    accept: '.pdf,.jpg,.jpeg,.png' },
+  { key: 'other',          label: 'Other Document',         icon: 'fa-file-alt',        accept: '.pdf,.doc,.docx,.jpg,.jpeg,.png' },
+]
+
+async function renderProviderDocuments() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const docs = await api('/api/provider/documents')
+    ppDrawDocuments(docs || [])
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+async function ppDownloadProviderDoc(id, fileName) {
+  try {
+    showToast('Preparing download…', 'info')
+    const doc = await api(`/api/provider/documents/${id}/download`)
+    if (!doc?.file_data) { showToast('File data not found', 'error'); return }
+    // file_data is a data URL (data:mime;base64,...)
+    const a = document.createElement('a')
+    a.href = doc.file_data
+    a.download = fileName
+    a.click()
+  } catch(e) { showToast('Download failed: ' + e.message, 'error') }
+}
+
+async function ppDeleteProviderDoc(id, fileName) {
+  if (!confirm(`Delete "${fileName}"? This cannot be undone.`)) return
+  try {
+    await api(`/api/provider/documents/${id}`, { method: 'DELETE' })
+    showToast(`"${fileName}" deleted`, 'success')
+    renderProviderDocuments()
+  } catch(e) { showToast('Delete failed: ' + e.message, 'error') }
+}
+
+async function ppUploadProviderDoc(input, docType) {
+  const file = input.files?.[0]
+  if (!file) return
+  const MAX = 5 * 1024 * 1024
+  if (file.size > MAX) { showToast('File too large (max 5 MB)', 'error'); input.value = ''; return }
+  const toastId = showToast('Uploading…', 'info', 0)
+  const reader = new FileReader()
+  reader.onload = async (e) => {
+    try {
+      await api('/api/provider/documents', {
+        method: 'POST',
+        body: JSON.stringify({
+          doc_type: docType,
+          file_name: file.name,
+          file_data: e.target.result,   // data URL (base64)
+          file_size: file.size,
+          mime_type: file.type || 'application/octet-stream',
+        })
+      })
+      showToast('Uploaded successfully', 'success')
+      renderProviderDocuments()
+    } catch(err) {
+      showToast('Upload failed: ' + err.message, 'error')
+    } finally {
+      input.value = ''
+    }
+  }
+  reader.readAsDataURL(file)
+}
+
+function ppDrawDocuments(docs) {
+  // Group uploaded docs by doc_type (keep latest on top per type via ORDER BY uploaded_at DESC)
+  const byType = {}
+  for (const d of docs) {
+    if (!byType[d.doc_type]) byType[d.doc_type] = []
+    byType[d.doc_type].push(d)
+  }
+
+  const mc = $('mainContent')
+  mc.innerHTML = `
+  <div class="max-w-2xl">
+    <div class="mb-5">
+      <h2 class="text-lg font-bold text-gray-800">My Documents</h2>
+      <p class="text-sm text-gray-400 mt-0.5">Upload and manage your professional documents</p>
+    </div>
+
+    <div class="space-y-3">
+      ${PP_DOC_TYPES.map(dt => {
+        const typeDocs = byType[dt.key] || []
+        const inputId = `ppDocUpload_${dt.key}`
+        return `
+        <div class="card p-5">
+          <div class="flex items-center justify-between gap-3">
+            <div class="flex items-center gap-3 min-w-0">
+              <div class="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center flex-shrink-0">
+                <i class="fas ${dt.icon} text-blue-500"></i>
+              </div>
+              <div class="min-w-0">
+                <p class="font-semibold text-gray-800 text-sm">${dt.label}</p>
+                <p class="text-xs text-gray-400">${typeDocs.length > 0 ? `${typeDocs.length} file${typeDocs.length > 1 ? 's' : ''} uploaded` : 'No file uploaded yet'}</p>
+              </div>
+            </div>
+            <label for="${inputId}"
+              class="cursor-pointer flex-shrink-0 flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 text-blue-600 hover:bg-blue-50 text-xs font-semibold transition">
+              <i class="fas fa-upload"></i> Upload
+            </label>
+            <input id="${inputId}" type="file" accept="${dt.accept}" class="hidden"
+              onchange="ppUploadProviderDoc(this,'${dt.key}')">
+          </div>
+
+          ${typeDocs.length > 0 ? `
+          <div class="mt-3 space-y-2">
+            ${typeDocs.map(d => `
+            <div class="flex items-center gap-2 p-2.5 bg-gray-50 rounded-lg border border-gray-100">
+              <i class="fas fa-file text-gray-300 flex-shrink-0"></i>
+              <div class="flex-1 min-w-0">
+                <p class="text-sm text-gray-700 font-medium truncate">${escHtml(d.file_name)}</p>
+                <p class="text-xs text-gray-400">${d.file_size ? Math.round(d.file_size/1024) + ' KB · ' : ''}${new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</p>
+              </div>
+              <button onclick="ppDownloadProviderDoc(${d.id},'${d.file_name.replace(/'/g,"\\'")}'); event.stopPropagation()"
+                class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-gray-200 text-gray-600 hover:text-blue-600 hover:border-blue-200 transition flex items-center gap-1">
+                <i class="fas fa-download"></i>
+              </button>
+              <button onclick="ppDeleteProviderDoc(${d.id},'${d.file_name.replace(/'/g,"\\'")}'); event.stopPropagation()"
+                class="flex-shrink-0 text-xs px-2.5 py-1.5 rounded-lg bg-white border border-gray-200 text-gray-400 hover:text-red-500 hover:border-red-200 transition flex items-center gap-1">
+                <i class="fas fa-trash"></i>
+              </button>
+            </div>`).join('')}
+          </div>` : ''}
+        </div>`
+      }).join('')}
+    </div>
+
+    <div class="mt-4 p-4 bg-blue-50 rounded-xl border border-blue-100 flex items-start gap-3">
+      <i class="fas fa-lightbulb text-blue-400 mt-0.5 flex-shrink-0"></i>
+      <div>
+        <p class="font-semibold text-blue-800 text-sm">Tips</p>
+        <ul class="text-xs text-blue-600 mt-1 space-y-1 list-disc list-inside">
+          <li>PDF format is recommended for best compatibility</li>
+          <li>Maximum file size: 5 MB per document</li>
+          <li>You can upload multiple files per document type</li>
+          <li>Contact an admin if you have questions about required documents</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+  `
+}
+
+// ══════════════════════════════════════════════════════════════════
+// ── Manager Portal ────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════
+
+const mgrState = {
+  contractors: [],          // list from /api/manager/contractors
+  activeContractor: null,   // { ...contractor row }
+  activeTab: 'licenses',    // 'licenses' | 'documents'
+  licenses: [],             // licenses for activeContractor
+  documents: [],            // document metadata for activeContractor
+  licenseEditId: null,      // which license is in inline-edit mode
+  consults: [],
+  consultsPage: 1,
+  consultsTotal: 0,
+  consultsSearch: '',
+  consultsShowNames: false,
+  licensesOverview: [],     // for mgr_licenses page
+}
+
+async function renderManagerPortal() {
+  state.currentPage = 'mgr_contractors'
+  document.querySelectorAll('.nav-item').forEach(el => el.classList.remove('active'))
+  const navEl = $('nav_mgr_contractors')
+  if (navEl) navEl.classList.add('active')
+  $('pageTitle').textContent = 'Contractors'
+  renderMgrContractors()
+}
+
+// ── Contractors Page ───────────────────────────────────────────────
+async function renderMgrContractors() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/manager/contractors')
+    mgrState.contractors = data || []
+    mgrDrawContractorList()
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm"><i class="fas fa-exclamation-triangle mr-2"></i>${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrDrawContractorList() {
+  const mc = $('mainContent')
+  const list = mgrState.contractors
+  // If a contractor is selected, show split layout
+  if (mgrState.activeContractor) {
+    mgrDrawDetail()
+    return
+  }
+  mc.innerHTML = `
+  <div class="max-w-3xl">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">Contractors</h2>
+        <p class="text-sm text-gray-400 mt-0.5">${list.length} contractor${list.length!==1?'s':''} in your scope</p>
+      </div>
+    </div>
+    ${list.length === 0 ? `
+      <div class="card p-10 text-center text-gray-300">
+        <i class="fas fa-user-md text-5xl mb-3 block"></i>
+        <p class="text-sm">No contractors assigned to your manager account yet.</p>
+        <p class="text-xs mt-1 text-gray-400">Contact an admin to update your access scope.</p>
+      </div>` : `
+    <div class="space-y-2">
+      ${list.map(c => `
+      <div class="card p-4 flex items-center gap-4 hover:shadow-md transition-shadow cursor-pointer group" onclick="mgrSelectContractor(${c.id})">
+        <div class="w-11 h-11 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0 shadow-sm" style="background:var(--lion-gold)">
+          ${(c.name||'?')[0].toUpperCase()}
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="font-semibold text-gray-800 truncate">${escHtml(c.name)}</div>
+          <div class="flex items-center gap-3 mt-0.5 flex-wrap">
+            ${c.specialty ? `<span class="text-xs text-purple-600"><i class="fas fa-stethoscope mr-1 text-xs"></i>${escHtml(c.specialty)}</span>` : ''}
+            ${c.role_group ? `<span class="text-xs text-gray-500">${escHtml(c.role_group)}</span>` : ''}
+            ${c.npi ? `<span class="text-xs text-gray-400">NPI: ${escHtml(c.npi)}</span>` : ''}
+          </div>
+        </div>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${c.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}">${c.is_active ? 'Active' : 'Inactive'}</span>
+          <i class="fas fa-chevron-right text-gray-300 group-hover:text-gray-500 transition-colors text-sm"></i>
+        </div>
+      </div>`).join('')}
+    </div>`}
+  </div>`
+}
+
+async function mgrSelectContractor(id) {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const [ct, lics, docs] = await Promise.all([
+      api(`/api/manager/contractors/${id}`),
+      api(`/api/manager/contractors/${id}/licenses`),
+      api(`/api/manager/contractors/${id}/documents`),
+    ])
+    mgrState.activeContractor = ct
+    mgrState.licenses = lics || []
+    mgrState.documents = docs || []
+    mgrState.licenseEditId = null
+    mgrState.activeTab = 'licenses'
+    mgrDrawDetail()
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrDrawDetail() {
+  const mc = $('mainContent')
+  const ct = mgrState.activeContractor
+  if (!ct) { mgrDrawContractorList(); return }
+
+  mc.innerHTML = `
+  <div class="max-w-3xl">
+    <!-- Back button + header -->
+    <div class="flex items-center gap-3 mb-4">
+      <button onclick="mgrBack()" class="p-2 rounded-xl hover:bg-gray-100 text-gray-400 hover:text-gray-700 transition-colors">
+        <i class="fas fa-arrow-left"></i>
+      </button>
+      <div class="w-11 h-11 rounded-xl flex items-center justify-center text-white font-bold text-lg flex-shrink-0" style="background:var(--lion-gold)">
+        ${(ct.name||'?')[0].toUpperCase()}
+      </div>
+      <div class="flex-1 min-w-0">
+        <h2 class="text-xl font-bold text-gray-800 truncate">${escHtml(ct.name)}</h2>
+        <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+          ${ct.specialty ? `<span class="text-xs text-purple-600"><i class="fas fa-stethoscope mr-1 text-xs"></i>${escHtml(ct.specialty)}</span>` : ''}
+          ${ct.npi ? `<span class="text-xs text-gray-400">NPI: ${escHtml(ct.npi)}</span>` : ''}
+          ${ct.company ? `<span class="text-xs text-gray-500">${escHtml(ct.company)}</span>` : ''}
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${ct.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}">${ct.is_active ? 'Active' : 'Inactive'}</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Contact info card -->
+    <div class="card p-4 mb-4 grid grid-cols-2 gap-3 text-sm">
+      ${ct.email ? `<div><span class="text-xs text-gray-400 block">Email</span><a href="mailto:${escHtml(ct.email)}" class="text-blue-600 hover:underline truncate block">${escHtml(ct.email)}</a></div>` : ''}
+      ${ct.phone ? `<div><span class="text-xs text-gray-400 block">Phone</span><span class="text-gray-700">${escHtml(ct.phone)}</span></div>` : ''}
+      ${ct.state ? `<div><span class="text-xs text-gray-400 block">State</span><span class="text-gray-700">${escHtml(ct.state)}</span></div>` : ''}
+      ${ct.role_group ? `<div><span class="text-xs text-gray-400 block">Role Group</span><span class="text-gray-700">${escHtml(ct.role_group)}</span></div>` : ''}
+    </div>
+
+    <!-- Edit Profile button -->
+    <div class="mb-3 flex justify-end">
+      <button onclick="mgrToggleEditProfile()" id="mgrEditProfileBtn"
+        class="text-xs text-indigo-600 hover:text-indigo-800 px-3 py-1.5 rounded-lg border border-indigo-200 hover:bg-indigo-50 transition font-semibold">
+        <i class="fas fa-pen mr-1.5"></i>Edit Profile
+      </button>
+    </div>
+    <!-- Inline Edit Profile form (hidden) -->
+    <div id="mgrEditProfileForm" class="hidden card p-4 border-2 border-indigo-200 bg-indigo-50 mb-4">
+      <h4 class="text-sm font-bold text-indigo-800 mb-3"><i class="fas fa-user-edit mr-1"></i>Edit Provider Profile</h4>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">First Name</label><input id="mgrProfFirst" class="w-full text-sm" value="${escHtml(ct.first_name||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Last Name</label><input id="mgrProfLast" class="w-full text-sm" value="${escHtml(ct.last_name||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Email</label><input id="mgrProfEmail" type="email" class="w-full text-sm" value="${escHtml(ct.email||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Phone</label><input id="mgrProfPhone" class="w-full text-sm" value="${escHtml(ct.phone||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">Specialty</label><input id="mgrProfSpecialty" class="w-full text-sm" value="${escHtml(ct.specialty||'')}"></div>
+        <div><label class="block text-xs font-semibold text-gray-600 mb-1">NPI</label><input id="mgrProfNpi" class="w-full text-sm" value="${escHtml(ct.npi||'')}"></div>
+      </div>
+      <div class="mb-3"><label class="block text-xs font-semibold text-gray-600 mb-1">Bio / Notes</label><textarea id="mgrProfBio" class="w-full text-sm" rows="2">${escHtml(ct.bio||ct.notes||'')}</textarea></div>
+      <div class="flex gap-2">
+        <button onclick="mgrSaveProfile()" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Save Changes</button>
+        <button onclick="mgrToggleEditProfile()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex border-b border-gray-200 mb-4">
+      <button onclick="mgrSetTab('licenses')" id="mgrTabLicenses" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='licenses' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas fa-map-marker-alt mr-1.5"></i>State Licenses <span class="ml-1 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full">${mgrState.licenses.length}</span>
+      </button>
+      <button onclick="mgrSetTab('documents')" id="mgrTabDocs" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas fa-file-alt mr-1.5"></i>Documents <span class="ml-1 bg-gray-100 text-gray-600 text-xs px-1.5 py-0.5 rounded-full">${mgrState.documents.length}</span>
+      </button>
+      <button onclick="mgrSetTab('profile')" id="mgrTabProfile" class="px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors ${mgrState.activeTab==='profile' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+        <i class="fas fa-user-edit mr-1.5"></i>Edit Profile
+      </button>
+    </div>
+
+    <!-- Tab content -->
+    <div id="mgrTabContent">${mgrState.activeTab === 'licenses' ? mgrRenderLicensesTab() : mgrState.activeTab === 'documents' ? mgrRenderDocumentsTab() : mgrRenderProfileTab()}</div>
+  </div>`
+}
+
+function mgrToggleEditProfile() {
+  const form = $('mgrEditProfileForm')
+  if (form) form.classList.toggle('hidden')
+}
+
+async function mgrSaveProfile() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    const body = {
+      first_name: $('mgrProfFirst')?.value?.trim() || '',
+      last_name:  $('mgrProfLast')?.value?.trim() || '',
+      email:      $('mgrProfEmail')?.value?.trim() || '',
+      phone:      $('mgrProfPhone')?.value?.trim() || '',
+      specialty:  $('mgrProfSpecialty')?.value?.trim() || '',
+      npi:        $('mgrProfNpi')?.value?.trim() || '',
+      bio:        $('mgrProfBio')?.value?.trim() || '',
+    }
+    await api(`/api/manager/contractors/${ct.id}/profile`, { method: 'PUT', body: JSON.stringify(body) })
+    showToast('Profile updated!', 'success')
+    // Refresh contractor data and redraw
+    const updated = await api(`/api/manager/contractors/${ct.id}`)
+    if (updated) mgrState.activeContractor = updated
+    mgrDrawDetail()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+function mgrBack() {
+  mgrState.activeContractor = null
+  mgrState.licenses = []
+  mgrState.documents = []
+  mgrState.licenseEditId = null
+  mgrDrawContractorList()
+}
+
+function mgrSetTab(tab) {
+  mgrState.activeTab = tab
+  const content = $('mgrTabContent')
+  if (!content) return
+  if (tab === 'licenses')       content.innerHTML = mgrRenderLicensesTab()
+  else if (tab === 'documents') content.innerHTML = mgrRenderDocumentsTab()
+  else                          content.innerHTML = mgrRenderProfileTab()
+  // Update tab buttons
+  const tl = $('mgrTabLicenses'), td = $('mgrTabDocs'), tp = $('mgrTabProfile')
+  const base = 'px-5 py-2.5 text-sm font-semibold border-b-2 transition-colors '
+  if (tl) tl.className = base + (tab==='licenses'  ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700')
+  if (td) td.className = base + (tab==='documents' ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700')
+  if (tp) tp.className = base + (tab==='profile'   ? 'border-teal-600 text-teal-700' : 'border-transparent text-gray-500 hover:text-gray-700')
+}
+
+function mgrLicenseStatusBadge(status, expiry) {
+  const now = new Date(); const exp = expiry ? new Date(expiry) : null
+  const daysLeft = exp ? Math.ceil((exp - now) / 86400000) : null
+  if (status === 'active' && daysLeft !== null && daysLeft <= 60 && daysLeft > 0)
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700">⚠️ Expiring (${daysLeft}d)</span>`
+  if (status === 'active' && daysLeft !== null && daysLeft <= 0)
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-red-100 text-red-700">❌ Expired</span>`
+  if (status === 'active')
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700">✅ Active</span>`
+  if (status === 'pending')
+    return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-yellow-100 text-yellow-700">⏳ Pending</span>`
+  return `<span class="px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">${escHtml(status||'Unknown')}</span>`
+}
+
+function mgrRenderLicensesTab() {
+  const ct = mgrState.activeContractor
+  const lics = mgrState.licenses
+  const editId = mgrState.licenseEditId
+  const US_STATES = ['AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA','KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ','NM','NY','NC','ND','OH','OK','OR','PA','PR','RI','SC','SD','TN','TX','UT','VT','VA','WA','WV','WI','WY','DC']
+  return `
+  <div>
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-sm font-semibold text-gray-700">State Licenses</p>
+      <button onclick="mgrOpenAddLicense()" class="btn-primary px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5">
+        <i class="fas fa-plus"></i> Add License
+      </button>
+    </div>
+    ${lics.length === 0 ? `
+      <div class="text-center py-10 text-gray-300">
+        <i class="fas fa-map-marker-alt text-4xl mb-3 block"></i>
+        <p class="text-sm">No licenses on file.</p>
+        <button onclick="mgrOpenAddLicense()" class="mt-3 text-teal-600 hover:underline text-xs font-semibold">+ Add first license</button>
+      </div>` : `
+    <div class="space-y-2">
+      ${lics.map(l => editId === l.id ? `
+      <!-- Inline edit form -->
+      <div class="card p-4 border-2 border-teal-300 bg-teal-50">
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+            <select id="mgrLicState" class="w-full text-sm">
+              ${US_STATES.map(s => `<option value="${s}" ${l.state===s?'selected':''}>${s}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">License #</label>
+            <input id="mgrLicNumber" class="w-full text-sm" value="${escHtml(l.license_number||'')}">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Expiry Date</label>
+            <input id="mgrLicExpiry" type="date" class="w-full text-sm" value="${l.expiry_date||''}">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+            <select id="mgrLicStatus" class="w-full text-sm">
+              <option value="active" ${l.status==='active'?'selected':''}>Active</option>
+              <option value="pending" ${l.status==='pending'?'selected':''}>Pending</option>
+              <option value="expired" ${l.status==='expired'?'selected':''}>Expired</option>
+              <option value="inactive" ${l.status==='inactive'?'selected':''}>Inactive</option>
+            </select>
+          </div>
+        </div>
+        <div class="mb-3">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+          <textarea id="mgrLicNotes" class="w-full text-sm" rows="2">${escHtml(l.notes||'')}</textarea>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="mgrSaveLicense(${l.id})" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Save</button>
+          <button onclick="mgrCancelLicenseEdit()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+          <button onclick="mgrDeleteLicense(${l.id})" class="ml-auto px-3 py-1.5 rounded-lg text-xs font-semibold text-red-500 hover:bg-red-50 border border-red-200">
+            <i class="fas fa-trash mr-1"></i>Delete
+          </button>
+        </div>
+      </div>` : `
+      <!-- License row -->
+      <div class="card p-3 flex items-center gap-3">
+        <div class="w-10 h-10 rounded-lg bg-teal-100 flex items-center justify-center flex-shrink-0">
+          <span class="text-teal-700 font-bold text-xs">${escHtml(l.state||'?')}</span>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-gray-800 text-sm">${escHtml(l.state||'')}</span>
+            ${l.license_number ? `<span class="text-xs text-gray-500 font-mono">#${escHtml(l.license_number)}</span>` : ''}
+            ${mgrLicenseStatusBadge(l.status, l.expiry_date)}
+          </div>
+          ${l.expiry_date ? `<div class="text-xs text-gray-400 mt-0.5"><i class="fas fa-calendar-alt mr-1"></i>Expires ${new Date(l.expiry_date+'T12:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>` : ''}
+          ${l.notes ? `<div class="text-xs text-gray-400 mt-0.5 truncate">${escHtml(l.notes)}</div>` : ''}
+        </div>
+        <button onclick="mgrEditLicense(${l.id})" class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors tooltip" data-tip="Edit">
+          <i class="fas fa-pencil text-xs"></i>
+        </button>
+      </div>`).join('')}
+    </div>`}
+
+    <!-- Add License form (hidden by default) -->
+    <div id="mgrAddLicForm" class="hidden mt-4 card p-4 border-2 border-teal-200 bg-teal-50">
+      <h4 class="text-sm font-bold text-teal-800 mb-3"><i class="fas fa-plus mr-1"></i>Add State License</h4>
+      <div class="grid grid-cols-2 gap-3 mb-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+          <select id="mgrNewLicState" class="w-full text-sm">
+            ${US_STATES.map(s => `<option value="${s}">${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License #</label>
+          <input id="mgrNewLicNumber" class="w-full text-sm" placeholder="Optional">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Expiry Date</label>
+          <input id="mgrNewLicExpiry" type="date" class="w-full text-sm">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select id="mgrNewLicStatus" class="w-full text-sm">
+            <option value="active">Active</option>
+            <option value="pending">Pending</option>
+            <option value="expired">Expired</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="block text-xs font-semibold text-gray-600 mb-1">Notes</label>
+        <textarea id="mgrNewLicNotes" class="w-full text-sm" rows="2" placeholder="Optional notes"></textarea>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="mgrSubmitAddLicense()" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Save License</button>
+        <button onclick="mgrCloseAddLicense()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function mgrRenderDocumentsTab() {
+  const docs = mgrState.documents
+  const ctId = mgrState.activeContractor?.id
+  return `
+  <div>
+    <!-- Upload form -->
+    <div class="mb-4">
+      <div class="flex items-center justify-between mb-2">
+        <p class="text-sm font-semibold text-gray-700">Documents</p>
+        <button onclick="mgrToggleUploadForm()" class="btn-primary px-3 py-1.5 rounded-lg text-xs font-semibold flex items-center gap-1.5">
+          <i class="fas fa-upload"></i> Upload Doc
+        </button>
+      </div>
+      <div id="mgrUploadForm" class="hidden card p-4 border-2 border-blue-200 bg-blue-50 mb-3">
+        <h4 class="text-sm font-bold text-blue-800 mb-3"><i class="fas fa-upload mr-1"></i>Upload Document</h4>
+        <div class="grid grid-cols-2 gap-3 mb-3">
+          <div class="col-span-2">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">File *</label>
+            <input id="mgrDocFile" type="file" class="w-full text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Document Type</label>
+            <select id="mgrDocType" class="w-full text-sm">
+              <option value="contract">Contract</option>
+              <option value="license">License</option>
+              <option value="certificate">Certificate</option>
+              <option value="id">ID / Credential</option>
+              <option value="insurance">Insurance</option>
+              <option value="other">Other</option>
+            </select>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Label (optional)</label>
+            <input id="mgrDocLabel" type="text" class="w-full text-sm" placeholder="e.g. NPI Certificate">
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="mgrSubmitDocument()" class="btn-primary px-4 py-1.5 rounded-lg text-xs font-semibold">Upload</button>
+          <button onclick="mgrToggleUploadForm()" class="px-4 py-1.5 rounded-lg border border-gray-200 text-gray-600 text-xs hover:bg-gray-50">Cancel</button>
+        </div>
+      </div>
+    </div>
+    ${docs.length === 0 ? `
+      <div class="text-center py-8 text-gray-300">
+        <i class="fas fa-folder-open text-4xl mb-3 block"></i>
+        <p class="text-sm">No documents on file.</p>
+      </div>` : `
+    <div class="space-y-2">
+      ${docs.map(d => `
+      <div class="card p-3 flex items-center gap-3 group">
+        <div class="w-9 h-9 rounded-lg bg-blue-100 flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-file text-blue-500 text-xs"></i>
+        </div>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm font-medium text-gray-800 truncate">${escHtml(d.file_name)}</div>
+          <div class="text-xs text-gray-400">${escHtml(d.doc_type||'Document')} · ${d.file_size ? Math.round(d.file_size/1024) + ' KB · ' : ''}${new Date(d.uploaded_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</div>
+        </div>
+        <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition">
+          <a href="/api/manager/contractors/${ctId}/documents/${d.id}/download" target="_blank"
+            class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors" title="Download">
+            <i class="fas fa-download text-xs"></i>
+          </a>
+          <button onclick="mgrDeleteDocument(${d.id})"
+            class="p-2 rounded-lg hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors" title="Delete">
+            <i class="fas fa-trash text-xs"></i>
+          </button>
+        </div>
+      </div>`).join('')}
+    </div>`}
+  </div>`
+}
+
+function mgrToggleUploadForm() {
+  const f = $('mgrUploadForm')
+  if (f) f.classList.toggle('hidden')
+}
+
+async function mgrSubmitDocument() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  const fileInput = $('mgrDocFile')
+  if (!fileInput?.files?.length) { showToast('Please select a file', 'error'); return }
+  const file = fileInput.files[0]
+  const docType = $('mgrDocType')?.value || 'other'
+  const label = $('mgrDocLabel')?.value?.trim() || ''
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    formData.append('doc_type', docType)
+    if (label) formData.append('label', label)
+    const token = localStorage.getItem('lmd_token') || sessionStorage.getItem('lmd_token') || ''
+    const res = await fetch(`/api/manager/contractors/${ct.id}/documents`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${token}` },
+      body: formData
+    })
+    if (!res.ok) { const err = await res.json().catch(() => ({})); throw new Error(err.error || 'Upload failed') }
+    showToast('Document uploaded!', 'success')
+    mgrState.documents = await api(`/api/manager/contractors/${ct.id}/documents`)
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderDocumentsTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+async function mgrDeleteDocument(did) {
+  if (!confirm('Delete this document? This cannot be undone.')) return
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    await api(`/api/manager/contractors/${ct.id}/documents/${did}`, { method: 'DELETE' })
+    showToast('Document deleted.', 'success')
+    mgrState.documents = await api(`/api/manager/contractors/${ct.id}/documents`)
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderDocumentsTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+// ── PROFILE TAB ────────────────────────────────────────────────────────────
+
+function mgrRenderProfileTab() {
+  const ct = mgrState.activeContractor
+  if (!ct) return '<div class="text-gray-400 p-4">No provider selected.</div>'
+  const nameParts = (ct.name || '').split(' ')
+  const firstName = ct.first_name || nameParts[0] || ''
+  const lastName  = ct.last_name  || nameParts.slice(1).join(' ') || ''
+  return `
+  <div>
+    <div class="flex items-center justify-between mb-3">
+      <p class="text-sm font-semibold text-gray-700"><i class="fas fa-user-edit mr-1.5 text-teal-600"></i>Edit Provider Profile</p>
+    </div>
+    <div class="card p-5">
+      <div class="grid grid-cols-2 gap-4 mb-4">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">First Name</label>
+          <input id="mgrProfFirstName" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(firstName)}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Last Name</label>
+          <input id="mgrProfLastName" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(lastName)}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Email</label>
+          <input id="mgrProfEmail" type="email" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.email||'')}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Phone</label>
+          <input id="mgrProfPhone" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.phone||'')}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Specialty</label>
+          <input id="mgrProfSpecialty" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.specialty||'')}">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">NPI</label>
+          <input id="mgrProfNPI" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none font-mono" value="${escHtml(ct.npi||'')}">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">States Licensed <span class="font-normal text-gray-400">(comma-separated, e.g. FL, TX, NY)</span></label>
+          <input id="mgrProfStates" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none" value="${escHtml(ct.states_licensed||'')}">
+        </div>
+        <div class="col-span-2">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Bio / Notes</label>
+          <textarea id="mgrProfBio" rows="3" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-teal-300 outline-none resize-none">${escHtml(ct.bio||'')}</textarea>
+        </div>
+      </div>
+      <div class="flex items-center gap-3">
+        <button onclick="mgrSaveProfile()" id="mgrProfSaveBtn" class="btn-primary px-5 py-2 rounded-lg text-sm font-semibold">
+          <i class="fas fa-save mr-1.5"></i>Save Changes
+        </button>
+        <span id="mgrProfSaveStatus" class="text-xs text-gray-400"></span>
+      </div>
+    </div>
+  </div>`
+}
+
+async function mgrSaveProfile() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  const btn = $('mgrProfSaveBtn')
+  const status = $('mgrProfSaveStatus')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Saving…' }
+  if (status) { status.textContent = ''; status.className = 'text-xs text-gray-400' }
+  try {
+    await api(`/api/manager/contractors/${ct.id}/profile`, {
+      method: 'PUT',
+      body: JSON.stringify({
+        first_name:      $('mgrProfFirstName')?.value?.trim() || '',
+        last_name:       $('mgrProfLastName')?.value?.trim()  || '',
+        email:           $('mgrProfEmail')?.value?.trim()     || '',
+        phone:           $('mgrProfPhone')?.value?.trim()     || '',
+        specialty:       $('mgrProfSpecialty')?.value?.trim() || '',
+        npi:             $('mgrProfNPI')?.value?.trim()       || '',
+        states_licensed: $('mgrProfStates')?.value?.trim()    || '',
+        bio:             $('mgrProfBio')?.value?.trim()        || '',
+      })
+    })
+    // Refresh contractor data in mgrState
+    const contractors = await api('/api/manager/contractors')
+    const updated = (contractors || []).find(c => c.id === ct.id)
+    if (updated) mgrState.activeContractor = updated
+    showToast('Profile saved!', 'success')
+    if (status) { status.textContent = '✓ Saved'; status.className = 'text-xs text-emerald-600' }
+    setTimeout(() => { if (status) status.textContent = '' }, 3000)
+  } catch(e) {
+    showToast('Save failed: ' + e.message, 'error')
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save mr-1.5"></i>Save Changes' }
+  }
+}
+
+// License CRUD helpers
+function mgrEditLicense(id) {
+  mgrState.licenseEditId = id
+  const content = $('mgrTabContent')
+  if (content) content.innerHTML = mgrRenderLicensesTab()
+}
+function mgrCancelLicenseEdit() {
+  mgrState.licenseEditId = null
+  const content = $('mgrTabContent')
+  if (content) content.innerHTML = mgrRenderLicensesTab()
+}
+async function mgrSaveLicense(id) {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    const body = {
+      state: $('mgrLicState').value,
+      license_number: $('mgrLicNumber').value.trim() || null,
+      expiry_date: $('mgrLicExpiry').value || null,
+      status: $('mgrLicStatus').value,
+      notes: $('mgrLicNotes').value.trim() || null,
+    }
+    await api(`/api/manager/contractors/${ct.id}/licenses/${id}`, { method: 'PUT', body: JSON.stringify(body) })
+    showToast('License updated!', 'success')
+    mgrState.licenses = await api(`/api/manager/contractors/${ct.id}/licenses`)
+    mgrState.licenseEditId = null
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderLicensesTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+async function mgrDeleteLicense(id) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  const ct = mgrState.activeContractor
+  try {
+    await api(`/api/manager/contractors/${ct.id}/licenses/${id}`, { method: 'DELETE' })
+    showToast('License deleted.', 'success')
+    mgrState.licenses = await api(`/api/manager/contractors/${ct.id}/licenses`)
+    mgrState.licenseEditId = null
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderLicensesTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+function mgrOpenAddLicense() {
+  const form = $('mgrAddLicForm')
+  if (form) form.classList.remove('hidden')
+}
+function mgrCloseAddLicense() {
+  const form = $('mgrAddLicForm')
+  if (form) form.classList.add('hidden')
+}
+async function mgrSubmitAddLicense() {
+  const ct = mgrState.activeContractor
+  if (!ct) return
+  try {
+    const body = {
+      state: $('mgrNewLicState').value,
+      license_number: $('mgrNewLicNumber').value.trim() || null,
+      expiry_date: $('mgrNewLicExpiry').value || null,
+      status: $('mgrNewLicStatus').value,
+      notes: $('mgrNewLicNotes').value.trim() || null,
+    }
+    await api(`/api/manager/contractors/${ct.id}/licenses`, { method: 'POST', body: JSON.stringify(body) })
+    showToast('License added!', 'success')
+    mgrState.licenses = await api(`/api/manager/contractors/${ct.id}/licenses`)
+    mgrCloseAddLicense()
+    const content = $('mgrTabContent')
+    if (content) content.innerHTML = mgrRenderLicensesTab()
+  } catch(e) { showToast(e.message, 'error') }
+}
+
+// ── Licenses Overview Page ─────────────────────────────────────────
+async function renderMgrLicenses() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/manager/licenses-overview')
+    mgrState.licensesOverview = data || []
+    mgrDrawLicensesOverview()
+  } catch(e) {
+    mc.innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrDrawLicensesOverview() {
+  const mc = $('mainContent')
+  const all = mgrState.licensesOverview
+  const now = new Date()
+
+  // Categorise
+  const expired  = all.filter(l => l.expiry_date && new Date(l.expiry_date) < now && l.status === 'active')
+  const soon     = all.filter(l => {
+    if (!l.expiry_date || l.status !== 'active') return false
+    const d = new Date(l.expiry_date); const days = Math.ceil((d - now)/86400000)
+    return days >= 0 && days <= 60
+  })
+  const ok       = all.filter(l => {
+    if (!l.expiry_date || l.status !== 'active') return false
+    return Math.ceil((new Date(l.expiry_date) - now)/86400000) > 60
+  })
+  const noExpiry = all.filter(l => !l.expiry_date || l.status !== 'active')
+
+  function licCard(l) {
+    const exp = l.expiry_date ? new Date(l.expiry_date+'T12:00:00') : null
+    const daysLeft = exp ? Math.ceil((exp - now)/86400000) : null
+    let borderCls = 'border-gray-100'
+    if (daysLeft !== null && daysLeft < 0) borderCls = 'border-red-200 bg-red-50'
+    else if (daysLeft !== null && daysLeft <= 60) borderCls = 'border-amber-200 bg-amber-50'
+    return `
+    <div class="card border ${borderCls} p-3 flex items-center gap-3">
+      <div class="w-10 h-10 rounded-lg bg-teal-100 flex items-center justify-center flex-shrink-0">
+        <span class="text-teal-700 font-bold text-xs">${escHtml(l.state||'?')}</span>
+      </div>
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="font-semibold text-gray-800 text-sm">${escHtml(l.contractor_name||'')}</span>
+          <span class="text-xs text-gray-500">· ${escHtml(l.state||'')}</span>
+          ${l.license_number ? `<span class="text-xs text-gray-400 font-mono">#${escHtml(l.license_number)}</span>` : ''}
+          ${mgrLicenseStatusBadge(l.status, l.expiry_date)}
+        </div>
+        ${exp ? `<div class="text-xs text-gray-400 mt-0.5"><i class="fas fa-calendar-alt mr-1"></i>${daysLeft !== null && daysLeft < 0 ? 'Expired' : 'Expires'} ${exp.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}${daysLeft !== null && daysLeft >= 0 ? ` (${daysLeft}d)` : ''}</div>` : ''}
+      </div>
+      <button onclick="mgrGoToContractorLicenses(${l.contractor_id})" class="p-2 rounded-lg hover:bg-gray-100 text-gray-400 hover:text-gray-600 transition-colors tooltip" data-tip="Manage licenses">
+        <i class="fas fa-arrow-right text-xs"></i>
+      </button>
+    </div>`
+  }
+
+  mc.innerHTML = `
+  <div class="max-w-3xl">
+    <div class="mb-5">
+      <h2 class="text-xl font-bold text-gray-800">License Dashboard</h2>
+      <p class="text-sm text-gray-400 mt-0.5">${all.length} license${all.length!==1?'s':''} across all contractors</p>
+    </div>
+
+    <!-- Summary strip -->
+    <div class="grid grid-cols-3 gap-3 mb-6">
+      <div class="card p-4 text-center ${expired.length ? 'border-2 border-red-200 bg-red-50' : ''}">
+        <div class="text-2xl font-bold ${expired.length ? 'text-red-600' : 'text-gray-300'}">${expired.length}</div>
+        <div class="text-xs font-semibold text-gray-500 mt-0.5">Expired</div>
+      </div>
+      <div class="card p-4 text-center ${soon.length ? 'border-2 border-amber-200 bg-amber-50' : ''}">
+        <div class="text-2xl font-bold ${soon.length ? 'text-amber-600' : 'text-gray-300'}">${soon.length}</div>
+        <div class="text-xs font-semibold text-gray-500 mt-0.5">Expiring ≤60 days</div>
+      </div>
+      <div class="card p-4 text-center">
+        <div class="text-2xl font-bold text-green-600">${ok.length}</div>
+        <div class="text-xs font-semibold text-gray-500 mt-0.5">Current</div>
+      </div>
+    </div>
+
+    ${expired.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-red-600 mb-2 flex items-center gap-2"><i class="fas fa-exclamation-circle"></i>Expired (${expired.length})</h3>
+      <div class="space-y-2">${expired.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${soon.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-amber-600 mb-2 flex items-center gap-2"><i class="fas fa-clock"></i>Expiring Soon — within 60 days (${soon.length})</h3>
+      <div class="space-y-2">${soon.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${ok.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-green-700 mb-2 flex items-center gap-2"><i class="fas fa-check-circle"></i>Current (${ok.length})</h3>
+      <div class="space-y-2">${ok.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${noExpiry.length ? `
+    <div class="mb-5">
+      <h3 class="text-sm font-bold text-gray-500 mb-2 flex items-center gap-2"><i class="fas fa-minus-circle"></i>No Expiry / Inactive (${noExpiry.length})</h3>
+      <div class="space-y-2">${noExpiry.map(licCard).join('')}</div>
+    </div>` : ''}
+
+    ${all.length === 0 ? `<div class="card p-10 text-center text-gray-300"><i class="fas fa-map-marker-alt text-5xl mb-3 block"></i><p class="text-sm">No licenses found across your contractors.</p></div>` : ''}
+  </div>`
+}
+
+async function mgrGoToContractorLicenses(contractorId) {
+  navigate('mgr_contractors')
+  await mgrSelectContractor(contractorId)
+  mgrSetTab('licenses')
+}
+
+// ── Consults Page ──────────────────────────────────────────────────
+async function renderMgrConsults() {
+  mgrState.consultsPage = 1
+  mgrState.consultsSearch = ''
+  mgrState.consultsShowNames = false
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  await mgrFetchConsults()
+}
+
+async function mgrFetchConsults() {
+  try {
+    const params = new URLSearchParams({ page: mgrState.consultsPage, search: mgrState.consultsSearch })
+    const data = await api(`/api/manager/consults?${params}`)
+    mgrState.consults = data.rows || []
+    mgrState.consultsTotal = data.total || 0
+    mgrDrawConsults()
+  } catch(e) {
+    $('mainContent').innerHTML = `<div class="card p-6 text-red-500 text-sm">${escHtml(e.message)}</div>`
+  }
+}
+
+function mgrMaskName(name) {
+  if (mgrState.consultsShowNames) return name || ''
+  const words = (name || '').trim().split(/\s+/).filter(Boolean)
+  if (!words.length) return '—'
+  return words.map(w => w[0].toUpperCase() + '.').join('')
+}
+
+function mgrToggleNames() {
+  if (mgrState.consultsShowNames) {
+    mgrState.consultsShowNames = false
+    mgrDrawConsults()
+    return
+  }
+  $('mgrHipaaModal').classList.remove('hidden')
+}
+
+function mgrConfirmShowNames() {
+  $('mgrHipaaModal').classList.add('hidden')
+  mgrState.consultsShowNames = true
+  mgrDrawConsults()
+}
+
+function mgrDrawConsults() {
+  const mc = $('mainContent')
+  const rows = mgrState.consults
+  const total = mgrState.consultsTotal
+  const page = mgrState.consultsPage
+  const perPage = 25
+  const totalPages = Math.max(1, Math.ceil(total / perPage))
+  const showing = mgrState.consultsShowNames
+
+  mc.innerHTML = `
+  <!-- HIPAA modal -->
+  <div id="mgrHipaaModal" class="hidden fixed inset-0 bg-black/60 z-[60] flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl max-w-sm w-full p-6">
+      <div class="text-center mb-4">
+        <div class="w-14 h-14 rounded-full bg-amber-100 flex items-center justify-center mx-auto mb-3">
+          <i class="fas fa-shield-alt text-amber-500 text-2xl"></i>
+        </div>
+        <h3 class="font-bold text-gray-800 text-lg">HIPAA Notice</h3>
+        <p class="text-gray-500 text-sm mt-2">Patient names are protected health information. Only reveal them when operationally necessary.</p>
+      </div>
+      <div class="flex gap-3">
+        <button onclick="$('mgrHipaaModal').classList.add('hidden')" class="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+        <button onclick="mgrConfirmShowNames()" class="flex-1 px-4 py-2.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold">Show Names</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="max-w-5xl">
+    <div class="flex flex-wrap items-center justify-between gap-3 mb-4">
+      <div>
+        <h2 class="text-xl font-bold text-gray-800">Consult Records</h2>
+        <p class="text-sm text-gray-400 mt-0.5">${total.toLocaleString()} record${total!==1?'s':''}</p>
+      </div>
+      <div class="flex items-center gap-2">
+        <input type="text" id="mgrConsultSearch" placeholder="Search case ID, org, doctor…"
+          class="text-sm border border-gray-200 rounded-xl px-3 py-2 w-48 focus:outline-none focus:border-teal-400"
+          value="${escHtml(mgrState.consultsSearch)}"
+          oninput="mgrDebounceConsults(this.value)">
+        <button onclick="mgrToggleNames()" id="mgrNamesBtn"
+          class="flex items-center gap-1 px-3 py-2 rounded-xl text-sm font-medium border-2 transition whitespace-nowrap ${showing ? 'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100' : 'border-gray-200 text-gray-600 bg-white hover:bg-gray-50'}">
+          <i class="fas ${showing ? 'fa-eye-slash' : 'fa-eye'} mr-1.5"></i>${showing ? 'Hide Names' : 'Show Names'}
+        </button>
+      </div>
+    </div>
+
+    ${rows.length === 0 ? `
+      <div class="card p-10 text-center text-gray-300">
+        <i class="fas fa-table text-5xl mb-3 block"></i>
+        <p class="text-sm">No consult records found.</p>
+      </div>` : `
+    <div class="card overflow-hidden mb-4">
+      <div class="overflow-x-auto">
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-100 text-left">
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Case ID</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Patient</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Doctor</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Organization</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Visit</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Decision</th>
+              <th class="px-3 py-3 text-xs font-semibold text-gray-500 uppercase tracking-wider">Date</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+            <tr class="border-b border-gray-50 table-row">
+              <td class="px-3 py-3 font-mono text-xs text-gray-500">${escHtml(r.case_id||'')}</td>
+              <td class="px-3 py-3 text-gray-800 font-medium">${escHtml(mgrMaskName(r.patient_name))}</td>
+              <td class="px-3 py-3 text-gray-600">${escHtml(r.doctor_name||'')}</td>
+              <td class="px-3 py-3 text-gray-600 text-xs">${escHtml(r.organization||'')}</td>
+              <td class="px-3 py-3 text-xs">${escHtml(r.visit_type||'')}</td>
+              <td class="px-3 py-3 text-xs">
+                ${r.decision_status ? `<span class="px-2 py-0.5 rounded-full text-xs font-semibold ${r.decision_status==='approved'?'bg-green-100 text-green-700':r.decision_status==='denied'?'bg-red-100 text-red-700':'bg-gray-100 text-gray-600'}">${escHtml(r.decision_status)}</span>` : '—'}
+              </td>
+              <td class="px-3 py-3 text-gray-500 text-xs">${r.decision_date ? new Date(r.decision_date).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'}</td>
+            </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Pagination -->
+    ${totalPages > 1 ? `
+    <div class="flex items-center justify-between text-sm text-gray-500">
+      <span>Page ${page} of ${totalPages}</span>
+      <div class="flex gap-2">
+        <button onclick="mgrConsultsGoPage(${page-1})" ${page<=1?'disabled':''} class="px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+          <i class="fas fa-chevron-left text-xs"></i>
+        </button>
+        <button onclick="mgrConsultsGoPage(${page+1})" ${page>=totalPages?'disabled':''} class="px-3 py-1.5 rounded-lg border border-gray-200 hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed">
+          <i class="fas fa-chevron-right text-xs"></i>
+        </button>
+      </div>
+    </div>` : ''}
+    `}
+  </div>`
+}
+
+let _mgrConsultSearchTimer = null
+function mgrDebounceConsults(val) {
+  clearTimeout(_mgrConsultSearchTimer)
+  _mgrConsultSearchTimer = setTimeout(() => {
+    mgrState.consultsSearch = val.trim()
+    mgrState.consultsPage = 1
+    mgrFetchConsults()
+  }, 350)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// LICENSING DASHBOARD  (admin + license_editor)
+// ════════════════════════════════════════════════════════════════════
+
+const US_STATES_ABBR = [
+  'AL','AK','AZ','AR','CA','CO','CT','DE','FL','GA','HI','ID','IL','IN','IA',
+  'KS','KY','LA','ME','MD','MA','MI','MN','MS','MO','MT','NE','NV','NH','NJ',
+  'NM','NY','NC','ND','OH','OK','OR','PA','PR','RI','SC','SD','TN','TX','UT','VT',
+  'VA','WA','WV','WI','WY','DC'
+]
+
+
+// ════════════════════════════════════════════════════
+// LICENSING DASHBOARD — admin + license_editor views
+// ════════════════════════════════════════════════════
+
+const licState = {
+  contractors: [],
+  licenses: [],
+  view: 'matrix',       // 'matrix' | 'collab' | 'provider'
+  filterStatus: 'all',  // 'all'|'active'|'pending'|'expired'|'cpa'
+  filterProvider: '',
+  filterState: '',
+  filterCpaOnly: false, // matrix: show only states with CPA issues
+  pinnedStates: [],     // matrix: manually pinned state columns (empty = show all)
+}
+
+// ════════════════════════════════════════════════════════════════════
+// LICENSE IMPORT — template download + Excel upload for admin & provider
+// ════════════════════════════════════════════════════════════════════
+
+// ── Download a pre-filled template ───────────────────────────────
+// mode: 'admin' uses licState data; 'provider' fetches own licenses
+async function licDownloadTemplate(mode) {
+  const COLUMNS = ['state','license_number','license_type','expiry_date','status',
+                   'notes','collab_physician','collab_expiry','permitted_actions','practice_type']
+  const HEADERS = ['State','License #','License Type','Expiry Date (YYYY-MM-DD)','Status (active/pending/expired)',
+                   'Notes','Collab Physician','Collab Expiry (YYYY-MM-DD)','Permitted Actions','Practice Type']
+
+  let rows = []
+  let filename = ''
+
+  if (mode === 'admin') {
+    // Admin: pre-fill ALL existing licenses, add contractor_id column
+    const licenses = licState.licenses || []
+    const contractors = licState.contractors || []
+    const nameMap = {}
+    for (const c of contractors) nameMap[c.id] = c.name
+    rows = licenses
+      .sort((a,b) => (nameMap[a.contractor_id]||'').localeCompare(nameMap[b.contractor_id]||''))
+      .map(l => ({
+        'contractor_id':    l.contractor_id,
+        'Provider Name':    nameMap[l.contractor_id] || '(unknown)',
+        'State':            l.state || '',
+        'License #':        l.license_number || '',
+        'License Type':     l.license_type || '',
+        'Expiry Date (YYYY-MM-DD)': l.expiry_date || '',
+        'Status (active/pending/expired)': l.status || 'active',
+        'Notes':            l.notes || '',
+        'Collab Physician': l.collab_physician || '',
+        'Collab Expiry (YYYY-MM-DD)': l.collab_expiry || '',
+        'Permitted Actions':l.permitted_actions || '',
+        'Practice Type':    l.practice_type || '',
+      }))
+    // Add blank row as example if empty
+    if (!rows.length) rows.push({
+      'contractor_id': '(required - numeric ID)',
+      'Provider Name': '(for reference only)',
+      'State': 'TX', 'License #': '', 'License Type': 'NP',
+      'Expiry Date (YYYY-MM-DD)': '2027-01-01',
+      'Status (active/pending/expired)': 'active',
+      'Notes': '', 'Collab Physician': '', 'Collab Expiry (YYYY-MM-DD)': '',
+      'Permitted Actions': '', 'Practice Type': ''
+    })
+    filename = `LionMD_License_Import_Template_Admin_${new Date().toISOString().slice(0,10)}.xlsx`
+  } else {
+    // Provider: fetch their own licenses
+    let existingLicenses = []
+    try {
+      existingLicenses = await api('/api/provider/licenses')
+    } catch(e) {}
+    rows = existingLicenses.length
+      ? existingLicenses.map(l => ({
+          'State':            l.state || '',
+          'License #':        l.license_number || '',
+          'License Type':     l.license_type || '',
+          'Expiry Date (YYYY-MM-DD)': l.expiry_date || '',
+          'Status (active/pending/expired)': l.status || 'active',
+          'Notes':            l.notes || '',
+          'Collab Physician': l.collab_physician || '',
+          'Collab Expiry (YYYY-MM-DD)': l.collab_expiry || '',
+          'Permitted Actions':l.permitted_actions || '',
+          'Practice Type':    l.practice_type || '',
+        }))
+      : [{ 'State':'TX','License #':'','License Type':'NP',
+           'Expiry Date (YYYY-MM-DD)':'2027-01-01',
+           'Status (active/pending/expired)':'active',
+           'Notes':'','Collab Physician':'','Collab Expiry (YYYY-MM-DD)':'',
+           'Permitted Actions':'','Practice Type':'' }]
+    filename = `LionMD_My_Licenses_Template_${new Date().toISOString().slice(0,10)}.xlsx`
+  }
+
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.json_to_sheet(rows)
+  // Set column widths
+  ws['!cols'] = mode === 'admin'
+    ? [{wch:14},{wch:22},{wch:8},{wch:18},{wch:16},{wch:28},{wch:28},{wch:30},{wch:22},{wch:28},{wch:22},{wch:16}]
+    : [{wch:8},{wch:18},{wch:16},{wch:28},{wch:28},{wch:30},{wch:22},{wch:28},{wch:22},{wch:16}]
+
+  // Add Instructions sheet
+  const instructions = [
+    { 'Instructions': '── LionMD License Import Template ──' },
+    { 'Instructions': 'Fill in each row. One row = one license per state.' },
+    { 'Instructions': 'State: 2-letter code (e.g. TX, CA, NY)' },
+    { 'Instructions': 'Status: must be "active", "pending", or "expired"' },
+    { 'Instructions': 'Dates: use YYYY-MM-DD format (e.g. 2027-06-30)' },
+    { 'Instructions': mode === 'admin' ? 'contractor_id: required numeric ID — do not change' : 'Do NOT add a contractor_id column — import is locked to your account' },
+    { 'Instructions': 'Existing licenses (same State) will be UPDATED. New states will be INSERTED.' },
+    { 'Instructions': 'Delete rows you do NOT want to change.' },
+  ]
+  const wsInstr = XLSX.utils.json_to_sheet(instructions)
+  wsInstr['!cols'] = [{wch:70}]
+  XLSX.utils.book_append_sheet(wb, ws, 'Licenses')
+  XLSX.utils.book_append_sheet(wb, wsInstr, 'Instructions')
+  XLSX.writeFile(wb, filename)
+  showToast('Template downloaded — fill it in and use Import to upload', 'success')
+}
+
+// ── Open import modal ─────────────────────────────────────────────
+function licOpenImport(mode) {
+  // Remove any existing modal
+  const existing = document.getElementById('licImportModal')
+  if (existing) existing.remove()
+
+  const modal = document.createElement('div')
+  modal.id = 'licImportModal'
+  modal.className = 'fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4'
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+      <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100">
+        <div>
+          <h3 class="font-bold text-gray-800 text-base">Import Licenses from Excel</h3>
+          <p class="text-xs text-gray-400 mt-0.5">Upload a filled template. Existing licenses (matched by State) will be updated.</p>
+        </div>
+        <button id="licImportCloseBtn" class="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
+      </div>
+      <div class="px-6 py-5 flex-1 overflow-y-auto">
+        <!-- Step 1: file picker -->
+        <div id="licImportStep1">
+          <label class="flex flex-col items-center justify-center border-2 border-dashed border-gray-200 rounded-xl p-8 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition" for="licImportFileInput">
+            <i class="fas fa-file-excel text-4xl text-gray-300 mb-3"></i>
+            <p class="text-sm font-semibold text-gray-600">Click to select your filled template</p>
+            <p class="text-xs text-gray-400 mt-1">.xlsx files only</p>
+          </label>
+          <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden">
+          <p class="text-xs text-gray-400 mt-3 text-center">
+            Don't have a template? 
+            <button id="licImportTplBtn" class="text-indigo-600 underline">Download one first</button>
+          </p>
+        </div>
+        <!-- Step 2: preview (populated by licParseImportFile) -->
+        <div id="licImportStep2" class="hidden"></div>
+      </div>
+    </div>`
+  document.body.appendChild(modal)
+
+  // Wire all listeners after DOM insertion to avoid inline-handler scope issues
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  document.getElementById('licImportCloseBtn').addEventListener('click', () => modal.remove())
+  document.getElementById('licImportTplBtn').addEventListener('click', () => licDownloadTemplate(mode))
+  document.getElementById('licImportFileInput').addEventListener('change', function() {
+    if (this.files && this.files[0]) licParseImportFile(this.files[0], mode)
+  })
+}
+
+// ── Parse the uploaded file and show preview ─────────────────────
+async function licParseImportFile(file, mode) {
+  if (!file) return
+  const step2 = document.getElementById('licImportStep2')
+  const step1 = document.getElementById('licImportStep1')
+
+  step1.innerHTML = `<div class="flex justify-center py-4"><div class="spinner"></div></div>`
+  step2.classList.add('hidden')
+
+  try {
+    const buffer = await file.arrayBuffer()
+    const wb = XLSX.read(buffer, { type: 'array' })
+    // Use 'Licenses' sheet if present, else first sheet
+    const sheetName = wb.SheetNames.includes('Licenses') ? 'Licenses' : wb.SheetNames[0]
+    const ws = wb.Sheets[sheetName]
+    const rawRows = XLSX.utils.sheet_to_json(ws, { raw: false, defval: '' })
+
+    if (!rawRows.length) { showToast('No data rows found in file', 'warning'); return }
+
+    // Normalize column names (case-insensitive, trim)
+    const norm = (row) => {
+      const out = {}
+      for (const [k, v] of Object.entries(row)) out[k.trim()] = v
+      return out
+    }
+    const rows = rawRows.map(norm)
+
+    // Map friendly column names to internal keys
+    const mapRow = (r) => ({
+      contractor_id:    r['contractor_id'] || r['Contractor ID'] || '',
+      state:            (r['State'] || r['state'] || '').trim().toUpperCase(),
+      license_number:   r['License #'] || r['license_number'] || r['License Number'] || '',
+      license_type:     r['License Type'] || r['license_type'] || '',
+      expiry_date:      r['Expiry Date (YYYY-MM-DD)'] || r['Expiry Date'] || r['expiry_date'] || '',
+      status:           (r['Status (active/pending/expired)'] || r['Status'] || r['status'] || 'active').toLowerCase(),
+      notes:            r['Notes'] || r['notes'] || '',
+      collab_physician: r['Collab Physician'] || r['collab_physician'] || '',
+      collab_expiry:    r['Collab Expiry (YYYY-MM-DD)'] || r['Collab Expiry'] || r['collab_expiry'] || '',
+      permitted_actions:r['Permitted Actions'] || r['permitted_actions'] || '',
+      practice_type:    r['Practice Type'] || r['practice_type'] || '',
+    })
+
+    const mapped = rows.map(mapRow).filter(r => r.state && r.state.length === 2)
+    const skipped = rows.length - mapped.length
+
+    if (!mapped.length) { showToast('No valid rows found — check State column (2-letter code required)', 'warning'); return }
+
+    // Build preview table
+    const previewHtml = `
+      <div class="mb-3 flex items-center justify-between">
+        <p class="text-sm font-semibold text-gray-700">${mapped.length} row${mapped.length!==1?'s':''} ready to import${skipped ? ` <span class="text-orange-500">(${skipped} skipped — missing State)</span>` : ''}</p>
+        <span class="text-xs text-gray-400">${file.name}</span>
+      </div>
+      <div class="overflow-x-auto rounded-xl border border-gray-100 mb-4">
+        <table class="w-full text-xs">
+          <thead class="bg-gray-50">
+            <tr>
+              ${mode === 'admin' ? '<th class="px-2 py-2 text-left font-semibold text-gray-500">CID</th>' : ''}
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">State</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">License #</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">Type</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">Expiry</th>
+              <th class="px-2 py-2 text-left font-semibold text-gray-500">Status</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            ${mapped.map(r => `
+              <tr class="hover:bg-gray-50">
+                ${mode === 'admin' ? `<td class="px-2 py-1.5 text-gray-400">${r.contractor_id||'—'}</td>` : ''}
+                <td class="px-2 py-1.5 font-semibold text-gray-800">${r.state}</td>
+                <td class="px-2 py-1.5 text-gray-600">${r.license_number||'—'}</td>
+                <td class="px-2 py-1.5 text-gray-500">${r.license_type||'—'}</td>
+                <td class="px-2 py-1.5 text-gray-500">${r.expiry_date||'—'}</td>
+                <td class="px-2 py-1.5">
+                  <span class="px-1.5 py-0.5 rounded-full text-xs font-semibold ${r.status==='active'?'bg-green-100 text-green-700':r.status==='expired'?'bg-red-100 text-red-700':'bg-yellow-100 text-yellow-700'}">
+                    ${r.status}
+                  </span>
+                </td>
+              </tr>`).join('')}
+          </tbody>
+        </table>
+      </div>
+      ${mode === 'admin' && mapped.some(r => !r.contractor_id) ? `
+        <div class="mb-3 p-3 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-700">
+          <i class="fas fa-exclamation-triangle mr-1"></i>
+          Some rows are missing <strong>contractor_id</strong> — those rows will be skipped. Use the admin template to get pre-filled IDs.
+        </div>` : ''}
+      <div class="flex gap-3 justify-end">
+        <button id="licImportCancelBtn" class="px-4 py-2 rounded-xl border border-gray-200 text-sm text-gray-600 hover:bg-gray-50">Cancel</button>
+        <button id="licImportSubmitBtn"
+          class="btn-primary px-5 py-2 rounded-xl text-sm font-semibold flex items-center gap-2">
+          <i class="fas fa-upload"></i> Import ${mapped.length} License${mapped.length!==1?'s':''}
+        </button>
+      </div>`
+
+    step1.classList.add('hidden')
+    step2.classList.remove('hidden')
+    step2.innerHTML = previewHtml
+
+    // Wire buttons via addEventListener — avoids inline onclick/JSON.stringify issues
+    document.getElementById('licImportCancelBtn').addEventListener('click', () => document.getElementById('licImportModal')?.remove())
+    document.getElementById('licImportSubmitBtn').addEventListener('click', () => licSubmitImport(mapped, mode))
+
+  } catch(e) {
+    showToast('Error reading file: ' + e.message, 'error')
+    step1.innerHTML = `<label class="flex flex-col items-center justify-center border-2 border-dashed border-gray-200 rounded-xl p-8 cursor-pointer hover:border-indigo-400 hover:bg-indigo-50 transition" for="licImportFileInput">
+      <i class="fas fa-file-excel text-4xl text-gray-300 mb-3"></i>
+      <p class="text-sm font-semibold text-gray-600">Click to select your filled template</p>
+      <p class="text-xs text-gray-400 mt-1">.xlsx files only</p>
+    </label>
+    <input type="file" id="licImportFileInput" accept=".xlsx,.xls" class="hidden">`
+    document.getElementById('licImportFileInput').addEventListener('change', function() {
+      if (this.files && this.files[0]) licParseImportFile(this.files[0], mode)
+    })
+  }
+}
+
+// ── Submit the import to the backend ─────────────────────────────
+async function licSubmitImport(rows, mode) {
+  const btn = document.getElementById('licImportSubmitBtn')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<div class="spinner-sm mr-2"></div> Importing…' }
+
+  const endpoint = mode === 'admin' ? '/api/admin/licenses/import' : '/api/provider/licenses/import'
+  try {
+    const result = await api(endpoint, { method: 'POST', body: JSON.stringify({ rows }) })
+    document.getElementById('licImportModal')?.remove()
+
+    const parts = []
+    if (result.inserted) parts.push(`${result.inserted} added`)
+    if (result.updated)  parts.push(`${result.updated} updated`)
+    if (result.skipped)  parts.push(`${result.skipped} skipped`)
+    showToast(`Import complete — ${parts.join(', ')}`, 'success')
+
+    // Refresh the view
+    if (mode === 'admin') {
+      await renderLicDashboard()
+    } else {
+      await renderProviderLicenses()
+    }
+  } catch(e) {
+    showToast('Import failed: ' + e.message, 'error')
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-upload"></i> Retry' }
+  }
+}
+
+// ── Export: By Provider (one row per license, grouped by provider) ─
+function licExportByProvider() {
+  const licenses = licState.licenses || []
+  const contractors = licState.contractors || []
+  if (!licenses.length) { showToast('No license data loaded', 'warning'); return }
+
+  // Build contractor id → name map
+  const nameMap = {}
+  for (const c of contractors) nameMap[c.id] = c.name
+
+  // Sort by provider name then state
+  const sorted = [...licenses].sort((a, b) => {
+    const na = (nameMap[a.contractor_id] || '').toLowerCase()
+    const nb = (nameMap[b.contractor_id] || '').toLowerCase()
+    return na !== nb ? na.localeCompare(nb) : (a.state || '').localeCompare(b.state || '')
+  })
+
+  const rows = sorted.map(l => ({
+    'Provider':            nameMap[l.contractor_id] || l.contractor_id,
+    'State':               l.state || '',
+    'License Type':        l.license_type || '',
+    'License #':           l.license_number || '',
+    'Status':              l.status || '',
+    'Expiry Date':         l.expiry_date || '',
+    'Collab Physician':    l.collab_physician || '',
+    'Collab Expiry':       l.collab_expiry || '',
+    'Permitted Actions':   l.permitted_actions || '',
+    'Practice Type':       l.practice_type || '',
+    'Notes':               l.notes || '',
+  }))
+
+  const wb = XLSX.utils.book_new()
+  const ws = XLSX.utils.json_to_sheet(rows)
+
+  // Column widths
+  ws['!cols'] = [
+    { wch: 22 }, { wch: 8 }, { wch: 18 }, { wch: 18 }, { wch: 12 },
+    { wch: 14 }, { wch: 24 }, { wch: 14 }, { wch: 22 }, { wch: 16 }, { wch: 30 }
+  ]
+
+  XLSX.utils.book_append_sheet(wb, ws, 'Licenses by Provider')
+  const date = new Date().toISOString().slice(0, 10)
+  XLSX.writeFile(wb, `LionMD_Licenses_ByProvider_${date}.xlsx`)
+  showToast('Exported: Licenses by Provider', 'success')
+}
+
+// ── Export: Full Dashboard (multi-sheet Excel) ─────────────────────
+function licExportFullDashboard() {
+  const licenses = licState.licenses || []
+  const contractors = licState.contractors || []
+  if (!licenses.length) { showToast('No license data loaded', 'warning'); return }
+
+  const nameMap = {}
+  const roleMap = {}
+  for (const c of contractors) { nameMap[c.id] = c.name; roleMap[c.id] = c.role_group || '' }
+
+  const now = new Date()
+  const inDays = (d, days) => { if (!d) return false; const x = new Date(d); return x > now && x < new Date(now.getTime() + days * 86400000) }
+  const isPast = d => d && new Date(d) < now
+
+  const wb = XLSX.utils.book_new()
+  const date = new Date().toISOString().slice(0, 10)
+
+  // ── Sheet 1: All Licenses ─────────────────────────────────────────
+  const allRows = [...licenses]
+    .sort((a, b) => (nameMap[a.contractor_id] || '').localeCompare(nameMap[b.contractor_id] || ''))
+    .map(l => ({
+      'Provider':          nameMap[l.contractor_id] || '',
+      'Role Group':        roleMap[l.contractor_id] || '',
+      'State':             l.state || '',
+      'License Type':      l.license_type || '',
+      'License #':         l.license_number || '',
+      'Status':            l.status || '',
+      'Expiry Date':       l.expiry_date || '',
+      'Days to Expiry':    l.expiry_date ? Math.ceil((new Date(l.expiry_date) - now) / 86400000) : '',
+      'Collab Physician':  l.collab_physician || '',
+      'Collab Expiry':     l.collab_expiry || '',
+      'Permitted Actions': l.permitted_actions || '',
+      'Practice Type':     l.practice_type || '',
+      'Notes':             l.notes || '',
+    }))
+  const ws1 = XLSX.utils.json_to_sheet(allRows)
+  ws1['!cols'] = [
+    {wch:22},{wch:14},{wch:8},{wch:18},{wch:18},{wch:12},
+    {wch:14},{wch:14},{wch:24},{wch:14},{wch:22},{wch:16},{wch:30}
+  ]
+  XLSX.utils.book_append_sheet(wb, ws1, 'All Licenses')
+
+  // ── Sheet 2: Expiring ≤60 days ────────────────────────────────────
+  const expiringRows = allRows.filter(r => typeof r['Days to Expiry'] === 'number' && r['Days to Expiry'] >= 0 && r['Days to Expiry'] <= 60)
+    .sort((a, b) => a['Days to Expiry'] - b['Days to Expiry'])
+  if (expiringRows.length) {
+    const ws2 = XLSX.utils.json_to_sheet(expiringRows)
+    ws2['!cols'] = ws1['!cols']
+    XLSX.utils.book_append_sheet(wb, ws2, 'Expiring ≤60 Days')
+  }
+
+  // ── Sheet 3: Expired ─────────────────────────────────────────────
+  const expiredRows = allRows.filter(r => typeof r['Days to Expiry'] === 'number' && r['Days to Expiry'] < 0)
+    .sort((a, b) => a['Days to Expiry'] - b['Days to Expiry'])
+  if (expiredRows.length) {
+    const ws3 = XLSX.utils.json_to_sheet(expiredRows)
+    ws3['!cols'] = ws1['!cols']
+    XLSX.utils.book_append_sheet(wb, ws3, 'Expired')
+  }
+
+  // ── Sheet 4: State Matrix (providers as rows, states as cols) ─────
+  const states = [...new Set(licenses.map(l => l.state).filter(Boolean))].sort()
+  const providerIds = contractors.map(c => c.id)
+  const matrixRows = providerIds.map(cid => {
+    const row = { 'Provider': nameMap[cid] || '', 'Role': roleMap[cid] || '' }
+    for (const st of states) {
+      const lic = licenses.find(l => l.contractor_id === cid && l.state === st)
+      row[st] = lic ? (lic.status === 'active' ? '✓ Active' : lic.status === 'pending' ? '⏳ Pending' : lic.status === 'expired' ? '✗ Expired' : lic.status) : ''
+    }
+    return row
+  })
+  const ws4 = XLSX.utils.json_to_sheet(matrixRows)
+  ws4['!cols'] = [{ wch: 22 }, { wch: 14 }, ...states.map(() => ({ wch: 12 }))]
+  XLSX.utils.book_append_sheet(wb, ws4, 'State Matrix')
+
+  // ── Sheet 5: Collab Agreements ────────────────────────────────────
+  const collabRows = licenses
+    .filter(l => l.collab_physician && l.collab_physician.trim())
+    .map(l => ({
+      'Provider':         nameMap[l.contractor_id] || '',
+      'State':            l.state || '',
+      'License #':        l.license_number || '',
+      'Collab Physician': l.collab_physician || '',
+      'Collab Expiry':    l.collab_expiry || '',
+      'Collab Status':    !l.collab_expiry ? 'No expiry set' : isPast(l.collab_expiry) ? 'EXPIRED' : inDays(l.collab_expiry, 60) ? 'Expiring Soon' : 'Active',
+    }))
+    .sort((a, b) => (a['Provider'] || '').localeCompare(b['Provider'] || ''))
+  if (collabRows.length) {
+    const ws5 = XLSX.utils.json_to_sheet(collabRows)
+    ws5['!cols'] = [{wch:22},{wch:8},{wch:18},{wch:24},{wch:14},{wch:16}]
+    XLSX.utils.book_append_sheet(wb, ws5, 'Collab Agreements')
+  }
+
+  XLSX.writeFile(wb, `LionMD_Licensing_Dashboard_${date}.xlsx`)
+  showToast('Exported: Full Licensing Dashboard', 'success')
+}
+
+// ── Entry points ──────────────────────────────────────────────────
+async function renderLicDashboard() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const data = await api('/api/licensing/dashboard')
+    licState.contractors = data.contractors || []
+    licState.licenses    = data.licenses    || []
+    licDrawDashboard()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+async function renderLicenseEditorPortal() {
+  buildNav()
+  navigate('lic_dashboard')
+}
+
+// ── Main dashboard shell ──────────────────────────────────────────
+function licDrawDashboard() {
+  const mc = $('mainContent')
+
+  // KPI counts
+  const all      = licState.licenses
+  const active   = all.filter(l => l.status === 'active')
+  const pending  = all.filter(l => l.status === 'pending')
+  const expired  = all.filter(l => l.status === 'expired')
+  const expiring = active.filter(l => licIsExpiringSoon(l.expiry_date))
+  const withCollab = all.filter(l => l.collab_physician && l.collab_physician.trim())
+  const collabExpiring = withCollab.filter(l => licIsExpiringSoon(l.collab_expiry))
+  // CPA compliance: NP/PA in a CPA-required state where CPA is not yet signed
+  const cpaBlocked = all.filter(l => cpaBlocksActive(l))
+
+  mc.innerHTML = `
+  <!-- Header: title + public view link -->
+  <div class="flex items-center justify-between mb-5">
+    <div>
+      <h1 class="text-xl font-bold text-gray-800"><i class="fas fa-map-marker-alt mr-2 text-blue-600"></i>Licensing Dashboard</h1>
+      <p class="text-sm text-gray-400 mt-0.5">Full provider state matrix &mdash; click any cell to view or edit</p>
+    </div>
+    <div class="flex items-center gap-2 flex-wrap">
+      <button onclick="licDownloadTemplate('admin')" 
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 bg-blue-50 text-sm text-blue-700 hover:bg-blue-100 transition shadow-sm">
+        <i class="fas fa-file-download text-xs"></i> Template
+      </button>
+      <button onclick="licOpenImport('admin')"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-indigo-200 bg-indigo-50 text-sm text-indigo-700 hover:bg-indigo-100 transition shadow-sm">
+        <i class="fas fa-file-upload text-xs"></i> Import
+      </button>
+      <button onclick="licExportByProvider()"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-green-200 bg-green-50 text-sm text-green-700 hover:bg-green-100 transition shadow-sm">
+        <i class="fas fa-file-csv text-xs"></i> By Provider
+      </button>
+      <button onclick="licExportFullDashboard()"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-emerald-200 bg-emerald-50 text-sm text-emerald-700 hover:bg-emerald-100 transition shadow-sm">
+        <i class="fas fa-file-excel text-xs"></i> Full Export
+      </button>
+      <a href="/licensing/public" target="_blank"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-gray-200 bg-white text-sm text-gray-600 hover:border-blue-400 hover:text-blue-600 transition shadow-sm">
+        <i class="fas fa-external-link-alt text-xs"></i> Public View
+      </a>
+      <button onclick="navigate('partner_view')"
+        class="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-purple-200 bg-purple-50 text-sm text-purple-700 hover:bg-purple-100 transition shadow-sm">
+        <i class="fas fa-key text-xs"></i> Manage Access
+      </button>
+    </div>
+  </div>
+
+  <!-- KPI bar -->
+  <div class="grid grid-cols-2 sm:grid-cols-3 ${cpaBlocked.length > 0 ? 'lg:grid-cols-7' : 'lg:grid-cols-6'} gap-3 mb-5">
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-gray-800">${licState.contractors.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Providers</div>
+    </div>
+    <div class="bg-white rounded-xl border border-gray-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-gray-800">${all.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Total Licenses</div>
+    </div>
+    <div class="bg-white rounded-xl border border-green-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-green-600">${active.length - cpaBlocked.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Active</div>
+    </div>
+    <div class="bg-white rounded-xl border border-yellow-200 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-yellow-600">${pending.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Pending</div>
+    </div>
+    <div class="bg-white rounded-xl border ${expired.length > 0 ? 'border-red-300 bg-red-50' : 'border-gray-200'} p-3 shadow-sm">
+      <div class="text-2xl font-bold ${expired.length > 0 ? 'text-red-600' : 'text-gray-400'}">${expired.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Expired</div>
+    </div>
+    <div class="bg-white rounded-xl border ${expiring.length > 0 ? 'border-orange-300 bg-orange-50' : 'border-gray-200'} p-3 shadow-sm">
+      <div class="text-2xl font-bold ${expiring.length > 0 ? 'text-orange-500' : 'text-gray-400'}">${expiring.length}</div>
+      <div class="text-xs text-gray-400 font-semibold uppercase tracking-wide mt-1">Exp. ≤60 days</div>
+    </div>
+    ${cpaBlocked.length > 0 ? `
+    <div class="bg-amber-50 rounded-xl border border-amber-300 p-3 shadow-sm">
+      <div class="text-2xl font-bold text-amber-600">${cpaBlocked.length}</div>
+      <div class="text-xs text-amber-700 font-semibold uppercase tracking-wide mt-1">CPA Unsigned</div>
+    </div>` : ''}
+  </div>
+
+  <!-- Compliance Flags Panel -->
+  ${(() => {
+    // ── Compute all flag categories ──────────────────────────────────────
+    const now = new Date()
+    const inDays = (d, days) => { const x = new Date(d); return x > now && x < new Date(now.getTime() + days*86400000) }
+    const isPast  = d => d && new Date(d) < now
+
+    // 1. Expired licenses
+    const flagExpired = expired  // already computed above
+
+    // 2. Expiring ≤60 days
+    const flagExpiring = expiring  // already computed above
+
+    // 3. CPA unsigned but marked Active (should be Pending)
+    const flagCpaUnsigned = cpaBlocked  // already computed above
+
+    // 4. NP/PA active license in CPA-required state with NO collab physician set at all
+    const flagNoCollab = all.filter(l => {
+      if (l.status !== 'active') return false
+      if (!cpaRequiredForLic(l)) return false
+      return !l.collab_physician || !l.collab_physician.trim()
+    })
+
+    // 5. Collab agreement expiring ≤60 days
+    const flagCollabExpiring = collabExpiring  // already computed above
+
+    // 6. Collab agreement already expired
+    const flagCollabExpired = all.filter(l => l.collab_physician && l.collab_physician.trim() && isPast(l.collab_expiry))
+
+    // 8. Pending licenses that have been pending > 30 days (stale — need a status update)
+    const flagStalePending = all.filter(l => {
+      if (l.status !== 'pending') return false
+      // Use updated_at or created_at if available; otherwise flag all pending
+      const updated = l.updated_at || l.created_at
+      if (!updated) return false
+      return (now - new Date(updated)) > 30 * 86400000
+    })
+
+    // 9. Physician has NO active license in a state where they ARE listed as a collab physician
+    // i.e. they're supervising an NP in a state where they themselves don't hold an active license
+    const physicianLicMap = {}  // contractorId → Set of states with active license
+    for (const l of all) {
+      const rg = (l.role_group || '').toUpperCase()
+      if (rg.includes('PHYSICIAN') && l.status === 'active') {
+        if (!physicianLicMap[l.contractor_id]) physicianLicMap[l.contractor_id] = new Set()
+        physicianLicMap[l.contractor_id].add(l.state)
+      }
+    }
+    // Find all collab entries and look up if the physician has an active license in that state
+    const flagPhysNoLicense = []
+    const seen9 = new Set()
+    for (const l of all) {
+      if (!l.collab_physician || !l.collab_physician.trim()) continue
+      // Match physician by last name against contractors list
+      const physName = l.collab_physician.trim().toLowerCase()
+      const physContractor = licState.contractors.find(c =>
+        (c.role_group || '').toUpperCase().includes('PHYSICIAN') &&
+        (c.name || '').toLowerCase().includes(physName)
+      )
+      if (!physContractor) continue
+      const pid = physContractor.id
+      const hasActiveLicInState = physicianLicMap[pid] && physicianLicMap[pid].has(l.state)
+      const key = pid + '_' + l.state
+      if (!hasActiveLicInState && !seen9.has(key)) {
+        seen9.add(key)
+        flagPhysNoLicense.push({ ...l, phys_name: physContractor.name, phys_id: pid })
+      }
+    }
+
+    const totalFlags = flagExpired.length + flagExpiring.length + flagCpaUnsigned.length +
+      flagNoCollab.length + flagCollabExpiring.length + flagCollabExpired.length +
+      flagStalePending.length + flagPhysNoLicense.length
+
+    if (totalFlags === 0) return '<div class="mb-4 p-3 rounded-xl bg-green-50 border border-green-200 flex items-center gap-2 text-sm text-green-700"><i class="fas fa-check-circle text-green-500"></i><span class="font-semibold">No compliance issues detected.</span></div>'
+
+    // ── Render helper: collapsible flag card ──────────────────────────────
+    const flagCard = (id, sev, icon, title, count, items, note) => {
+      // Store all items globally so the "View all" modal can access them
+      licAllFlagsData[id] = { id, sev, icon, title, items }
+      const colors = {
+        critical: { bg:'bg-red-50', border:'border-red-300', icon:'text-red-500', title:'text-red-800', badge:'bg-red-100 text-red-700 border-red-200', pill:'bg-red-100 text-red-800' },
+        high:     { bg:'bg-orange-50', border:'border-orange-300', icon:'text-orange-500', title:'text-orange-800', badge:'bg-orange-100 text-orange-700 border-orange-200', pill:'bg-orange-100 text-orange-800' },
+        warning:  { bg:'bg-amber-50', border:'border-amber-300', icon:'text-amber-500', title:'text-amber-800', badge:'bg-amber-100 text-amber-700 border-amber-200', pill:'bg-amber-100 text-amber-800' },
+        info:     { bg:'bg-purple-50', border:'border-purple-200', icon:'text-purple-500', title:'text-purple-800', badge:'bg-purple-100 text-purple-700 border-purple-200', pill:'bg-purple-100 text-purple-800' },
+        notice:   { bg:'bg-blue-50', border:'border-blue-200', icon:'text-blue-500', title:'text-blue-800', badge:'bg-blue-100 text-blue-700 border-blue-200', pill:'bg-blue-100 text-blue-800' },
+      }
+      const c = colors[sev] || colors.warning
+      const pills = items.slice(0, 12).map(i =>
+        '<span class="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-xs font-medium border ' + c.pill + ' border-' + c.border.replace('border-','') + ' cursor-pointer hover:opacity-80"' +
+        (i.id ? ' onclick="licShowDetail(' + i.id + ')"' : '') + '>' +
+        escHtml((i.contractor_name || i.phys_name || '').split(' ').slice(-1)[0]) + ' / ' + escHtml(i.state) +
+        (i.expiry_date && sev !== 'notice' ? ' <span class="opacity-60 text-[10px]">exp ' + i.expiry_date + '</span>' : '') +
+        (i.collab_expiry && (sev === 'info') ? ' <span class="opacity-60 text-[10px]">collab exp ' + i.collab_expiry + '</span>' : '') +
+        '</span>'
+      ).join('')
+      const extra = items.length > 12
+        ? '<button onclick="licShowAllFlags(\'' + id + '\')" class="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-semibold bg-white border border-gray-300 text-gray-600 hover:bg-gray-50 hover:border-gray-400 transition-colors cursor-pointer shadow-sm ml-0.5">View all ' + items.length + ' <i class="fas fa-arrow-right text-[10px]"></i></button>'
+        : ''
+      return '<div class="' + c.bg + ' rounded-xl border ' + c.border + ' overflow-hidden">' +
+        '<button class="w-full flex items-center gap-2 px-4 py-3 text-left" onclick="this.nextElementSibling.classList.toggle(\'hidden\')">' +
+        '<i class="fas ' + icon + ' ' + c.icon + ' flex-shrink-0 w-4"></i>' +
+        '<span class="font-semibold text-sm ' + c.title + ' flex-1">' + title + '</span>' +
+        '<span class="text-xs font-bold px-2 py-0.5 rounded-full border ' + c.badge + '">' + count + '</span>' +
+        '<i class="fas fa-chevron-down text-xs opacity-40 ml-1"></i>' +
+        '</button>' +
+        '<div class="px-4 pb-3 border-t ' + c.border + '">' +
+        (note ? '<p class="text-xs opacity-75 ' + c.title + ' mt-2 mb-2">' + note + '</p>' : '') +
+        '<div class="flex flex-wrap gap-1 mt-2">' + pills + extra + '</div>' +
+        '</div>' +
+        '</div>'
+    }
+
+    let cards = '<div class="mb-4 space-y-2">'
+    cards += '<div class="flex items-center justify-between mb-1">'
+    cards += '<p class="text-xs font-bold text-gray-500 uppercase tracking-wider"><i class="fas fa-shield-alt mr-1 text-gray-400"></i>Compliance Flags <span class="ml-1 text-red-500">' + totalFlags + ' issue' + (totalFlags !== 1 ? 's' : '') + '</span></p>'
+    cards += '</div>'
+
+    if (flagExpired.length)
+      cards += flagCard('expired', 'critical', 'fa-times-circle',
+        'Expired Licenses — Providers cannot practice', flagExpired.length, flagExpired,
+        'These licenses have expired. Providers must not see patients in these states until renewed.')
+
+    if (flagPhysNoLicense.length)
+      cards += flagCard('physNoLic', 'critical', 'fa-user-slash',
+        'Physician Supervising Without an Active License in That State', flagPhysNoLicense.length, flagPhysNoLicense,
+        'A physician listed as collaborating physician in a state where they do not hold an active license — this may be legally invalid.')
+
+    if (flagCpaUnsigned.length)
+      cards += flagCard('cpaUnsigned', 'high', 'fa-file-signature',
+        'CPA Required But Not Yet Signed — License Should Be Pending', flagCpaUnsigned.length, flagCpaUnsigned,
+        'These licenses are marked Active in a CPA-required state with no signed agreement on file. State law requires a signed CPA before the NP/PA can practice. Change status to Pending until signed.')
+
+    if (flagNoCollab.length)
+      cards += flagCard('noCollab', 'high', 'fa-user-times',
+        'Active NP/PA License With No Collaborating Physician Assigned', flagNoCollab.length, flagNoCollab,
+        'These providers have an active license in a CPA-required state but no collaborating physician is recorded. A CPA must be in place to practice legally.')
+
+    if (flagCollabExpired.length)
+      cards += flagCard('collabExpired', 'high', 'fa-handshake-slash',
+        'Collab Agreement Expired', flagCollabExpired.length, flagCollabExpired,
+        'The collaborating agreement expiry date has passed. Provider may no longer practice in these states without a renewed agreement.')
+
+    if (flagExpiring.length)
+      cards += flagCard('expiring', 'warning', 'fa-hourglass-half',
+        'Licenses Expiring Within 60 Days', flagExpiring.length, flagExpiring,
+        'Renewal should be initiated now to avoid a lapse.')
+
+    if (flagCollabExpiring.length)
+      cards += flagCard('collabExpiring', 'info', 'fa-user-clock',
+        'Collab Agreements Expiring Within 60 Days', flagCollabExpiring.length, flagCollabExpiring,
+        'Contact the collaborating physician to renew the agreement before it lapses.')
+
+    if (flagStalePending.length)
+      cards += flagCard('stalePending', 'notice', 'fa-clock',
+        'Licenses Pending for 30+ Days — Status Update Needed', flagStalePending.length, flagStalePending,
+        'These licenses have been in Pending status for over 30 days. Confirm whether they are still in progress or need follow-up.')
+
+    cards += '</div>'
+    return cards
+  })()}
+
+  <!-- View tabs + filters -->
+  <div class="bg-white rounded-xl border border-gray-200 shadow-sm mb-4">
+    <div class="flex items-center justify-between px-4 pt-3 border-b border-gray-100 flex-wrap gap-2">
+      <div class="flex gap-0">
+        ${['matrix','collab','provider'].map(v => `
+          <button onclick="licSetView('${v}')" id="licTab_${v}"
+            class="px-4 py-2.5 text-sm font-semibold border-b-2 transition-colors whitespace-nowrap
+            ${licState.view === v ? 'border-blue-600 text-blue-700' : 'border-transparent text-gray-500 hover:text-gray-700'}">
+            ${v === 'matrix' ? '<i class="fas fa-th mr-1.5"></i>State Matrix' : v === 'collab' ? '<i class="fas fa-user-md mr-1.5"></i>Collab Agreements' : '<i class="fas fa-list mr-1.5"></i>By Provider'}
+          </button>`).join('')}
+      </div>
+      <div class="flex items-center gap-2 pb-2 flex-wrap">
+        <select id="licFilterStatus" onchange="licState.filterStatus=this.value;licRefreshView()"
+          class="text-sm border border-gray-200 rounded-lg px-2 py-1.5 bg-white focus:ring-2 focus:ring-blue-500 outline-none">
+          <option value="all">All statuses</option>
+          <option value="active">Active only</option>
+          <option value="pending">Pending only</option>
+          <option value="expired">Expired only</option>
+          <option value="cpa">⚠ CPA issues</option>
+        </select>
+        <input id="licFilterProvider" type="text" placeholder="Filter provider…" oninput="licState.filterProvider=this.value;licRefreshView()"
+          class="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-36 focus:ring-2 focus:ring-blue-500 outline-none">
+        <input id="licFilterState" type="text" placeholder="Filter state…" oninput="licState.filterState=this.value;licRefreshView()"
+          class="text-sm border border-gray-200 rounded-lg px-3 py-1.5 w-24 focus:ring-2 focus:ring-blue-500 outline-none">
+        ${(state.role === 'admin' || state.role === 'license_editor') ? `
+        <button onclick="navigate('lic_edit')"
+          class="flex items-center gap-1.5 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium rounded-lg shadow-sm transition">
+          <i class="fas fa-edit"></i> Edit Licenses
+        </button>` : ''}
+      </div>
+    </div>
+    <div id="licChipBar" class="px-4 py-2 border-t border-gray-100" style="display:none">
+    </div>
+    <div id="licViewBody" class="overflow-auto" style="max-height:calc(100vh - 320px)">
+    </div>
+  </div>
+  `
+  licRefreshView()
+}
+
+// ── View router ────────────────────────────────────────────────────
+function licSetView(v) {
+  licState.view = v
+  licState.pinnedStates = [] // clear column filter when switching tabs
+  const cb = $('licChipBar'); if (cb) cb.style.display = 'none' // hide until matrix redraws it
+  ;['matrix','collab','provider'].forEach(tab => {
+    const el = $('licTab_' + tab)
+    if (!el) return
+    if (tab === v) {
+      el.className = 'px-4 py-2.5 text-sm font-semibold border-b-2 border-blue-600 text-blue-700 transition-colors whitespace-nowrap'
+    } else {
+      el.className = 'px-4 py-2.5 text-sm font-semibold border-b-2 border-transparent text-gray-500 hover:text-gray-700 transition-colors whitespace-nowrap'
+    }
+  })
+  licRefreshView()
+}
+
+function licRefreshView() {
+  if (licState.view === 'matrix')   licDrawMatrix()
+  else if (licState.view === 'collab')  licDrawCollab()
+  else licDrawByProvider()
+}
+
+// ── Helpers ────────────────────────────────────────────────────────
+function licIsExpiringSoon(dateStr) {
+  if (!dateStr) return false
+  const d = new Date(dateStr), now = new Date()
+  return d > now && d < new Date(now.getTime() + 60 * 24 * 60 * 60 * 1000)
+}
+function licIsExpired(l) {
+  return l.status === 'expired' || (l.expiry_date && new Date(l.expiry_date) < new Date())
+}
+function licStatusColor(l) {
+  if (licIsExpired(l))                  return { bg: 'bg-red-500',    text: 'Exp',   ring: 'ring-red-300' }
+  if (l.status === 'pending')           return { bg: 'bg-yellow-400', text: 'Pend',  ring: 'ring-yellow-300' }
+  if (cpaBlocksActive(l))               return { bg: 'bg-amber-400',  text: 'CPA?',  ring: 'ring-amber-300' }
+  if (licIsExpiringSoon(l.expiry_date)) return { bg: 'bg-orange-400', text: '!Exp',  ring: 'ring-orange-300' }
+  return                                       { bg: 'bg-green-500',  text: 'Act',   ring: 'ring-green-300' }
+}
+function licFilteredLicenses() {
+  return licState.licenses.filter(l => {
+    if (licState.filterStatus === 'cpa') {
+      // Show only licenses with a CPA issue (pending or blocking active)
+      if (!cpaPending(l) && !cpaBlocksActive(l)) return false
+    } else if (licState.filterStatus !== 'all' && l.status !== licState.filterStatus) return false
+    if (licState.filterProvider && !l.contractor_name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
+    if (licState.filterState && !l.state.toLowerCase().includes(licState.filterState.toLowerCase())) return false
+    return true
+  })
+}
+
+// ── Matrix View ────────────────────────────────────────────────────
+function licDrawMatrix() {
+  const body = $('licViewBody')
+  if (!body) return
+
+  const filtered = licFilteredLicenses()
+  const providers = licState.contractors.filter(ct => {
+    if (licState.filterProvider && !ct.name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
+    return true
+  })
+
+  // Collect all unique states from filtered licenses
+  const stateSet = new Set(filtered.map(l => l.state))
+  const states = [...stateSet].sort()
+
+  if (states.length === 0 || providers.length === 0) {
+    body.innerHTML = `<div class="p-10 text-center text-gray-400"><i class="fas fa-map text-4xl mb-3 block"></i>No licenses match current filters.</div>`
+    return
+  }
+
+  // Build lookup: contractor_id + state → license row
+  const licMap = {}
+  for (const l of filtered) {
+    licMap[l.contractor_id + '_' + l.state] = l
+  }
+
+  const cellHtml = (lic) => {
+    if (!lic) return `<td class="p-0 border-r border-b border-gray-100"><div class="w-10 h-8 mx-auto"></div></td>`
+    const c = licStatusColor(lic)
+    const hasCollab = lic.collab_physician && lic.collab_physician.trim()
+    const isCpaBlocked = cpaBlocksActive(lic)
+    const collabExp = hasCollab && licIsExpiringSoon(lic.collab_expiry)
+    // Suppress the collab purple ring when cell is amber (CPA blocked) — can't show both signals
+    // The collab info is still visible on hover tooltip and in the detail popover
+    // Purple dot: show when has collab AND not CPA-blocked (amber cell already signals the CPA issue)
+    const showCollabDot = hasCollab && !isCpaBlocked
+    // Orange dot: collab agreement expiring soon (only when not CPA-blocked)
+    const showCollabExpDot = showCollabDot && collabExp
+    const tooltipParts = [
+      lic.license_type || '',
+      lic.license_number ? '#' + lic.license_number : '',
+      lic.expiry_date ? 'Exp: ' + lic.expiry_date : '',
+      hasCollab ? 'Collab: ' + lic.collab_physician : '',
+      isCpaBlocked ? '⚠ CPA required by state law — not yet signed' : (lic.notes ? lic.notes : ''),
+    ].filter(Boolean).join(' | ')
+    return `<td class="p-0 border-r border-b border-gray-100" title="${escHtml(tooltipParts)}">
+      <div class="w-10 h-8 mx-auto flex items-center justify-center">
+        <div class="w-7 h-6 rounded flex items-center justify-center text-white text-[9px] font-bold relative cursor-pointer
+          ${c.bg}
+          hover:scale-110 transition-transform shadow-sm"
+          onclick="licShowDetail(${lic.id})">
+          ${c.text}
+          ${showCollabDot ? '<span class="absolute -top-1 -right-1 w-2.5 h-2.5 rounded-full bg-purple-500 border border-white"></span>' : ''}
+          ${showCollabExpDot ? '<span class="absolute -bottom-1 -right-1 w-2 h-2 rounded-full bg-orange-400 border border-white"></span>' : ''}
+          ${isCpaBlocked ? '<span class="absolute -top-1 -left-1 w-2.5 h-2.5 rounded-full bg-red-500 border border-white text-[6px] flex items-center justify-center font-black">!</span>' : ''}
+        </div>
+      </div>
+    </td>`
+  }
+
+  // All states present in this view — for the column filter chips
+  const allStates = states  // already sorted
+  // Apply pinned-state column filter (if any chips selected)
+  const visibleStates = licState.pinnedStates.length > 0
+    ? allStates.filter(s => licState.pinnedStates.includes(s))
+    : allStates
+
+  // Render chip bar into its own persistent div ABOVE the scroll area
+  const chipBar = $('licChipBar')
+  if (chipBar) {
+    chipBar.style.display = 'block'
+    const allStatesActive = licState.pinnedStates.length === 0
+    let chipHtml = '<div class="flex items-center gap-1.5 flex-wrap">'
+    chipHtml += '<span class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mr-1">States:</span>'
+    chipHtml += '<button onclick="licState.pinnedStates=[];licDrawMatrix()" class="px-2 py-0.5 rounded-full text-[10px] font-bold border transition ' +
+      (allStatesActive ? 'bg-blue-600 text-white border-blue-600' : 'bg-white text-gray-500 border-gray-300 hover:border-blue-400 hover:text-blue-600') + '">All</button>'
+    allStates.forEach(s => {
+      const selected = licState.pinnedStates.includes(s)
+      const hasCpaIssue = providers.some(ct => { const l = licMap[ct.id + '_' + s]; return l && (cpaBlocksActive(l) || cpaPending(l)) })
+      const cls = selected ? 'bg-blue-600 text-white border-blue-600'
+        : hasCpaIssue ? 'bg-amber-50 text-amber-700 border-amber-300 hover:bg-amber-100'
+        : 'bg-gray-50 text-gray-500 border-gray-200 hover:border-blue-400 hover:text-blue-600'
+      chipHtml += '<button onclick="licTogglePinnedState(\'' + s + '\')" class="px-2 py-0.5 rounded-full text-[10px] font-semibold border transition ' + cls + '">' +
+        s + (hasCpaIssue ? ' &#x26A0;' : '') + '</button>'
+    })
+    chipHtml += '</div>'
+    if (licState.pinnedStates.length > 0) {
+      chipHtml += '<p class="text-[10px] text-blue-600 mt-1 font-medium">Showing ' + visibleStates.length + ' of ' + allStates.length +
+        ' states &middot; <button onclick="licState.pinnedStates=[];licDrawMatrix()" class="underline">Show all</button></p>'
+    }
+    chipBar.innerHTML = chipHtml
+  }
+
+  body.innerHTML = `
+  <div class="p-2">
+    <!-- Legend -->
+    <div class="flex items-center gap-4 mb-3 flex-wrap px-2 text-xs text-gray-500">
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-green-500 inline-block"></span>Active</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-orange-400 inline-block"></span>Expiring &#x2264;60d</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-yellow-400 inline-block"></span>Pending</span>
+      <span class="flex items-center gap-1.5"><span class="w-5 h-4 rounded bg-red-500 inline-block"></span>Expired</span>
+      <span class="flex items-center gap-1.5 text-amber-700 font-semibold"><span class="w-5 h-4 rounded bg-amber-400 inline-block"></span>CPA Req.</span>
+      <span class="flex items-center gap-1.5"><span class="w-2.5 h-2.5 rounded-full bg-purple-500 inline-block"></span>Collab MD</span>
+    </div>
+
+    <div class="overflow-x-auto">
+      <table class="border-collapse text-xs">
+        <thead>
+          <tr>
+            <th class="sticky left-0 bg-gray-50 z-10 border-r border-b border-gray-200 px-3 py-2 text-left font-semibold text-gray-600 min-w-[220px]">Provider</th>
+            ${visibleStates.map(s => `<th class="border-r border-b border-gray-200 px-1 py-2 font-semibold text-gray-500 text-center w-10">${s}</th>`).join('')}
+          </tr>
+        </thead>
+        <tbody>
+          ${providers.map(ct => {
+            const hasAny = visibleStates.some(s => licMap[ct.id + '_' + s])
+            if (!hasAny && licState.filterProvider === '' && licState.filterStatus === 'all') {
+              return ''
+            }
+            const typeLabel = ct.role_group || ct.specialty || ''
+            return `<tr class="hover:bg-blue-50 transition-colors">
+              <td class="sticky left-0 bg-white border-r border-b border-gray-200 px-3 py-1.5 font-semibold text-gray-800 text-xs whitespace-nowrap z-10">
+                ${escHtml(ct.name)}
+                ${typeLabel ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500">${escHtml(typeLabel)}</span>` : ''}
+                <span class="block text-[10px] text-gray-400 font-normal">${visibleStates.filter(s => licMap[ct.id + '_' + s]).length} of ${visibleStates.length} state${visibleStates.length !== 1 ? 's' : ''}</span>
+              </td>
+              ${visibleStates.map(s => cellHtml(licMap[ct.id + '_' + s])).join('')}
+            </tr>`
+          }).join('')}
+        </tbody>
+      </table>
+    </div>
+  </div>`
+}
+
+function licTogglePinnedState(s) {
+  const idx = licState.pinnedStates.indexOf(s)
+  if (idx === -1) licState.pinnedStates.push(s)
+  else licState.pinnedStates.splice(idx, 1)
+  licDrawMatrix()
+}
+
+// ── Collab Agreements View ─────────────────────────────────────────
+function licDrawCollab() {
+  const body = $('licViewBody')
+  if (!body) return
+
+  const filtered = licFilteredLicenses().filter(l => l.collab_physician && l.collab_physician.trim())
+
+  if (filtered.length === 0) {
+    body.innerHTML = `<div class="p-10 text-center text-gray-400"><i class="fas fa-user-md text-4xl mb-3 block"></i><p class="font-medium mb-1">No collaborating physician agreements on file.</p><p class="text-sm">Add collab agreements when editing a license.</p></div>`
+    return
+  }
+
+  // Group by collaborating physician
+  const byCollab = {}
+  for (const l of filtered) {
+    const key = l.collab_physician.trim()
+    if (!byCollab[key]) byCollab[key] = []
+    byCollab[key].push(l)
+  }
+
+  body.innerHTML = `<div class="p-4 space-y-4">
+    ${Object.entries(byCollab).sort((a,b) => a[0].localeCompare(b[0])).map(([physician, lics]) => {
+      const expiring = lics.filter(l => licIsExpiringSoon(l.collab_expiry))
+      const expired  = lics.filter(l => l.collab_expiry && new Date(l.collab_expiry) < new Date())
+      return `
+      <div class="bg-white rounded-xl border ${expired.length > 0 ? 'border-red-200' : expiring.length > 0 ? 'border-orange-200' : 'border-gray-200'} shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-4 py-3 ${expired.length > 0 ? 'bg-red-50' : expiring.length > 0 ? 'bg-orange-50' : 'bg-purple-50'} border-b border-gray-100">
+          <div class="flex items-center gap-2">
+            <i class="fas fa-user-md ${expired.length > 0 ? 'text-red-500' : expiring.length > 0 ? 'text-orange-500' : 'text-purple-600'}"></i>
+            <span class="font-bold text-gray-800">${escHtml(physician)}</span>
+            ${expired.length > 0 ? '<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">Agreement Expired</span>' : expiring.length > 0 ? '<span class="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-bold">Expiring Soon</span>' : ''}
+          </div>
+          <span class="text-xs text-gray-500 font-medium">${lics.length} provider${lics.length !== 1 ? 's' : ''}</span>
+        </div>
+        <div class="divide-y divide-gray-50">
+          ${lics.map(l => {
+            const collabExpSoon = licIsExpiringSoon(l.collab_expiry)
+            const collabExpired = l.collab_expiry && new Date(l.collab_expiry) < new Date()
+            const licC = licStatusColor(l)
+            return `<div onclick="licShowDetail(${l.id})" class="flex items-center gap-3 px-4 py-2.5 hover:bg-blue-50 cursor-pointer transition-colors">
+              <div class="w-8 h-6 rounded flex items-center justify-center text-white text-[9px] font-bold flex-shrink-0 ${licC.bg}">${l.state}</div>
+              <div class="flex-1 min-w-0">
+                <span class="font-medium text-sm text-gray-800">${escHtml(l.contractor_name)}</span>
+                ${l.license_type ? `<span class="ml-1.5 text-xs text-gray-400">${escHtml(l.license_type)}</span>` : ''}
+                ${l.expiry_date ? `<span class="ml-2 text-xs ${licC.bg === 'bg-red-500' ? 'text-red-500 font-semibold' : 'text-gray-400'}">Lic exp: ${l.expiry_date}</span>` : ''}
+                ${cpaPending(l) ? `<span class="ml-2">${cpaBadgeHtml(l.notes)}</span>` : ''}
+              </div>
+              <div class="text-right flex-shrink-0">
+                <div class="text-xs font-semibold ${collabExpired ? 'text-red-600' : collabExpSoon ? 'text-orange-600' : 'text-gray-600'}">
+                  ${l.collab_expiry ? (collabExpired ? '⚠ Expired ' : collabExpSoon ? '⏰ ' : '') + l.collab_expiry : '<span class="text-gray-300 italic">No expiry set</span>'}
+                </div>
+              </div>
+              <i class="fas fa-chevron-right text-gray-300 text-xs flex-shrink-0"></i>
+            </div>`
+          }).join('')}
+        </div>
+      </div>`
+    }).join('')}
+  </div>`
+}
+
+// ── By Provider View ───────────────────────────────────────────────
+function licDrawByProvider() {
+  const body = $('licViewBody')
+  if (!body) return
+
+  const filtered = licFilteredLicenses()
+  const providers = licState.contractors.filter(ct => {
+    if (licState.filterProvider && !ct.name.toLowerCase().includes(licState.filterProvider.toLowerCase())) return false
+    return filtered.some(l => l.contractor_id === ct.id)
+  })
+
+  if (providers.length === 0) {
+    body.innerHTML = `<div class="p-10 text-center text-gray-400"><i class="fas fa-users text-4xl mb-3 block"></i>No providers match current filters.</div>`
+    return
+  }
+
+  body.innerHTML = `<div class="divide-y divide-gray-100">
+    ${providers.map(ct => {
+      const ctLics = filtered.filter(l => l.contractor_id === ct.id)
+      if (ctLics.length === 0) return ''
+      const expCt = ctLics.filter(l => licIsExpiringSoon(l.expiry_date))
+      const expiredCt = ctLics.filter(l => licIsExpired(l))
+      return `
+      <details class="group" open>
+        <summary class="flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 transition-colors list-none">
+          <i class="fas fa-chevron-right group-open:rotate-90 transition-transform text-gray-400 text-xs w-3 flex-shrink-0"></i>
+          <div class="flex-1 flex items-center gap-2 flex-wrap">
+            <span class="font-semibold text-gray-800">${escHtml(ct.name)}</span>
+            ${ct.role_group ? `<span class="px-2 py-0.5 rounded text-xs font-bold bg-gray-100 text-gray-500">${escHtml(ct.role_group)}</span>` : ''}
+            <span class="text-xs text-gray-400">${ctLics.length} state${ctLics.length !== 1 ? 's' : ''}</span>
+          </div>
+          <div class="flex items-center gap-2">
+            ${expiredCt.length > 0 ? `<span class="px-2 py-0.5 rounded-full bg-red-100 text-red-700 text-xs font-bold">${expiredCt.length} expired</span>` : ''}
+            ${expCt.length > 0 ? `<span class="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-bold">${expCt.length} expiring</span>` : ''}
+          </div>
+          ${(state.role === 'admin' || state.role === 'license_editor') ? `
+          <button onclick="event.preventDefault();event.stopPropagation();licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+            class="text-xs px-2 py-1 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition font-medium flex-shrink-0">
+            <i class="fas fa-plus mr-1"></i>Add
+          </button>` : ''}
+        </summary>
+        <div class="px-4 pb-3">
+          <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+            ${ctLics.map(l => {
+              const c = licStatusColor(l)
+              const hasCollab = l.collab_physician && l.collab_physician.trim()
+              const collabExp = hasCollab && licIsExpiringSoon(l.collab_expiry)
+              return `
+              <div onclick="licShowDetail(${l.id})" class="flex items-start gap-2.5 p-3 rounded-lg border ${licIsExpired(l) ? 'border-red-200 bg-red-50' : licIsExpiringSoon(l.expiry_date) ? 'border-orange-200 bg-orange-50' : 'border-gray-200 bg-white'} hover:shadow-sm hover:border-blue-300 cursor-pointer transition-all">
+                <div class="w-10 h-8 rounded flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 ${c.bg} shadow-sm">${l.state}</div>
+                <div class="flex-1 min-w-0">
+                  <div class="flex items-center gap-1.5 flex-wrap">
+                    <span class="font-semibold text-sm text-gray-800">${l.state}</span>
+                    <span class="px-1.5 py-0.5 rounded text-xs font-bold ${licIsExpired(l) ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : cpaBlocksActive(l) ? 'bg-amber-100 text-amber-700' : licIsExpiringSoon(l.expiry_date) ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}">${cpaBlocksActive(l) ? 'CPA Req.' : l.status}</span>
+                  </div>
+                  ${l.license_type ? `<div class="text-xs text-gray-500 mt-0.5">${escHtml(l.license_type)}</div>` : ''}
+                  ${l.license_number ? `<div class="text-xs text-gray-400"><i class="fas fa-hashtag text-[10px] mr-0.5"></i>${escHtml(l.license_number)}</div>` : ''}
+                  ${l.expiry_date ? `<div class="text-xs ${licIsExpiringSoon(l.expiry_date) ? 'text-orange-600 font-semibold' : 'text-gray-400'}"><i class="fas fa-calendar text-[10px] mr-0.5"></i>${l.expiry_date}</div>` : ''}
+                  ${hasCollab ? `<div class="text-xs text-purple-600 mt-1 flex items-center gap-1">
+                    <i class="fas fa-user-md text-[10px]"></i>
+                    <span class="truncate">${escHtml(l.collab_physician)}</span>
+                    ${collabExp ? '<span class="text-orange-500 font-bold">⏰</span>' : ''}
+                  </div>` : ''}
+                  ${cpaPending(l) ? `<div class="mt-1">${cpaBadgeHtml(l.notes)}</div>` : ''}
+                </div>
+                ${(state.role === 'admin' || state.role === 'license_editor') ? `
+                <div class="text-gray-300 group-hover:text-blue-400 w-7 h-7 flex items-center justify-center flex-shrink-0 mt-0.5 pointer-events-none">
+                  <i class="fas fa-chevron-right text-xs"></i>
+                </div>` : ''}
+              </div>`
+            }).join('')}
+          </div>
+        </div>
+      </details>`
+    }).join('')}
+  </div>`
+}
+
+// ── License detail popover — read-first, edit button for admins ────
+function licShowDetail(licId) {
+  const lic = licState.licenses.find(l => l.id === licId)
+  if (!lic) return
+
+  // Non-editors: simple toast
+  if (state.role !== 'admin' && state.role !== 'license_editor') {
+    showToast(`${lic.contractor_name} / ${lic.state}: ${lic.status}${lic.expiry_date ? ', exp ' + lic.expiry_date : ''}`, 'info')
+    return
+  }
+
+  // Remove any existing detail popover
+  const existing = $('licDetailPopover')
+  if (existing) existing.remove()
+
+  const fmtD = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '—'
+  const statusColors = {
+    active: 'bg-green-100 text-green-700',
+    pending: 'bg-yellow-100 text-yellow-700',
+    expired: 'bg-red-100 text-red-700',
+    in_progress: 'bg-blue-100 text-blue-700'
+  }
+  const cpaBlocked = cpaBlocksActive(lic)
+  const sc = cpaBlocked ? 'bg-amber-100 text-amber-700' : (statusColors[lic.status] || 'bg-gray-100 text-gray-600')
+  const hasCollab = lic.collab_physician && lic.collab_physician.trim()
+  const cpaIsPending = cpaPending(lic)
+  const collabExpSoon = hasCollab && licIsExpiringSoon(lic.collab_expiry)
+  const collabExpired = hasCollab && lic.collab_expiry && new Date(lic.collab_expiry) < new Date()
+
+  const popover = document.createElement('div')
+  popover.id = 'licDetailPopover'
+  popover.className = 'fixed inset-0 bg-black/40 z-50 flex items-center justify-center p-4'
+  popover.onclick = (e) => { if (e.target === popover) popover.remove() }
+
+  popover.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-sm overflow-hidden">
+    <!-- Header -->
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <div class="flex items-center gap-3">
+        <div class="w-10 h-8 rounded-lg flex items-center justify-center text-white text-sm font-bold shadow-sm
+          ${lic.status==='expired'||licIsExpired(lic) ? 'bg-red-500' : lic.status==='pending' ? 'bg-yellow-400' : cpaBlocksActive(lic) ? 'bg-amber-400' : licIsExpiringSoon(lic.expiry_date) ? 'bg-orange-400' : 'bg-green-500'}">
+          ${lic.state}
+        </div>
+        <div>
+          <p class="font-bold text-gray-800 text-sm leading-none">${escHtml(lic.contractor_name)}</p>
+          <p class="text-xs text-gray-400 mt-0.5">${escHtml(lic.license_type || 'License')} · ${lic.state}</p>
+        </div>
+      </div>
+      <button onclick="$('licDetailPopover').remove()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+        <i class="fas fa-times text-sm"></i>
+      </button>
+    </div>
+
+    <div class="p-5 space-y-4">
+
+      <!-- License info -->
+      <div class="grid grid-cols-2 gap-3">
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Status</p>
+          <span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold ${sc}">${cpaBlocked ? 'CPA Required' : lic.status}</span>
+          ${cpaBlocked ? `<p class="text-[10px] text-amber-600 mt-1 font-medium">CPA not signed · ${cpaStateType(lic.state) === 'restricted' ? 'Restricted state' : 'Reduced state'}</p>` : ''}
+        </div>
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">License #</p>
+          <p class="text-sm font-mono font-semibold text-gray-800">${escHtml(lic.license_number || '—')}</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Lic. Expires</p>
+          <p class="text-sm font-semibold ${licIsExpiringSoon(lic.expiry_date) ? 'text-orange-600' : licIsExpired(lic) ? 'text-red-600' : 'text-gray-800'}">${fmtD(lic.expiry_date)}</p>
+        </div>
+        <div class="bg-gray-50 rounded-xl p-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide mb-1">Type</p>
+          <p class="text-sm font-semibold text-gray-800">${escHtml(lic.license_type || '—')}</p>
+        </div>
+      </div>
+
+      <!-- Collab agreement section — always shown if collab_physician -->
+      ${hasCollab ? `
+      <div class="rounded-xl border ${collabExpired ? 'border-red-200 bg-red-50' : cpaIsPending ? 'border-amber-200 bg-amber-50' : 'border-purple-200 bg-purple-50'} p-4 space-y-2">
+        <p class="text-xs font-bold ${collabExpired ? 'text-red-700' : cpaIsPending ? 'text-amber-800' : 'text-purple-700'} flex items-center gap-1.5">
+          <i class="fas fa-user-md"></i> Collaborating Physician Agreement
+        </p>
+        <div class="flex items-center justify-between">
+          <span class="text-sm font-semibold text-gray-800">${escHtml(lic.collab_physician)}</span>
+          ${collabExpired ? '<span class="text-xs font-bold text-red-600">⚠ Agreement Expired</span>' : collabExpSoon ? '<span class="text-xs font-bold text-orange-600">⏰ Expiring Soon</span>' : ''}
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-gray-500">Agreement expires:</span>
+          <span class="font-semibold ${collabExpired ? 'text-red-600' : collabExpSoon ? 'text-orange-600' : 'text-gray-700'}">${fmtD(lic.collab_expiry)}</span>
+        </div>
+        <div class="flex items-center justify-between text-xs">
+          <span class="text-gray-500">CPA status:</span>
+          <span class="font-semibold">${cpaIsPending ? cpaBadgeHtml(lic.notes) : `<span class="text-green-700 font-semibold">${escHtml(lic.notes || 'Cleared')}</span>`}</span>
+        </div>
+      </div>` : `
+      <div class="rounded-xl border border-gray-100 bg-gray-50 p-3 text-xs text-gray-400 flex items-center gap-2">
+        <i class="fas fa-user-md text-gray-300"></i> No collaborating physician on file for this state.
+      </div>`}
+
+      <!-- Permitted actions -->
+      ${lic.permitted_actions ? `
+      <div class="bg-blue-50 border border-blue-100 rounded-xl p-3">
+        <p class="text-[10px] font-bold text-blue-500 uppercase tracking-wide mb-1.5">Permitted Actions</p>
+        <span class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold ${lic.permitted_actions.includes('Prescribe') ? 'bg-green-100 text-green-700' : lic.permitted_actions.includes('No CRx') ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-500'}">
+          <i class="fas fa-stethoscope text-[10px]"></i>${escHtml(lic.permitted_actions)}
+        </span>
+      </div>` : ''}
+
+    </div>
+
+    <!-- Footer actions -->
+    <div class="px-5 pb-5 flex gap-2">
+      <button onclick="$('licDetailPopover').remove()"
+        class="flex-1 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50 transition">
+        Close
+      </button>
+      <button onclick="$('licDetailPopover').remove(); licEditEntry(${lic.id})"
+        class="flex-1 px-4 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold flex items-center justify-center gap-2 transition">
+        <i class="fas fa-pencil text-xs"></i> Edit License
+      </button>
+    </div>
+  </div>`
+
+  document.body.appendChild(popover)
+}
+
+// ── Clear collab fields from a specific license (physician profile) ──
+async function licClearCollab(licId, physicianContractorId) {
+  const lic = (state.allLicenses || []).find(l => l.id === licId)
+  const stateName = lic ? lic.state : 'this state'
+  if (!confirm(`Remove collaborating agreement for ${stateName}? This will clear the collab physician, expiry date, and collab notes on this license. This cannot be undone.`)) return
+  try {
+    // Use dedicated PATCH endpoint to clear collab fields without requiring license_number
+    const res = await api('/api/admin/licenses/' + licId + '/collab-clear', { method: 'PATCH' })
+    if (!res || res.error) throw new Error(res?.error || 'Failed to clear collab')
+    showToast('Collaborating agreement removed for ' + stateName, 'success')
+    // Refresh the physician's profile panel
+    obOpenContractorDetail(physicianContractorId)
+    // Also reload licenses so dashboard flags reflect the change
+    reloadContractors()
+  } catch (e) {
+    showToast('Error: ' + e.message, 'error')
+  }
+}
+
+// ── "View all" modal for compliance flag overflow ─────────────────
+function licShowAllFlags(flagId) {
+  const data = licAllFlagsData[flagId]
+  if (!data || !data.items || !data.items.length) return
+
+  const existing = $('licAllFlagsModal')
+  if (existing) existing.remove()
+
+  const sevColors = {
+    critical: { header: 'bg-red-600',    badge: 'bg-red-100 text-red-800 border-red-200',  row: 'hover:bg-red-50'    },
+    high:     { header: 'bg-orange-500', badge: 'bg-orange-100 text-orange-800 border-orange-200', row: 'hover:bg-orange-50' },
+    warning:  { header: 'bg-amber-500',  badge: 'bg-amber-100 text-amber-800 border-amber-200',   row: 'hover:bg-amber-50'  },
+    info:     { header: 'bg-purple-600', badge: 'bg-purple-100 text-purple-800 border-purple-200', row: 'hover:bg-purple-50' },
+    notice:   { header: 'bg-blue-600',   badge: 'bg-blue-100 text-blue-800 border-blue-200',      row: 'hover:bg-blue-50'   },
+  }
+  const sc = sevColors[data.sev] || sevColors.warning
+
+  const rows = data.items.map((item, idx) => {
+    const name = escHtml(item.contractor_name || item.phys_name || '—')
+    const state = escHtml(item.state || '—')
+    const expiry = escHtml(item.expiry_date || item.collab_expiry || '—')
+    const collab = escHtml(item.collab_physician || '')
+    const status = escHtml(item.status || '')
+    const isClickable = !!item.id
+    return `<tr class="border-b border-gray-100 ${sc.row} ${isClickable ? 'cursor-pointer' : ''} transition-colors"
+      ${isClickable ? `onclick="$('licAllFlagsModal').remove(); licShowDetail(${item.id})"` : ''}>
+      <td class="px-3 py-2 text-xs text-gray-400 font-mono w-8">${idx + 1}</td>
+      <td class="px-3 py-2 text-sm font-semibold text-gray-800">${name}</td>
+      <td class="px-3 py-2"><span class="px-2 py-0.5 rounded-full text-xs font-bold border ${sc.badge}">${state}</span></td>
+      <td class="px-3 py-2 text-xs text-gray-600">${expiry !== '—' ? expiry : '<span class="text-gray-400">—</span>'}</td>
+      <td class="px-3 py-2 text-xs text-gray-500">${collab || '<span class="text-gray-300">—</span>'}</td>
+      <td class="px-3 py-2 text-xs text-gray-500">${status || '<span class="text-gray-300">—</span>'}</td>
+      ${isClickable ? '<td class="px-3 py-2 text-xs text-blue-400"><i class="fas fa-external-link-alt"></i></td>' : '<td></td>'}
+    </tr>`
+  }).join('')
+
+  const modal = document.createElement('div')
+  modal.id = 'licAllFlagsModal'
+  modal.className = 'fixed inset-0 bg-black/60 z-50 flex items-center justify-center p-4'
+  modal.innerHTML = `
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-4xl max-h-[90vh] flex flex-col overflow-hidden">
+      <!-- Header -->
+      <div class="${sc.header} px-6 py-4 flex items-center gap-3 flex-shrink-0">
+        <i class="fas ${data.icon} text-white text-lg"></i>
+        <div class="flex-1 min-w-0">
+          <h2 class="text-white font-bold text-base leading-tight">${escHtml(data.title)}</h2>
+          <p class="text-white/70 text-xs mt-0.5">${data.items.length} issue${data.items.length !== 1 ? 's' : ''} total</p>
+        </div>
+        <button onclick="$('licAllFlagsModal').remove()" class="text-white/80 hover:text-white transition ml-2 flex-shrink-0">
+          <i class="fas fa-times text-lg"></i>
+        </button>
+      </div>
+      <!-- Table -->
+      <div class="overflow-auto flex-1">
+        <table class="w-full text-left border-collapse">
+          <thead class="bg-gray-50 sticky top-0 z-10 border-b-2 border-gray-200">
+            <tr>
+              <th class="px-3 py-2.5 text-xs font-bold text-gray-400 uppercase tracking-wide w-8">#</th>
+              <th class="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase tracking-wide">Provider</th>
+              <th class="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase tracking-wide">State</th>
+              <th class="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase tracking-wide">Expiry / Date</th>
+              <th class="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase tracking-wide">Collab MD</th>
+              <th class="px-3 py-2.5 text-xs font-bold text-gray-500 uppercase tracking-wide">Status</th>
+              <th class="px-3 py-2.5 w-8"></th>
+            </tr>
+          </thead>
+          <tbody>${rows}</tbody>
+        </table>
+      </div>
+      <!-- Footer -->
+      <div class="px-6 py-3 border-t border-gray-100 bg-gray-50 flex items-center justify-between flex-shrink-0">
+        <p class="text-xs text-gray-400">Click any row to open the license detail</p>
+        <button onclick="$('licAllFlagsModal').remove()" class="px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-100 transition">Close</button>
+      </div>
+    </div>`
+
+  // Close on backdrop click
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.remove() })
+  document.body.appendChild(modal)
+}
+
+// ── Inline edit/add modal ──────────────────────────────────────────
+function licAddForProvider(contractorId, contractorName, roleGroup) {
+  licShowModal(null, contractorId, contractorName, roleGroup)
+}
+function licEditEntry(licId) {
+  // Search both licState (dashboard) and licEditState (editor) for the license
+  const lic = licState.licenses.find(l => l.id === licId)
+           || licEditState.licenses.find(l => l.id === licId)
+  if (!lic) return
+  const ctName = lic.contractor_name || licEditState.activeCt?.name || ''
+  const ctRole = lic.role_group || licEditState.activeCt?.role_group || ''
+  licShowModal(lic, lic.contractor_id, ctName, ctRole)
+}
+let _licMFile = {}
+
+async function licShowModal(lic, contractorId, contractorName, roleGroup) {
+  _licMFile = {}
+  await ensurePhysicianList('admin')
+  const isEdit = !!lic
+  let modal = $('licModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'licModal'
+    modal.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  const isAdmin = state.role === 'admin' || state.role === 'license_editor'
+  const apiBase = isAdmin ? '' : '/api/provider'
+
+  modal.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-lg max-h-[90vh] overflow-y-auto">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+      <div>
+        <h3 class="font-bold text-gray-800">${isEdit ? 'Edit License' : 'Add License'}</h3>
+        <p class="text-xs text-gray-400 mt-0.5">${escHtml(contractorName)}${roleGroup ? ' · ' + escHtml(roleGroup) : ''}</p>
+      </div>
+      <button onclick="$('licModal').remove()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+    <div class="p-5 space-y-4">
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">State *</label>
+          <select id="licMState" class="w-full text-sm">
+            <option value="">Select state…</option>
+            ${US_STATES.map(s => `<option value="${s}" ${lic?.state===s?'selected':''}>${s}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Status</label>
+          <select id="licMStatus" class="w-full text-sm">
+            <option value="active"  ${(!lic||lic.status==='active') ?'selected':''}>Active</option>
+            <option value="pending" ${lic?.status==='pending'?'selected':''}>Pending</option>
+            <option value="expired" ${lic?.status==='expired'?'selected':''}>Expired</option>
+          </select>
+        </div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Type</label>
+          <input id="licMType" type="text" placeholder="e.g. NP, MD, PA" value="${escHtml(lic?.license_type||'')}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">License Number *</label>
+          <input id="licMNum" type="text" placeholder="e.g. AP123456" value="${escHtml(lic?.license_number||'')}" class="w-full text-sm"/>
+        </div>
+      </div>
+      <div>
+        <label class="block text-xs font-semibold text-gray-600 mb-1">License Expiration Date</label>
+        <input id="licMExpiry" type="date" value="${lic?.expiry_date||''}" class="w-full text-sm"/>
+      </div>
+      <!-- Collab Agreement section -->
+      <div class="p-3 rounded-xl bg-purple-50 border border-purple-100 space-y-3">
+        <div class="text-xs font-bold text-purple-700 uppercase tracking-wide flex items-center gap-1.5">
+          <i class="fas fa-user-md"></i> Collaborating Physician Agreement
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Collaborating Physician</label>
+          <select id="licMCollab" class="w-full text-sm">
+            <option value="">— None / Not Required —</option>
+            ${(licPhysicianList||[]).map(p => `<option value="${escHtml(p.last_name)}" ${(lic?.collab_physician||'')=== p.last_name?'selected':''}>${escHtml(p.name)}</option>`).join('')}
+            ${(lic?.collab_physician && !(licPhysicianList||[]).find(p=>p.last_name===lic.collab_physician)) ? `<option value="${escHtml(lic.collab_physician)}" selected>${escHtml(lic.collab_physician)} (existing)</option>` : ''}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Agreement Expiration Date</label>
+          <input id="licMCollabExp" type="date" value="${lic?.collab_expiry||''}" class="w-full text-sm"/>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">CPA Status</label>
+          <select id="licMNotes" class="w-full text-sm">
+            <option value="">— No Status —</option>
+            <option value="CPA: Not Required" ${(lic?.notes||'')==='CPA: Not Required'?'selected':''}>CPA: Not Required</option>
+            <option value="CPA: Sent for Signatures" ${(lic?.notes||'')==='CPA: Sent for Signatures'?'selected':''}>CPA: Sent for Signatures</option>
+            <option value="CPA: Signed &amp; Active" ${(lic?.notes||'')==='CPA: Signed & Active'?'selected':''}>CPA: Signed &amp; Active</option>
+            <option value="CPA: Expired" ${(lic?.notes||'')==='CPA: Expired'?'selected':''}>CPA: Expired</option>
+            <option value="CPA: Pending Renewal" ${(lic?.notes||'')==='CPA: Pending Renewal'?'selected':''}>CPA: Pending Renewal</option>
+            <option value="CPA: Needs New MD" ${(lic?.notes||'')==='CPA: Needs New MD'?'selected':''}>CPA: Needs New MD</option>
+            ${(lic?.notes && !['','CPA: Not Required','CPA: Sent for Signatures','CPA: Signed & Active','CPA: Expired','CPA: Pending Renewal','CPA: Needs New MD'].includes(lic.notes)) ? `<option value="${escHtml(lic.notes)}" selected>${escHtml(lic.notes)}</option>` : ''}
+          </select>
+        </div>
+      </div>
+      <!-- Permitted Actions / Practice Authority -->
+      <div class="p-3 rounded-xl bg-blue-50 border border-blue-100 space-y-3">
+        <div class="text-xs font-bold text-blue-700 uppercase tracking-wide flex items-center gap-1.5">
+          <i class="fas fa-stethoscope"></i> Practice Authority
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Permitted Actions</label>
+          <select id="licMPermitted" class="w-full text-sm">
+            <option value="" ${!lic?.permitted_actions?'selected':''}>— Select —</option>
+            <option value="Can See Patients + Prescribe" ${lic?.permitted_actions==='Can See Patients + Prescribe'?'selected':''}>✅ Can See Patients + Prescribe (Full CRx)</option>
+            <option value="Can See Patients (No CRx)" ${lic?.permitted_actions==='Can See Patients (No CRx)'?'selected':''}>🟡 Can See Patients (No CRx)</option>
+            <option value="Can See Patients + Prescribe (Collab)" ${lic?.permitted_actions==='Can See Patients + Prescribe (Collab)'?'selected':''}>🤝 Can See Patients + Prescribe (Collab MD)</option>
+            <option value="Can See Patients (No CRx, Collab)" ${lic?.permitted_actions==='Can See Patients (No CRx, Collab)'?'selected':''}>🤝 Can See Patients (No CRx, Collab MD)</option>
+            <option value="Pending License" ${lic?.permitted_actions==='Pending License'?'selected':''}>⏳ Pending License</option>
+            <option value="Not Licensed" ${lic?.permitted_actions==='Not Licensed'?'selected':''}>❌ Not Licensed</option>
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Practice Type</label>
+          <select id="licMPracticeType" class="w-full text-sm">
+            <option value="" ${!lic?.practice_type?'selected':''}>— Select —</option>
+            <option value="independent" ${lic?.practice_type==='independent'?'selected':''}>Independent (Full Practice Authority)</option>
+            <option value="collab_md" ${lic?.practice_type==='collab_md'?'selected':''}>Requires Collaborating MD</option>
+            <option value="md_self" ${lic?.practice_type==='md_self'?'selected':''}>Physician (Self-supervised)</option>
+            <option value="unclear" ${lic?.practice_type==='unclear'?'selected':''}>Unclear / Needs Review</option>
+          </select>
+        </div>
+      </div>
+
+      ${licFileWidgetHtml('licMF', lic?.license_file_name||'')}
+      <div id="licMErr" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+      <div class="flex gap-2 pt-1">
+        ${isEdit ? `<button onclick="licDeleteEntry(${lic.id},${contractorId})"
+          class="px-3 py-2 rounded-xl border border-red-200 text-red-500 text-sm hover:bg-red-50 transition">
+          <i class="fas fa-trash text-xs"></i>
+        </button>` : ''}
+        <button onclick="$('licModal').remove()" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+        <button onclick="licSaveModal(${isEdit ? lic.id : 'null'},${contractorId},'${isAdmin ? 'admin' : 'provider'}')"
+          id="licMSaveBtn" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold">
+          ${isEdit ? 'Save Changes' : 'Add License'}
+        </button>
+      </div>
+    </div>
+  </div>`
+  modal.classList.remove('hidden')
+}
+
+function licMFFileChosen(input) { licFileChosen(input, 'licMFLabel', _licMFile) }
+function licMFRemoveFile() {
+  _licMFile = { remove: true }
+  const ex = $('licMFExisting'); if (ex) ex.remove()
+  const nf = $('licMFNewFile'); if (nf) nf.classList.remove('hidden')
+}
+
+async function licSaveModal(licId, contractorId, mode) {
+  const state_val = $('licMState').value
+  const status    = $('licMStatus').value
+  const type      = ($('licMType').value||'').trim()
+  const num       = ($('licMNum').value||'').trim()
+  const expiry    = $('licMExpiry').value
+  const collab    = ($('licMCollab').value||'').trim()
+  const collabExp = $('licMCollabExp').value
+  const notes     = ($('licMNotes').value||'').trim()
+  const errEl     = $('licMErr')
+  const saveBtn   = $('licMSaveBtn')
+  if (!state_val) { errEl.textContent = 'Please select a state.'; errEl.classList.remove('hidden'); return }
+  if (!num && status === 'active') { errEl.textContent = 'License number is required for active licenses.'; errEl.classList.remove('hidden'); return }
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…' }
+  errEl.classList.add('hidden')
+  const permitted_actions = ($('licMPermitted').value||'').trim()
+  const practice_type     = ($('licMPracticeType').value||'').trim()
+  const body = { state: state_val, license_number: num, license_type: type, expiry_date: expiry, status, notes, collab_physician: collab, collab_expiry: collabExp, permitted_actions, practice_type }
+  if (_licMFile.file_data) {
+    body.license_file_name = _licMFile.file_name
+    body.license_file_data = _licMFile.file_data
+    body.license_file_mime = _licMFile.file_mime
+  }
+  try {
+    if (mode === 'admin') {
+      if (licId) {
+        await api(`/api/license-editor/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(body) })
+        if (_licMFile.remove && !_licMFile.file_data) await api(`/api/license-editor/licenses/${licId}/file`, { method: 'DELETE' }).catch(() => {})
+      } else {
+        await api(`/api/license-editor/contractors/${contractorId}/licenses`, { method: 'POST', body: JSON.stringify(body) })
+      }
+    } else {
+      if (licId) {
+        await api(`/api/provider/licenses/${licId}`, { method: 'PUT', body: JSON.stringify(body) })
+        if (_licMFile.remove && !_licMFile.file_data) await api(`/api/provider/licenses/${licId}/file`, { method: 'DELETE' }).catch(() => {})
+      } else {
+        await api('/api/provider/licenses', { method: 'POST', body: JSON.stringify(body) })
+      }
+    }
+    $('licModal').remove()
+    showToast(licId ? 'License updated' : 'License added', 'success')
+    // Refresh the current view
+    if (state.currentPage === 'lic_dashboard') {
+      await renderLicDashboard()
+    } else if (state.currentPage === 'lic_edit') {
+      await renderLicEdit()
+    } else if (state.currentPage === 'provider_licenses') {
+      renderProviderLicenses()
+    }
+  } catch(e) {
+    errEl.textContent = e.message
+    errEl.classList.remove('hidden')
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = licId ? 'Save Changes' : 'Add License' }
+  }
+}
+
+async function licDeleteEntry(licId, contractorId) {
+  if (!confirm('Delete this license? This cannot be undone.')) return
+  try {
+    await api(`/api/license-editor/licenses/${licId}`, { method: 'DELETE' })
+    $('licModal').remove()
+    showToast('License deleted', 'success')
+    if (state.currentPage === 'lic_dashboard') renderLicDashboard()
+    else if (state.currentPage === 'lic_edit') renderLicEdit()
+  } catch(e) { showToast('Delete failed: ' + e.message, 'error') }
+}
+
+// ════════════════════════════════════════════════════
+// LICENSE EDITOR PORTAL  — dedicated role UI
+// ════════════════════════════════════════════════════
+
+// Cached physician list for collab dropdowns — fetched once per session
+let licPhysicianList = []   // for admin/license-editor modal
+let ppPhysicianList  = []   // for provider license modal
+
+async function ensurePhysicianList(endpoint) {
+  // Returns the appropriate cached list, fetching if needed
+  if (endpoint === 'provider') {
+    if (ppPhysicianList.length === 0) {
+      try { ppPhysicianList = await api('/api/physicians') } catch(e) { ppPhysicianList = [] }
+    }
+    return ppPhysicianList
+  } else {
+    if (licPhysicianList.length === 0) {
+      try { licPhysicianList = await api('/api/license-editor/physicians') } catch(e) { licPhysicianList = [] }
+    }
+    return licPhysicianList
+  }
+}
+
+const licEditState = {
+  contractors: [],
+  activeCt: null,      // { id, name, role_group }
+  licenses: [],
+  loading: false,
+  collabData: null,    // { collab_agreements, collab_providers } for active provider
+}
+
+async function renderLicEdit() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const contractors = await api('/api/license-editor/contractors')
+    licEditState.contractors = contractors || []
+    licEditState.activeCt = licEditState.activeCt || (contractors[0] ? { id: contractors[0].id, name: contractors[0].name, role_group: contractors[0].role_group || '' } : null)
+    if (licEditState.activeCt) {
+      const [lics, collab] = await Promise.all([
+        api(`/api/license-editor/contractors/${licEditState.activeCt.id}/licenses`),
+        api(`/api/contractors/${licEditState.activeCt.id}/collab-summary`).catch(() => null)
+      ])
+      licEditState.licenses = lics || []
+      licEditState.collabData = collab
+    }
+    licEditDrawShell()
+  } catch(e) {
+    mc.innerHTML = `<p class="text-red-500 p-4">${e.message}</p>`
+  }
+}
+
+function licEditDrawShell() {
+  const mc = $('mainContent')
+  const ct = licEditState.activeCt
+
+  mc.innerHTML = `
+  <div class="flex gap-4" style="min-height: calc(100vh - 140px)">
+    <!-- Left: provider list -->
+    <div class="w-64 flex-shrink-0 bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden flex flex-col">
+      <div class="px-3 pt-3 pb-2 border-b border-gray-100">
+        <input id="licEditSearch" type="text" placeholder="Search providers…"
+          oninput="licEditFilterList(this.value)"
+          class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-blue-500 outline-none">
+      </div>
+      <div id="licEditProvList" class="overflow-y-auto flex-1 p-2 space-y-0.5">
+        ${licEditState.contractors.map(ct => licEditProvRow(ct)).join('')}
+      </div>
+    </div>
+
+    <!-- Right: license list + add -->
+    <div class="flex-1 min-w-0">
+      ${ct ? `
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm overflow-hidden">
+        <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+          <div>
+            <h3 class="font-bold text-gray-800">${escHtml(ct.name)}</h3>
+            <p class="text-xs text-gray-400 mt-0.5">${ct.role_group ? escHtml(ct.role_group) + ' · ' : ''}${licEditState.licenses.length} license${licEditState.licenses.length !== 1 ? 's' : ''} on file</p>
+          </div>
+          <button onclick="licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+            class="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl shadow-sm transition">
+            <i class="fas fa-plus"></i> Add License
+          </button>
+        </div>
+
+        ${licEditState.licenses.length === 0 ? `
+        <div class="p-12 text-center text-gray-400">
+          <i class="fas fa-map-marked-alt text-4xl mb-3 block text-gray-200"></i>
+          <p class="font-medium mb-1">No licenses on file for ${escHtml(ct.name)}.</p>
+          <button onclick="licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+            class="mt-3 px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-xl transition">
+            <i class="fas fa-plus mr-1"></i> Add First License
+          </button>
+        </div>` : `
+        <div class="divide-y divide-gray-100">
+          ${licEditState.licenses.map(l => licEditLicRow(l, ct)).join('')}
+        </div>`}
+      </div>
+      ${licEditDrawCollabPanel()}
+      ` : `
+      <div class="bg-white rounded-xl border border-gray-200 shadow-sm p-12 text-center text-gray-400">
+        <i class="fas fa-arrow-left text-3xl mb-3 block"></i><p>Select a provider to manage their licenses.</p>
+      </div>`}
+    </div>
+  </div>`
+}
+
+function licEditProvRow(ct) {
+  const isActive = licEditState.activeCt?.id === ct.id
+  return `<button onclick="licEditSelectProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
+    class="w-full text-left px-3 py-2.5 rounded-lg transition-colors ${isActive ? 'bg-blue-50 text-blue-800' : 'hover:bg-gray-50 text-gray-700'}">
+    <div class="font-medium text-sm leading-tight">${escHtml(ct.name)}</div>
+    ${ct.role_group ? `<div class="text-xs ${isActive ? 'text-blue-500' : 'text-gray-400'} mt-0.5">${escHtml(ct.role_group)}</div>` : ''}
+  </button>`
+}
+
+function licEditLicRow(l, ct) {
+  const c = licStatusColor(l)
+  const hasCollab = l.collab_physician && l.collab_physician.trim()
+  const collabExpSoon = hasCollab && licIsExpiringSoon(l.collab_expiry)
+  return `
+  <div class="flex items-start gap-3 px-5 py-3.5 hover:bg-gray-50 transition-colors group">
+    <div class="w-12 h-8 rounded-lg flex items-center justify-center text-white text-xs font-bold flex-shrink-0 mt-0.5 shadow-sm ${c.bg}">${escHtml(l.state)}</div>
+    <div class="flex-1 min-w-0">
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="font-semibold text-gray-800">${escHtml(l.state)}</span>
+        <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${licIsExpired(l) ? 'bg-red-100 text-red-700' : l.status === 'pending' ? 'bg-yellow-100 text-yellow-700' : licIsExpiringSoon(l.expiry_date) ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}">${l.status}</span>
+        ${l.license_type ? `<span class="text-xs text-gray-500 bg-gray-100 px-1.5 py-0.5 rounded">${escHtml(l.license_type)}</span>` : ''}
+        ${l.license_number ? `<span class="text-xs text-gray-400">#${escHtml(l.license_number)}</span>` : '<span class="text-xs text-red-400 font-semibold italic">No # — edit required</span>'}
+      </div>
+      <div class="flex items-center gap-3 mt-1 flex-wrap">
+        ${l.expiry_date ? `<span class="text-xs ${licIsExpiringSoon(l.expiry_date) ? 'text-orange-600 font-semibold' : licIsExpired(l) ? 'text-red-500 font-semibold' : 'text-gray-400'}"><i class="fas fa-calendar text-[10px] mr-0.5"></i>Expires ${l.expiry_date}</span>` : '<span class="text-xs text-gray-300 italic">No expiry date</span>'}
+        ${hasCollab ? `<span class="text-xs text-purple-600 flex items-center gap-1"><i class="fas fa-user-md text-[10px]"></i>${escHtml(l.collab_physician)}${l.collab_expiry ? ' · ' + l.collab_expiry : ''}${collabExpSoon ? ' ⏰' : ''}</span>` : ''}
+      </div>
+      <div class="flex items-center gap-1.5 flex-wrap mt-1">
+        ${l.permitted_actions ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold ${l.permitted_actions.includes('Prescribe') ? 'bg-green-100 text-green-700' : l.permitted_actions.includes('No CRx') ? 'bg-purple-100 text-purple-700' : l.permitted_actions.includes('Pending') ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+        ${cpaPending(l) ? cpaBadgeHtml(l.notes) : (l.notes ? `<span class="text-xs text-gray-400 italic">"${escHtml(l.notes)}"</span>` : '')}
+      </div>
+      ${l.license_file_name ? `<button onclick="licDownloadFile(${JSON.stringify(l.license_file_data||'').replace(/"/g,'&quot;')}, '${escHtml(l.license_file_name)}', '${escHtml(l.license_file_mime||'')}');" class="mt-1 inline-flex items-center gap-1.5 text-xs text-blue-600 hover:text-blue-800 hover:underline"><i class="fas fa-paperclip text-[10px]"></i>${escHtml(l.license_file_name)}</button>` : ''}
+    </div>
+    <div class="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0 mt-0.5">
+      <button onclick="licEditEntry(${l.id})"
+        class="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-blue-50 text-gray-400 hover:text-blue-600 transition">
+        <i class="fas fa-pencil text-xs"></i>
+      </button>
+    </div>
+  </div>`
+}
+
+function licEditDrawCollabPanel() {
+  const cd = licEditState.collabData
+  if (!cd) return ''
+  const agreements = cd.collab_agreements || []
+  const providers  = cd.collab_providers  || []
+  if (agreements.length === 0 && providers.length === 0) return ''
+
+  const expCheck = (dateStr) => {
+    if (!dateStr) return ''
+    const d = new Date(dateStr), n = new Date()
+    if (d < n) return ' ⚠️'
+    if (d < new Date(n.getTime() + 60*24*60*60*1000)) return ' ⏰'
+    return ''
+  }
+
+  let html = '<div class="space-y-3">'
+
+  // Collab Agreements (this provider has these collab MDs)
+  if (agreements.length > 0) {
+    html += `
+    <div class="bg-white rounded-xl border border-purple-200 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-purple-100 bg-purple-50">
+        <h4 class="font-semibold text-purple-800 text-sm"><i class="fas fa-handshake mr-1.5 text-purple-500"></i>Collaborating Agreements <span class="font-normal text-purple-500">(${agreements.length} state${agreements.length!==1?'s':''})</span></h4>
+        <span class="text-xs text-purple-400">MD agreement per state</span>
+      </div>
+      <div class="divide-y divide-purple-50">`
+    for (const l of agreements) {
+      const flag = expCheck(l.collab_expiry)
+      html += `<div class="px-4 py-2.5 space-y-1">
+        <div class="flex items-center gap-3">
+          <span class="w-10 text-center text-xs font-bold text-purple-700 bg-purple-50 border border-purple-200 rounded-md py-0.5 flex-shrink-0">${escHtml(l.state)}</span>
+          <div class="flex-1 min-w-0">
+            <span class="text-sm font-semibold text-gray-800"><i class="fas fa-user-md mr-1 text-purple-400 text-xs"></i>${escHtml(l.collab_physician)}</span>
+            ${l.collab_expiry ? `<span class="ml-2 text-xs text-gray-400">· Agr. exp. ${l.collab_expiry}${flag}</span>` : ''}
+          </div>
+          ${l.permitted_actions ? `<span class="text-xs px-2 py-0.5 rounded-full font-semibold flex-shrink-0 ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''}
+        </div>
+        ${cpaPending(l) ? `<div class="pl-13 mt-0.5">${cpaBadgeHtml(l.notes)}</div>` : (l.notes ? `<div class="pl-13"><span class="inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 font-medium"><i class="fas fa-file-alt text-[10px]"></i>${escHtml(l.notes)}</span></div>` : '')}
+      </div>`
+    }
+    html += `</div></div>`
+  }
+
+  // Collab Providers (NPs/PAs who list this MD as their collab physician)
+  if (providers.length > 0) {
+    const byProvider = {}
+    for (const r of providers) {
+      if (!byProvider[r.contractor_id]) byProvider[r.contractor_id] = { name: r.provider_name, role_group: r.role_group, states: [] }
+      byProvider[r.contractor_id].states.push(r)
+    }
+    const provList = Object.values(byProvider)
+    html += `
+    <div class="bg-white rounded-xl border border-indigo-200 shadow-sm overflow-hidden">
+      <div class="flex items-center justify-between px-4 py-3 border-b border-indigo-100 bg-indigo-50">
+        <h4 class="font-semibold text-indigo-800 text-sm"><i class="fas fa-users mr-1.5 text-indigo-500"></i>Providers Under This Agreement <span class="font-normal text-indigo-500">(${provList.length})</span></h4>
+        <span class="text-xs text-indigo-400">NPs/PAs naming this MD</span>
+      </div>
+      <div class="divide-y divide-indigo-50">`
+    for (const prov of provList) {
+      html += `<div class="px-4 py-2.5">
+        <p class="text-sm font-semibold text-gray-800 mb-1.5"><i class="fas fa-user-nurse mr-1.5 text-indigo-400 text-xs"></i>${escHtml(prov.name)} <span class="text-xs font-normal text-indigo-400">${escHtml(prov.role_group||'')}</span></p>
+        <div class="flex flex-wrap gap-1">`
+      for (const s of prov.states) {
+        const flag = expCheck(s.collab_expiry)
+        html += `<span class="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 border border-indigo-200 text-indigo-700" title="${escHtml(s.collab_expiry?'Agr exp: '+s.collab_expiry:'')}">${escHtml(s.state)}${flag}</span>`
+      }
+      html += `</div></div>`
+    }
+    html += `</div></div>`
+  }
+
+  html += '</div>'
+  return html
+}
+
+async function licEditSelectProvider(id, name, roleGroup) {
+  licEditState.activeCt = { id, name, role_group: roleGroup }
+  try {
+    const [lics, collab] = await Promise.all([
+      api(`/api/license-editor/contractors/${id}/licenses`),
+      api(`/api/contractors/${id}/collab-summary`).catch(() => null)
+    ])
+    licEditState.licenses = lics || []
+    licEditState.collabData = collab
+  } catch(e) {
+    licEditState.licenses = []
+    licEditState.collabData = null
+  }
+  licEditDrawShell()
+}
+
+function licEditFilterList(query) {
+  const list = $('licEditProvList')
+  if (!list) return
+  const q = query.toLowerCase()
+  const filtered = licEditState.contractors.filter(ct => ct.name.toLowerCase().includes(q) || (ct.role_group||'').toLowerCase().includes(q))
+  list.innerHTML = filtered.map(ct => licEditProvRow(ct)).join('')
+}
+
+// ════════════════════════════════════════════════════
+// PUBLIC LICENSING PAGE  — no auth, shareable URL
+// ════════════════════════════════════════════════════
+// ════════════════════════════════════════════════════
+// PARTNER VIEW — Admin management page for the shared
+// licensing view sent to CareValidate / partners
+// ════════════════════════════════════════════════════
+async function renderPartnerView() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex justify-center py-16"><div class="spinner"></div></div>`
+
+  // Load current password first, then use it to fetch the licensing preview.
+  // SECURITY: do NOT hardcode the default password here — fetch it from the server only.
+  let currentPw = ''
+  let licData = null
+  try {
+    const pwRes = await api('/api/admin/config/shared_view_password')
+    currentPw = pwRes?.value || ''
+    // Use the resolved password to fetch the live preview (server now requires it)
+    const dataRes = await fetch('/api/licensing/public?pw=' + encodeURIComponent(currentPw))
+    if (dataRes.ok) licData = await dataRes.json()
+  } catch(_) {}
+
+  const sharedUrl = window.location.origin + '/licensing/public'
+
+  // Build the live preview using the exact same function as the public view
+  const previewHTML = buildPublicLicensingHTML(licData, true)
+
+  mc.innerHTML = `
+  <div class="max-w-5xl space-y-6">
+
+    <!-- Page header -->
+    <div>
+      <h1 class="text-xl font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-share-alt text-blue-500"></i> Partner View Management
+      </h1>
+      <p class="text-sm text-gray-400 mt-1">Everything in one place — the shared licensing link sent to CareValidate, access controls, and a live preview of exactly what they see.</p>
+    </div>
+
+    <!-- ── Access card ────────────────────────────────────── -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100 flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center flex-shrink-0">
+          <i class="fas fa-link text-white text-sm"></i>
+        </div>
+        <div>
+          <h2 class="font-bold text-gray-800 text-sm">Shared Licensing Link</h2>
+          <p class="text-xs text-gray-400">Password-protected view — share this URL with CareValidate</p>
+        </div>
+        <a href="${sharedUrl}" target="_blank"
+          class="ml-auto flex-shrink-0 inline-flex items-center gap-2 px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold transition">
+          <i class="fas fa-external-link-alt text-xs"></i> Open View
+        </a>
+      </div>
+      <div class="p-5 space-y-5">
+
+        <!-- URL row -->
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Shared URL</label>
+          <div class="flex items-center gap-2">
+            <div class="flex-1 font-mono text-sm bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5 text-blue-700 select-all break-all">${sharedUrl}</div>
+            <button onclick="navigator.clipboard.writeText('${sharedUrl}').then(()=>showToast('Link copied!','success'))"
+              class="flex-shrink-0 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium flex items-center gap-2 transition">
+              <i class="fas fa-copy text-xs"></i> Copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Password row -->
+        <div>
+          <label class="block text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Access Password</label>
+          <div class="flex items-center gap-2">
+            <div class="flex items-center gap-3 flex-1 bg-gray-50 border border-gray-200 rounded-xl px-4 py-2.5">
+              <i class="fas fa-lock text-gray-400 flex-shrink-0"></i>
+              <span id="pvPwDisplay" class="font-mono text-sm text-gray-800 select-all flex-1">${escHtml(currentPw)}</span>
+              <button onclick="(el=>el.style.filter=el.style.filter?'':'blur(4px)')($('pvPwDisplay'))"
+                class="text-xs text-gray-400 hover:text-gray-600 flex-shrink-0" title="Toggle visibility"><i class="fas fa-eye"></i></button>
+            </div>
+            <button onclick="navigator.clipboard.writeText(${JSON.stringify(currentPw)}).then(()=>showToast('Password copied!','success'))"
+              class="flex-shrink-0 px-4 py-2.5 rounded-xl border border-gray-200 text-gray-600 hover:bg-gray-50 text-sm font-medium flex items-center gap-2 transition">
+              <i class="fas fa-copy text-xs"></i> Copy
+            </button>
+          </div>
+        </div>
+
+        <!-- Change password -->
+        <div class="p-4 rounded-xl bg-amber-50 border border-amber-200">
+          <p class="text-xs font-bold text-amber-700 mb-1 flex items-center gap-1.5">
+            <i class="fas fa-key"></i> Change Password
+          </p>
+          <p class="text-xs text-amber-600 mb-3">Updates immediately — no redeploy needed. Send the new password to CareValidate after saving.</p>
+          <div class="flex gap-2">
+            <input id="pvNewPw" type="text" placeholder="New password…"
+              class="flex-1 text-sm border border-amber-300 rounded-xl px-3 py-2 focus:outline-none focus:ring-2 focus:ring-amber-400 bg-white"
+              value="${escHtml(currentPw)}"/>
+            <button onclick="pvSavePassword()"
+              class="px-4 py-2 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-sm font-semibold flex items-center gap-2 transition flex-shrink-0">
+              <i class="fas fa-save text-xs"></i> Save
+            </button>
+          </div>
+          <div id="pvPwMsg" class="hidden mt-2 text-xs font-medium"></div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ── Notes for the team ────────────────────────────── -->
+    <div class="bg-blue-50 border border-blue-200 rounded-2xl p-5 space-y-2">
+      <p class="font-bold text-blue-800 text-sm flex items-center gap-2"><i class="fas fa-info-circle"></i> Notes for the team</p>
+      <ul class="space-y-1.5 text-xs text-blue-700 list-disc list-inside">
+        <li>The shared link above is what you send to CareValidate — it requires the password to open.</li>
+        <li>The view shows: provider name, state, license #, license type, expiry, collab physician, permitted actions. It does <strong>not</strong> show payroll, internal notes, or documents.</li>
+        <li>Providers fill in <strong>Permitted Actions</strong> from their own portal under State Licenses → Edit. Admins and license editors can also set it. CareValidate uses this to know what permissions to grant each provider per state.</li>
+        <li>States showing <strong>CPA Pending</strong> mean the collaborating physician agreement is not yet fully signed.</li>
+      </ul>
+    </div>
+
+  </div>
+
+  <!-- ── Live preview — breaks out of max-w-5xl to match the real full-width public view ── -->
+  <div class="mt-6">
+    <div class="flex items-center gap-2 mb-3 max-w-5xl">
+      <h2 class="text-base font-bold text-gray-800 flex items-center gap-2">
+        <i class="fas fa-eye text-purple-500"></i> Live Preview — What CareValidate Sees
+      </h2>
+      <span class="text-xs bg-purple-50 text-purple-600 border border-purple-200 rounded-full px-2.5 py-0.5 font-medium">Read-only · Exact match</span>
+    </div>
+    <!-- Mirror the exact public shell: bg-gray-50 page, max-w-7xl centered body, px-4 py-8 — no extra wrapper padding -->
+    <div class="rounded-2xl border-2 border-dashed border-purple-200 overflow-hidden">
+      <!-- Mimics the public view header bar -->
+      <div class="bg-white border-b border-gray-200 shadow-sm px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-xl bg-blue-600 flex items-center justify-center shadow">
+            <i class="fas fa-shield-alt text-white text-sm"></i>
+          </div>
+          <div>
+            <p class="text-sm font-bold text-gray-800 leading-none">LionMDs Provider Licensing</p>
+            <p class="text-xs text-gray-400 mt-0.5">Provider licensing status — read-only view</p>
+          </div>
+        </div>
+        <span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
+          <i class="fas fa-lock text-blue-500"></i> Password Protected
+        </span>
+      </div>
+      <!-- Mimics pubBody: max-w-7xl mx-auto px-4 py-8 on bg-gray-50 -->
+      <div class="bg-gray-50 px-4 py-8">
+        ${previewHTML}
+      </div>
+      <!-- Mimics the public footer -->
+      <div class="border-t border-gray-200 py-3 text-center text-xs text-gray-400 bg-white">
+        LionMDs &mdash; Provider Licensing Status &mdash; Data refreshed in real time
+      </div>
+    </div>
+  </div>`
+}
+
+async function pvSavePassword() {
+  const newPw = ($('pvNewPw').value || '').trim()
+  const msgEl = $('pvPwMsg')
+  msgEl.classList.add('hidden')
+  if (!newPw || newPw.length < 6) {
+    msgEl.textContent = 'Password must be at least 6 characters.'
+    msgEl.className = 'mt-2 text-xs font-medium text-red-600'
+    msgEl.classList.remove('hidden')
+    return
+  }
+  try {
+    await api('/api/admin/config/shared_view_password', { method: 'PUT', body: JSON.stringify({ value: newPw }) })
+    msgEl.textContent = '✅ Password updated! Share the new password with CareValidate.'
+    msgEl.className = 'mt-2 text-xs font-medium text-green-700'
+    msgEl.classList.remove('hidden')
+    // Update the displayed password
+    const disp = $('pvPwDisplay')
+    if (disp) disp.textContent = newPw
+    showToast('Password updated successfully', 'success')
+  } catch(e) {
+    msgEl.textContent = 'Error: ' + e.message
+    msgEl.className = 'mt-2 text-xs font-medium text-red-600'
+    msgEl.classList.remove('hidden')
+  }
+}
+
+// ── Shared rendering helper — produces the exact HTML CV sees ──────
+// Called by both renderPublicLicensing() and renderPartnerView() so
+// the admin preview is a pixel-identical match to the live shared view.
+function buildPublicLicensingHTML(data, isAdminView) {
+  const seen = new Map()
+  for (const r of (data?.licenses || [])) {
+    const key = r.contractor_id + '-' + r.state
+    const ex = seen.get(key)
+    if (!ex || (r.license_number && !ex.license_number)) seen.set(key, r)
+  }
+  const rows = Array.from(seen.values())
+
+  if (!rows.length) {
+    return `<div class="text-center text-gray-400 py-16"><i class="fas fa-folder-open text-4xl mb-3"></i><p>No licensing data available.</p></div>`
+  }
+
+  const providerMap = {}
+  const stateSet = new Set()
+  for (const r of rows) {
+    if (!providerMap[r.provider_name]) providerMap[r.provider_name] = { name: r.provider_name, role_group: r.role_group || '', licenses: [] }
+    providerMap[r.provider_name].licenses.push(r)
+    stateSet.add(r.state)
+  }
+  const providers = Object.values(providerMap).sort((a,b) => a.name.localeCompare(b.name))
+  const states = [...stateSet].sort()
+
+  const today = new Date(); today.setHours(0,0,0,0)
+  const in60  = new Date(today); in60.setDate(in60.getDate() + 60)
+  let cntActive=0, cntExpiring=0, cntExpired=0, cntCollab=0, cntCpaReq=0
+  for (const r of rows) {
+    const exp = r.expiry_date ? new Date(r.expiry_date) : null
+    if (r.status === 'expired' || (exp && exp < today)) cntExpired++
+    else if (exp && exp <= in60) cntExpiring++
+    else if (cpaBlocksActive(r)) cntCpaReq++
+    else if (r.status === 'active') cntActive++
+    if (r.collab_physician) cntCollab++
+  }
+
+  const kpiCard = (icon, label, val, color) =>
+    `<div class="bg-white rounded-xl border border-gray-200 shadow-sm px-5 py-4 flex items-center gap-4">
+      <div class="w-10 h-10 rounded-xl ${color} flex items-center justify-center flex-shrink-0">
+        <i class="${icon} text-white"></i>
+      </div>
+      <div><p class="text-2xl font-bold text-gray-800">${val}</p><p class="text-xs text-gray-500 mt-0.5">${label}</p></div>
+    </div>`
+
+  const pubStatusColor = (r) => {
+    const exp = r.expiry_date ? new Date(r.expiry_date) : null
+    // Public/partner view: only show Active or Pending to non-admins
+    if (!isAdminView) {
+      if (r.status === 'pending' || r.status === 'in_progress') return { bg:'bg-yellow-50',   text:'text-yellow-700', ring:'ring-yellow-200' }
+      if (r.status === 'active')                                return { bg:'bg-green-100',   text:'text-green-700',  ring:'ring-green-200' }
+      return { bg:'bg-gray-100', text:'text-gray-600', ring:'ring-gray-200' }
+    }
+    // Admin view: full status palette
+    if (r.status === 'expired' || (exp && exp < today))       return { bg:'bg-red-100',    text:'text-red-700',    ring:'ring-red-200' }
+    if (exp && exp <= in60)                                   return { bg:'bg-orange-100',  text:'text-orange-700', ring:'ring-orange-200' }
+    if (r.status === 'pending' || r.status === 'in_progress') return { bg:'bg-yellow-50',   text:'text-yellow-700', ring:'ring-yellow-200' }
+    if (cpaBlocksActive(r))                                   return { bg:'bg-amber-100',   text:'text-amber-700',  ring:'ring-amber-200' }
+    if (r.status === 'active')                                return { bg:'bg-green-100',   text:'text-green-700',  ring:'ring-green-200' }
+    return { bg:'bg-gray-100', text:'text-gray-600', ring:'ring-gray-200' }
+  }
+  const fmtDate = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : ''
+  const statusLabel = (s, r) => {
+    if (isAdminView && r && cpaBlocksActive(r)) return 'CPA Req.'
+    return { active:'Active', pending:'Pending', expired:'Expired', in_progress:'In Progress', inactive:'Inactive' }[s] || s
+  }
+
+  // Matrix
+  const matrixRows = providers.map(prov => {
+    const licByState = {}
+    for (const l of prov.licenses) licByState[l.state] = l
+    const cells = states.map(st => {
+      const l = licByState[st]
+      if (!l) return `<td class="px-2 py-2 text-center"><span class="text-gray-200 text-xs">—</span></td>`
+      const c = pubStatusColor(l)
+      const isCpaBlocked = cpaBlocksActive(l)
+      // Purple dot: collab MD on file, only when not CPA-blocked (contradictory otherwise)
+      const collabDot = (l.collab_physician && !isCpaBlocked) ? `<span class="ml-1 inline-block w-2 h-2 rounded-full bg-purple-500 align-middle" title="Collab: ${escHtml(l.collab_physician)}"></span>` : ''
+      // Amber dot: only for NP/PA in CPA-required state with unsigned CPA, and not already amber cell
+      const cpaDot = (isAdminView && cpaRequiredForLic(l) && cpaPending(l) && !isCpaBlocked) ? `<span class="ml-0.5 inline-block w-2 h-2 rounded-full bg-amber-400 align-middle" title="CPA not yet signed"></span>` : ''
+      const expTip = l.expiry_date ? ` title="Expires ${fmtDate(l.expiry_date)}"` : ''
+      // Admin cells are clickable to open detail popover
+      const clickAttr = isAdminView && l.id ? ` onclick="licShowDetail(${l.id})" style="cursor:pointer"` : ''
+      return `<td class="px-2 py-2 text-center">
+        <span class="inline-flex items-center gap-0.5 px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring} whitespace-nowrap"${expTip}${clickAttr}>
+          ${statusLabel(l.status, l)}${collabDot}${cpaDot}
+        </span>
+      </td>`
+    }).join('')
+    const rgBadge = prov.role_group ? `<span class="ml-2 text-xs text-gray-400 font-normal">${prov.role_group}</span>` : ''
+    return `<tr class="border-b border-gray-100 hover:bg-blue-50/30 transition">
+      <td class="px-3 py-2 font-semibold text-gray-700 text-sm whitespace-nowrap sticky left-0 bg-white z-10">${prov.name}${rgBadge}</td>
+      ${cells}
+    </tr>`
+  }).join('')
+
+  const matrixHeader = `<tr class="bg-gray-50 border-b border-gray-200">
+    <th class="px-3 py-2 text-left text-xs font-semibold text-gray-500 sticky left-0 bg-gray-50 z-10 min-w-[160px]">Provider</th>
+    ${states.map(s => `<th class="px-2 py-2 text-center text-xs font-semibold text-gray-500 min-w-[90px]">${s}</th>`).join('')}
+  </tr>`
+
+  const legend = isAdminView
+    ? `<div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+    <span class="font-semibold text-gray-600 mr-1">Legend:</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 ring-1 ring-green-200 font-semibold">Active</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 ring-1 ring-orange-200 font-semibold">Expiring ≤60d</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200 font-semibold">Pending</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-amber-100 text-amber-700 ring-1 ring-amber-200 font-semibold">CPA Req.</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-red-100 text-red-700 ring-1 ring-red-200 font-semibold">Expired</span>
+    <span class="inline-flex items-center gap-1 ml-2"><span class="inline-block w-2 h-2 rounded-full bg-purple-500"></span><span>Collab MD</span></span>
+    <span class="inline-flex items-center gap-1"><span class="inline-block w-2 h-2 rounded-full bg-amber-400"></span><span class="text-amber-700 font-medium">CPA unsigned</span></span>
+    <span class="ml-2 text-[10px] text-blue-600 font-semibold"><i class="fas fa-hand-pointer mr-1"></i>Click cell for detail</span>
+  </div>`
+    : `<div class="flex flex-wrap items-center gap-3 text-xs text-gray-500">
+    <span class="font-semibold text-gray-600 mr-1">Legend:</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 ring-1 ring-green-200 font-semibold">Active</span>
+    <span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-yellow-50 text-yellow-700 ring-1 ring-yellow-200 font-semibold">Pending</span>
+    <span class="inline-flex items-center gap-1 ml-2"><span class="inline-block w-2 h-2 rounded-full bg-purple-500"></span><span>Collab MD on file</span></span>
+  </div>`
+
+  // Provider detail rows
+  const detailRows = providers.map(prov => {
+    const pendingCpaLics = prov.licenses.filter(l => cpaPending(l))
+    const hasCpaPending = pendingCpaLics.length > 0
+    const licRows = prov.licenses.sort((a,b)=>a.state.localeCompare(b.state)).map(l => {
+      const c = pubStatusColor(l)
+      const expStr = l.expiry_date ? fmtDate(l.expiry_date) : '—'
+      const collabStr = l.collab_physician
+        ? `<span class="ml-2 text-xs text-purple-600"><i class="fas fa-handshake mr-1"></i>${l.collab_physician}${l.collab_expiry ? ' · exp ' + fmtDate(l.collab_expiry) : ''}</span>` : ''
+      const cpaBadge = cpaPending(l) ? `<td class="px-4 py-2">${cpaBadgeHtml(l.notes)}</td>` : '<td class="px-4 py-2"></td>'
+      const permBadge = l.permitted_actions ? `<span class="ml-1 text-xs px-1.5 py-0.5 rounded-full font-semibold ${l.permitted_actions.includes('Prescribe')?'bg-green-100 text-green-700':l.permitted_actions.includes('No CRx')?'bg-purple-100 text-purple-700':'bg-gray-100 text-gray-500'}">${escHtml(l.permitted_actions)}</span>` : ''
+      return `<tr class="border-b border-gray-50 last:border-0">
+        <td class="px-4 py-2 font-medium text-gray-700 text-sm w-14">${l.state}</td>
+        <td class="px-4 py-2 text-xs text-gray-500">${l.license_type || '—'}</td>
+        <td class="px-4 py-2">
+          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ring-1 ${c.bg} ${c.text} ${c.ring}">${statusLabel(l.status, l)}</span>
+        </td>
+        <td class="px-4 py-2 text-xs text-gray-500">${expStr}${collabStr}${permBadge}</td>
+        ${cpaBadge}
+      </tr>`
+    }).join('')
+    return `<details class="group">
+      <summary class="px-5 py-3 cursor-pointer hover:bg-gray-50 flex items-center justify-between select-none list-none">
+        <span class="font-semibold text-gray-700 text-sm flex items-center gap-2 flex-wrap">
+          ${prov.name} <span class="text-xs font-normal text-gray-400">${prov.role_group}</span>
+          ${hasCpaPending ? `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-800 border border-amber-300"><i class="fas fa-exclamation-triangle text-[10px]"></i>CPA Pending (${pendingCpaLics.length} state${pendingCpaLics.length!==1?'s':''})</span>` : ''}
+        </span>
+        <span class="text-xs text-gray-400 flex-shrink-0">${prov.licenses.length} license${prov.licenses.length!==1?'s':''} <i class="fas fa-chevron-down ml-1 group-open:rotate-180 transition-transform"></i></span>
+      </summary>
+      <div class="px-4 pb-3">
+        <table class="w-full text-sm"><tbody>${licRows}</tbody></table>
+      </div>
+    </details>`
+  }).join('')
+
+  return `
+    <!-- KPI bar -->
+    <div class="grid grid-cols-2 sm:grid-cols-4 ${cntCpaReq > 0 ? 'lg:grid-cols-5' : ''} gap-4 mb-8">
+      ${kpiCard('fas fa-check-circle', 'Active Licenses', cntActive, 'bg-green-500')}
+      ${kpiCard('fas fa-exclamation-triangle', 'Expiring Soon', cntExpiring, 'bg-orange-400')}
+      ${kpiCard('fas fa-times-circle', 'Expired', cntExpired, 'bg-red-500')}
+      ${kpiCard('fas fa-handshake', 'Collab Agreements', cntCollab, 'bg-purple-500')}
+      ${cntCpaReq > 0 ? kpiCard('fas fa-file-signature', 'CPA Unsigned', cntCpaReq, 'bg-amber-500') : ''}
+    </div>
+
+    <!-- Matrix -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden mb-6">
+      <div class="px-5 py-4 border-b border-gray-100 flex items-center justify-between gap-4 flex-wrap">
+        <div>
+          <h2 class="text-base font-bold text-gray-800">State Licensing Matrix</h2>
+          <p class="text-xs text-gray-400 mt-0.5">${providers.length} provider${providers.length!==1?'s':''} &nbsp;·&nbsp; ${states.length} state${states.length!==1?'s':''} &nbsp;·&nbsp; ${rows.length} license record${rows.length!==1?'s':''}</p>
+        </div>
+        ${legend}
+      </div>
+      <div class="overflow-x-auto">
+        <table class="w-full border-collapse text-sm">
+          <thead>${matrixHeader}</thead>
+          <tbody>${matrixRows}</tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Provider detail list -->
+    <div class="bg-white rounded-2xl border border-gray-200 shadow-sm overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100">
+        <h2 class="text-base font-bold text-gray-800">Provider Detail</h2>
+        <p class="text-xs text-gray-400 mt-0.5">License type, expiry date, and collaborating physician per provider</p>
+      </div>
+      <div class="divide-y divide-gray-100">${detailRows}</div>
+    </div>`
+}
+
+async function renderPublicLicensing() {
+  // ── Password gate ─────────────────────────────────────────────────
+  // The password is validated SERVER-SIDE by /api/licensing/public.
+  // We never fetch or compare the password on the client.
+  // The entered password is stored in sessionStorage and sent as a
+  // query param on every data request — the server returns 401 if wrong.
+  const PUB_KEY = 'lmd_pub_pw'  // stores the verified password, not a boolean flag
+
+  // Helper: attempt to load data with the given password
+  async function tryFetchLicensingData(pw) {
+    const res = await fetch('/api/licensing/public?pw=' + encodeURIComponent(pw))
+    return res  // caller checks .status
+  }
+
+  // If we have a cached password from this session, try it immediately
+  const cachedPw = sessionStorage.getItem(PUB_KEY)
+
+  // Show the full-page shell first (used whether gated or not)
+  function showShell() {
+    document.body.innerHTML = `
+    <div id="pubRoot" class="min-h-screen bg-gray-50 font-sans">
+      <header class="bg-white border-b border-gray-200 shadow-sm">
+        <div class="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
+          <div class="flex items-center gap-3">
+            <div class="w-9 h-9 rounded-xl bg-blue-600 flex items-center justify-center shadow">
+              <i class="fas fa-shield-alt text-white text-base"></i>
+            </div>
+            <div>
+              <h1 class="text-lg font-bold text-gray-800 leading-none">LionMDs Provider Licensing</h1>
+              <p class="text-xs text-gray-400 mt-0.5">Provider licensing status &mdash; read-only view</p>
+            </div>
+          </div>
+          <span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 rounded-full px-3 py-1 font-medium flex items-center gap-1.5">
+            <i class="fas fa-lock text-blue-500"></i> Password Protected
+          </span>
+        </div>
+      </header>
+      <div id="pubBody" class="max-w-7xl mx-auto px-4 py-8">
+        <div class="flex items-center justify-center h-40"><div class="spinner"></div></div>
+      </div>
+      <footer class="mt-12 border-t border-gray-200 py-5 text-center text-xs text-gray-400">
+        LionMDs &mdash; Provider Licensing Status &mdash; Data refreshed in real time &mdash;
+        <span id="pubTimestamp"></span>
+      </footer>
+    </div>`
+    if (!document.querySelector('script[src*="tailwindcss"]')) {
+      const tw = document.createElement('script'); tw.src = 'https://cdn.tailwindcss.com'; document.head.appendChild(tw)
+    }
+    if (!document.querySelector('link[href*="fontawesome"]')) {
+      const fa = document.createElement('link'); fa.rel = 'stylesheet'
+      fa.href = 'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'
+      document.head.appendChild(fa)
+    }
+    document.title = 'LionMDs — Provider Licensing'
+  }
+
+  function showGate(errorMsg) {
+    document.body.innerHTML = `
+    <div class="min-h-screen bg-gray-50 flex items-center justify-center font-sans">
+      <div class="bg-white rounded-2xl shadow-lg border border-gray-200 w-full max-w-sm mx-4 p-8">
+        <div class="flex items-center gap-3 mb-6">
+          <div class="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center shadow">
+            <i class="fas fa-shield-alt text-white"></i>
+          </div>
+          <div>
+            <h1 class="text-base font-bold text-gray-800 leading-none">LionMDs Licensing</h1>
+            <p class="text-xs text-gray-400 mt-0.5">Enter password to view</p>
+          </div>
+        </div>
+        <div id="pubGateError" class="${errorMsg ? '' : 'hidden'} mb-3 text-xs text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
+          ${errorMsg || 'Incorrect password. Please try again.'}
+        </div>
+        <input id="pubGatePw" type="password" placeholder="Password"
+          class="w-full border border-gray-300 rounded-xl px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 mb-3"
+          onkeydown="if(event.key==='Enter')pubGateSubmit()"/>
+        <button onclick="pubGateSubmit()"
+          class="w-full bg-blue-600 hover:bg-blue-700 text-white font-semibold rounded-xl py-2.5 text-sm transition">
+          <i class="fas fa-unlock mr-2"></i>View Licensing Dashboard
+        </button>
+      </div>
+    </div>`
+    document.title = 'LionMDs — Licensing'
+    if (!document.querySelector('script[src*="tailwindcss"]')) {
+      const tw = document.createElement('script'); tw.src = 'https://cdn.tailwindcss.com'; document.head.appendChild(tw)
+    }
+    if (!document.querySelector('link[href*="fontawesome"]')) {
+      const fa = document.createElement('link'); fa.rel = 'stylesheet'
+      fa.href = 'https://cdn.jsdelivr.net/npm/@fortawesome/fontawesome-free@6.4.0/css/all.min.css'
+      document.head.appendChild(fa)
+    }
+    // pubGateSubmit validates server-side — no password comparison in the browser
+    window.pubGateSubmit = async function() {
+      const btn = document.querySelector('button[onclick="pubGateSubmit()"]')
+      const val = document.getElementById('pubGatePw').value
+      if (!val) return
+      if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-2"></i>Checking…' }
+      try {
+        const res = await tryFetchLicensingData(val)
+        if (res.status === 401) {
+          document.getElementById('pubGateError').classList.remove('hidden')
+          document.getElementById('pubGatePw').value = ''
+          document.getElementById('pubGatePw').focus()
+          if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-unlock mr-2"></i>View Licensing Dashboard' }
+          return
+        }
+        if (!res.ok) throw new Error('Server error — please try again')
+        // Server accepted the password — cache it and render
+        sessionStorage.setItem(PUB_KEY, val)
+        const data = await res.json()
+        showShell()
+        renderLicensingData(data)
+      } catch(err) {
+        document.getElementById('pubGateError').textContent = err.message || 'Could not connect. Please try again.'
+        document.getElementById('pubGateError').classList.remove('hidden')
+        if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-unlock mr-2"></i>View Licensing Dashboard' }
+      }
+    }
+    setTimeout(() => document.getElementById('pubGatePw')?.focus(), 100)
+  }
+
+  function renderLicensingData(data) {
+    const body = document.getElementById('pubBody')
+    if (!body) return
+    const ts = document.getElementById('pubTimestamp')
+    if (ts) ts.textContent = 'Last loaded: ' + new Date().toLocaleString()
+    body.innerHTML = buildPublicLicensingHTML(data, false)
+  }
+
+  // ── Try cached password first, fall through to gate on 401 ────────
+  if (cachedPw) {
+    showShell()
+    try {
+      const res = await tryFetchLicensingData(cachedPw)
+      if (res.status === 401) {
+        // Cached password is no longer valid (password was changed)
+        sessionStorage.removeItem(PUB_KEY)
+        showGate('Password has changed. Please enter the new password.')
+        return
+      }
+      if (!res.ok) throw new Error('Failed to load licensing data')
+      const data = await res.json()
+      renderLicensingData(data)
+    } catch(err) {
+      const body = document.getElementById('pubBody')
+      if (body) body.innerHTML = `<div class="text-center text-red-500 py-16">
+        <i class="fas fa-exclamation-circle text-4xl mb-3"></i>
+        <p class="font-semibold">Could not load licensing data</p>
+        <p class="text-sm text-gray-500 mt-1">${err.message}</p>
+      </div>`
+    }
+  } else {
+    // No cached password — show the gate
+    showGate(null)
+  }
+}
+
+// ════════════════════════════════════════════════════
+// APP INITIALIZATION
+// ════════════════════════════════════════════════════
+window.addEventListener('DOMContentLoaded', async () => {
+  // Initialize PDF.js worker early so it's ready for resume uploads
+  try {
+    const pdfjsLib = window['pdfjs-dist/build/pdf'] || window.pdfjsLib
+    if (pdfjsLib && !pdfjsLib.GlobalWorkerOptions.workerSrc) {
+      pdfjsLib.GlobalWorkerOptions.workerSrc =
+        'https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.worker.min.js'
+    }
+  } catch(_) {}
+
+  // Check for invite token in URL first (?token=xxx)
+  const hasInvite = await checkInviteToken()
+  if (hasInvite) return
+
+  // ── Clean path routing ──────────────────────────────────────────
+  const path = window.location.pathname.replace(/\/$/, '') || '/'
+
+  // Reverse map: URL path → page id
+  const PATH_TO_PAGE = {
+    '/dashboard':          'dashboard',
+    '/upload':             'upload',
+    '/consults':           'consults',
+    '/payroll':            'payroll',
+    '/contractors':        'contractors',
+    '/contractors/onboarded': 'contractors',  // ob sub-tab
+    '/onboarding':         'onboarding',
+    '/onboarding/calendar':'onboarding',
+    '/rates':              'rates',
+
+    '/users':              'users',
+    '/payments':           'payments',
+    '/portal/profile':     'provider_profile',
+    '/portal/payroll':     'provider_payroll',
+    '/portal/consults':    'provider_consults',
+    '/portal/licenses':    'provider_licenses',
+    '/portal/documents':      'provider_documents',
+    '/portal/availability':   'provider_availability',
+    '/availability':          'availability',
+    '/manager/contractors':   'mgr_contractors',
+    '/manager/licenses':      'mgr_licenses',
+    '/manager/consults':      'mgr_consults',
+    '/manager/availability':  'mgr_availability',
+    '/licensing':             'lic_dashboard',
+    '/licensing/edit':        'lic_edit',
+    '/partner-view':          'partner_view',
+  }
+
+  const appPage = PATH_TO_PAGE[path]
+
+
+
+  if (path === '/licensing/public') {
+    history.replaceState({}, '', '/licensing/public')
+    renderPublicLicensing()
+    return
+  }
+
+  if (path === '/apply') {
+    history.replaceState({}, '', '/apply')
+    showApplyForm()
+    return
+  }
+
+  if (path === '/login') {
+    history.replaceState({}, '', '/login')
+    const restored = await tryRestoreSession()
+    if (!restored) showLoginForm()
+    return
+  }
+
+  if (path === '/portal' || path.startsWith('/portal/')) {
+    const restored = await tryRestoreSession()
+    if (!restored) showLoginForm()
+    return
+  }
+
+  if (appPage) {
+    // Deep link to an in-app page — restore session then navigate there
+    const restored = await tryRestoreSession()
+    if (restored) {
+      // Override whatever page tryRestoreSession landed on
+      navigate(appPage)
+    } else {
+      // Not logged in — go to login, remember where they wanted to go
+      localStorage.setItem('lmd_last_page', appPage)
+      showLoginForm()
+    }
+    return
+  }
+
+  // Default (/) — try to restore session, otherwise show landing page
+  await tryRestoreSession()
+
+  // Handle browser back/forward between clean paths
+  window.addEventListener('popstate', () => {
+    const p = window.location.pathname.replace(/\/$/, '') || '/'
+    if (p === '/apply') { showApplyForm() }
+    else if (p === '/login') { showLoginForm() }
+    else if (p === '/' || p === '') {
+      $('applyScreen').classList.add('hidden')
+      $('loginPanel').classList.add('hidden')
+      $('loginScreen').classList.remove('hidden')
+      $('landingPage').classList.remove('hidden')
+      document.body.style.overflow = ''
+    }
+    // In-app popstate: browser back/forward handled naturally by navigate()
+  })
+})
+
+// ════════════════════════════════════════════════════════════════════════════
+// PROVIDER AVAILABILITY MODULE — Frontend
+// ════════════════════════════════════════════════════════════════════════════
+
+const avState = {
+  schedule: [],       // weekly schedule rows
+  blocks:   [],       // upcoming block entries
+  saving:   false,
+}
+
+const AV_DAYS = ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday']
+const AV_DAYS_SHORT = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']
+
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function avFmtDate(dateStr) {
+  if (!dateStr) return ''
+  const d = new Date(dateStr + 'T12:00:00')
+  return d.toLocaleDateString('en-US', { weekday:'short', month:'short', day:'numeric', year:'numeric' })
+}
+
+function avNext30Days() {
+  const days = []
+  const today = new Date()
+  for (let i = 0; i < 30; i++) {
+    const d = new Date(today)
+    d.setDate(today.getDate() + i)
+    days.push(d.toISOString().slice(0, 10))
+  }
+  return days
+}
+
+function avTodayStr() {
+  const d = new Date()
+  return d.getFullYear() + '-' + String(d.getMonth() + 1).padStart(2, '0') + '-' + String(d.getDate()).padStart(2, '0')
+}
+
+// Get effective limit for a contractor on a given date
+// Checks block overrides first, then weekly schedule, then default
+function avEffectiveLimit(schedule, blocks, dateStr) {
+  // Check block override
+  const block = (blocks || []).find(b => b.block_date === dateStr)
+  if (block) return { limit: block.max_consults || 0, source: 'block', block }
+  // Check weekly schedule
+  const dow = new Date(dateStr + 'T12:00:00').getDay()
+  const sched = (schedule || []).find(s => s.day_of_week === dow)
+  if (sched) return { limit: sched.max_consults, source: 'schedule', sched }
+  // Default: available, no set limit
+  return { limit: null, source: 'default' }
+}
+
+function avStatusChip(limit, small) {
+  const sz = small ? 'text-xs px-1.5 py-0.5' : 'text-sm px-2.5 py-1'
+  if (limit === 0)    return `<span class="${sz} rounded-full font-semibold bg-red-100 text-red-700"><i class="fas fa-ban mr-1"></i>Unavailable</span>`
+  if (limit === null) return `<span class="${sz} rounded-full font-semibold bg-green-100 text-green-700"><i class="fas fa-check mr-1"></i>Available</span>`
+  return `<span class="${sz} rounded-full font-semibold bg-amber-100 text-amber-700"><i class="fas fa-tachometer-alt mr-1"></i>${limit} max</span>`
+}
+
+// ── PROVIDER PORTAL: My Availability ──────────────────────────────────────
+
+async function renderProviderAvailability() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const [schedule, blocks] = await Promise.all([
+      api('/api/availability/schedule'),
+      api('/api/availability/blocks'),
+    ])
+    avState.schedule = schedule || []
+    avState.blocks   = blocks   || []
+    avDrawProviderPage()
+  } catch(e) {
+    mc.innerHTML = `<div class="text-red-500 p-6">Error loading availability: ${e.message}</div>`
+  }
+}
+
+function avDrawProviderPage() {
+  const mc = $('mainContent')
+  const today = avTodayStr()
+  const futureBlocks = avState.blocks.filter(b => b.block_date >= today).sort((a,b) => a.block_date.localeCompare(b.block_date))
+
+  // Build schedule map: dow → row
+  const schedMap = {}
+  for (const s of avState.schedule) schedMap[s.day_of_week] = s
+
+  mc.innerHTML = `
+  <div class="max-w-3xl space-y-6">
+
+    <!-- Weekly Schedule Card — greyed out, not editable by providers -->
+    <div class="card p-0 overflow-hidden opacity-50 pointer-events-none select-none">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-week mr-2 text-teal-600"></i>Weekly Schedule</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Managed by your LionMD admin — contact your team to make changes.</p>
+        </div>
+        <span class="text-xs text-indigo-400 bg-indigo-50 px-3 py-1.5 rounded-lg font-medium"><i class="fas fa-clock mr-1"></i>Coming soon</span>
+      </div>
+      <div class="divide-y divide-gray-50">
+        ${[1,2,3,4,5,6,0].map(dow => {
+          const row = schedMap[dow]
+          const maxC = row ? row.max_consults : 10
+          const loc  = row ? (row.location || '') : ''
+          const isOff = maxC === 0
+          return `
+          <div class="flex items-center gap-4 px-5 py-3 ${isOff ? 'bg-gray-50 opacity-70' : ''}">
+            <div class="w-24 flex-shrink-0">
+              <span class="text-sm font-semibold ${isOff ? 'text-gray-400' : 'text-gray-700'}">${AV_DAYS[dow]}</span>
+            </div>
+            <div class="flex items-center gap-2">
+              <label class="text-xs text-gray-400">Max consults</label>
+              <input type="number" min="0" max="99" value="${maxC}" disabled
+                class="w-16 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 bg-gray-50 cursor-not-allowed">
+              <span class="ml-1">${avStatusChip(maxC, true)}</span>
+            </div>
+            <div class="flex-1">
+              <input type="text" value="${escHtml(loc)}" disabled placeholder="Location (optional)"
+                class="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-400 bg-gray-50 cursor-not-allowed">
+            </div>
+          </div>`
+        }).join('')}
+      </div>
+    </div>
+
+    <!-- Block Out a Date Card -->
+    <div class="card p-0 overflow-hidden">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-times mr-2 text-red-500"></i>Block Out a Date</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Out of town, vacation, or limited day? Submit here — your team will follow up via email to confirm your availability.</p>
+        </div>
+      </div>
+      <div class="px-5 py-4">
+        <div class="grid grid-cols-2 gap-4 mb-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Date *</label>
+            <input type="date" id="avBlockDate" min="${today}"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-300 outline-none">
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Type</label>
+            <select id="avBlockType" onchange="avToggleBlockLimit()"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-red-300 outline-none">
+              <option value="unavailable">🔴 Fully unavailable</option>
+              <option value="limited">🟡 Limited availability</option>
+            </select>
+          </div>
+          <div id="avBlockLimitWrap" class="hidden">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Approx. consults available <span class="font-normal text-gray-400">(team will confirm)</span></label>
+            <input type="number" min="1" max="99" value="3" id="avBlockLimit"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-amber-300 outline-none">
+          </div>
+          <div class="${''}">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Reason <span class="font-normal text-gray-400">(optional — shared with admin)</span></label>
+            <input type="text" id="avBlockReason" placeholder="e.g. Out of town, conference, vacation…"
+              class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2 focus:ring-2 focus:ring-gray-300 outline-none">
+          </div>
+        </div>
+        <button onclick="avSubmitBlock()"
+          class="bg-red-600 hover:bg-red-700 text-white px-5 py-2 rounded-lg text-sm font-semibold transition flex items-center gap-1.5">
+          <i class="fas fa-paper-plane"></i> Submit Block-out
+        </button>
+        <p class="text-xs text-gray-400 mt-2"><i class="fas fa-bell mr-1"></i>Your LionMD team will receive an email notification when you submit.</p>
+      </div>
+    </div>
+
+    <!-- Upcoming Blocks -->
+    <div class="card p-0 overflow-hidden">
+      <div class="px-5 py-4 border-b border-gray-100">
+        <h2 class="text-base font-bold text-gray-800"><i class="fas fa-list-ul mr-2 text-indigo-500"></i>Your Upcoming Block-outs</h2>
+      </div>
+      ${futureBlocks.length === 0 ? `
+        <div class="text-center py-10 text-gray-300">
+          <i class="fas fa-calendar-check text-4xl mb-3 block"></i>
+          <p class="text-sm">No upcoming block-outs. You're all set!</p>
+        </div>` : `
+      <div class="divide-y divide-gray-50">
+        ${futureBlocks.map(b => `
+        <div class="flex items-center gap-4 px-5 py-3 group">
+          <div class="w-36 flex-shrink-0">
+            <div class="text-sm font-semibold text-gray-800">${avFmtDate(b.block_date)}</div>
+          </div>
+          <div class="flex-1">
+            ${avStatusChip(b.max_consults === 0 ? 0 : b.max_consults, true)}
+            ${b.reason ? `<span class="ml-2 text-xs text-gray-400 italic">${escHtml(b.reason)}</span>` : ''}
+          </div>
+          <div class="text-xs text-gray-400">${b.created_by === 'admin' ? '<span class="text-purple-500">Admin set</span>' : 'You submitted'}</div>
+          ${b.block_date >= today && b.created_by !== 'admin' ? `
+          <button onclick="avDeleteBlock(${b.id})"
+            class="opacity-0 group-hover:opacity-100 p-1.5 rounded-lg hover:bg-red-50 text-gray-300 hover:text-red-500 transition text-xs">
+            <i class="fas fa-trash"></i>
+          </button>` : '<div class="w-7"></div>'}
+        </div>`).join('')}
+      </div>`}
+    </div>
+
+  </div>`
+}
+
+function avRefreshDayRow(dow) {
+  const inp = $('avSched_' + dow)
+  const statusEl = $('avSchedStatus_' + dow)
+  if (!inp || !statusEl) return
+  const val = parseInt(inp.value)
+  const limit = isNaN(val) ? null : val
+  statusEl.innerHTML = avStatusChip(limit, true)
+}
+
+function avToggleBlockLimit() {
+  const type = $('avBlockType')?.value
+  const wrap = $('avBlockLimitWrap')
+  if (wrap) wrap.classList.toggle('hidden', type !== 'limited')
+}
+
+async function avSaveSchedule() {
+  const btn = $('avSaveSchedBtn')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Saving…' }
+  try {
+    const days = [0,1,2,3,4,5,6].map(dow => ({
+      day_of_week:  dow,
+      max_consults: parseInt($('avSched_' + dow)?.value ?? '10') || 0,
+      location:     $('avSchedLoc_' + dow)?.value?.trim() || '',
+    }))
+    await api('/api/availability/schedule', { method: 'PUT', body: JSON.stringify({ days }) })
+    avState.schedule = await api('/api/availability/schedule')
+    showToast('Weekly schedule saved!', 'success')
+  } catch(e) { showToast('Save failed: ' + e.message, 'error') }
+  finally { if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-save"></i> Save Schedule' } }
+}
+
+async function avSubmitBlock() {
+  const block_date = $('avBlockDate')?.value
+  if (!block_date) { showToast('Please select a date', 'error'); return }
+  const block_type   = $('avBlockType')?.value || 'unavailable'
+  const max_consults = block_type === 'limited' ? (parseInt($('avBlockLimit')?.value) || 0) : 0
+  const reason       = $('avBlockReason')?.value?.trim() || ''
+  const btn = document.querySelector('[onclick="avSubmitBlock()"]')
+  if (btn) { btn.disabled = true; btn.innerHTML = '<i class="fas fa-spinner fa-spin mr-1.5"></i>Submitting…' }
+  try {
+    await api('/api/availability/blocks', { method: 'POST', body: JSON.stringify({ block_date, block_type, max_consults, reason }) })
+    showToast('Block-out submitted! Your team has been notified.', 'success')
+    // Reset form
+    if ($('avBlockDate'))   $('avBlockDate').value = ''
+    if ($('avBlockReason')) $('avBlockReason').value = ''
+    // Reload
+    avState.blocks = await api('/api/availability/blocks')
+    avDrawProviderPage()
+  } catch(e) {
+    showToast('Error: ' + e.message, 'error')
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="fas fa-paper-plane"></i> Submit Block-out' }
+  }
+}
+
+async function avDeleteBlock(id) {
+  if (!confirm('Remove this block-out?')) return
+  try {
+    await api('/api/availability/blocks/' + id, { method: 'DELETE' })
+    showToast('Block-out removed.', 'success')
+    avState.blocks = await api('/api/availability/blocks')
+    avDrawProviderPage()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── ADMIN AVAILABILITY DASHBOARD ───────────────────────────────────────────
+
+const avAdminState = {
+  data: null,        // full dashboard response
+  notifications: [], // recent provider submissions
+  view: 'today',     // 'today' | 'week' | 'calendar'
+}
+
+async function renderAvailabilityDashboard() {
+  const mc = $('mainContent')
+  mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
+  try {
+    const [data, notifs] = await Promise.all([
+      api('/api/availability/dashboard'),
+      api('/api/availability/notifications'),
+    ])
+    avAdminState.data          = data
+    avAdminState.notifications = notifs || []
+    avDrawAdminDashboard()
+  } catch(e) {
+    mc.innerHTML = `<div class="text-red-500 p-6">Error: ${e.message}</div>`
+  }
+}
+
+// Manager version — same dashboard but no edit controls
+async function renderMgrAvailability() {
+  await renderAvailabilityDashboard()
+}
+
+function avDrawAdminDashboard() {
+  const mc = $('mainContent')
+  const { providers } = avAdminState.data || { providers: [] }
+  const today = avTodayStr()
+  const isAdmin = state.role === 'admin'
+
+  // ── Today strip ──
+  const todayProviders = providers.map(p => {
+    const eff = avEffectiveLimit(p.schedule, p.blocks, today)
+    return { ...p, eff }
+  })
+
+  // ── Next 7 days for calendar ──
+  const days7 = []
+  for (let i = 0; i < 7; i++) {
+    const d = new Date(); d.setDate(d.getDate() + i)
+    days7.push(d.toISOString().slice(0, 10))
+  }
+
+  // Notification count (unread = within last 24h)
+  const recentNotifs = avAdminState.notifications.filter(n => {
+    const age = Date.now() - new Date(n.created_at).getTime()
+    return age < 86400000 // 24h
+  })
+
+  mc.innerHTML = `
+  <div class="max-w-5xl space-y-6">
+
+    <!-- Header + view toggle -->
+    <div class="flex items-center justify-between flex-wrap gap-3">
+      <div>
+        <h1 class="text-xl font-bold text-gray-800"><i class="fas fa-calendar-check mr-2 text-teal-600"></i>Provider Availability</h1>
+        <p class="text-xs text-gray-400 mt-0.5">Live capacity dashboard · ${providers.length} active providers</p>
+      </div>
+      <div class="flex items-center gap-2">
+        ${recentNotifs.length > 0 ? `
+        <button onclick="avScrollToNotifs()" class="relative flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-50 border border-amber-200 text-amber-700 text-xs font-semibold hover:bg-amber-100 transition">
+          <i class="fas fa-bell"></i> ${recentNotifs.length} new alert${recentNotifs.length > 1 ? 's' : ''}
+        </button>` : ''}
+        <div class="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-semibold">
+          <button onclick="avSetView('today')"  id="avViewToday"  class="px-3 py-2 transition ${avAdminState.view==='today'  ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Today</button>
+          <button onclick="avSetView('week')"   id="avViewWeek"   class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='week'   ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">7-Day</button>
+          <button onclick="avSetView('schedule')" id="avViewSchedule" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='schedule' ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Schedule</button>
+        </div>
+        ${isAdmin ? `
+        <button onclick="avAdminAddBlock()" class="btn-primary px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5">
+          <i class="fas fa-plus"></i> Add Block
+        </button>` : ''}
+      </div>
+    </div>
+
+    <!-- Summary stat chips -->
+    <div class="grid grid-cols-3 gap-3">
+      ${(() => {
+        const available  = todayProviders.filter(p => p.eff.limit !== 0).length
+        const blocked    = todayProviders.filter(p => p.eff.limit === 0).length
+        const limited    = todayProviders.filter(p => p.eff.limit !== null && p.eff.limit > 0).length
+        const totalCap   = todayProviders.reduce((s, p) => s + (p.eff.limit ?? 10), 0)
+        return `
+        <div class="card p-4 text-center">
+          <div class="text-3xl font-bold text-green-600">${available}</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Available Today</div>
+        </div>
+        <div class="card p-4 text-center">
+          <div class="text-3xl font-bold text-red-500">${blocked}</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Blocked Today</div>
+        </div>
+        <div class="card p-4 text-center">
+          <div class="text-3xl font-bold text-teal-600">${totalCap}</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Total Capacity</div>
+        </div>`
+      })()}
+    </div>
+
+    <!-- Main view panel -->
+    <div id="avMainPanel">
+      ${avRenderView(todayProviders, days7, isAdmin)}
+    </div>
+
+    <!-- Notification log -->
+    <div class="card p-0 overflow-hidden" id="avNotifSection">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <h2 class="text-sm font-bold text-gray-700"><i class="fas fa-bell mr-1.5 text-amber-500"></i>Provider Submissions</h2>
+        <span class="text-xs text-gray-400">${avAdminState.notifications.length} total</span>
+      </div>
+      ${avAdminState.notifications.length === 0 ? `
+        <div class="text-center py-8 text-gray-300"><i class="fas fa-inbox text-3xl mb-2 block"></i><p class="text-sm">No provider submissions yet.</p></div>` : `
+      <div class="divide-y divide-gray-50 max-h-72 overflow-y-auto">
+        ${avAdminState.notifications.slice(0, 20).map(n => {
+          const isNew = (Date.now() - new Date(n.created_at).getTime()) < 86400000
+          return `
+          <div class="flex items-center gap-3 px-5 py-3 ${isNew ? 'bg-amber-50' : ''}">
+            ${isNew ? '<span class="w-2 h-2 rounded-full bg-amber-400 flex-shrink-0"></span>' : '<span class="w-2 h-2 flex-shrink-0"></span>'}
+            <div class="flex-1 min-w-0">
+              <span class="text-sm font-semibold text-gray-800">${escHtml(n.contractor_name)}</span>
+              <span class="text-xs text-gray-400 ml-2">${avFmtDate(n.block_date)}</span>
+            </div>
+            <div>${avStatusChip(n.max_consults === 0 ? 0 : n.max_consults, true)}</div>
+            ${n.reason ? `<div class="text-xs text-gray-400 italic max-w-xs truncate">${escHtml(n.reason)}</div>` : ''}
+            <div class="text-xs text-gray-300 flex-shrink-0">${new Date(n.created_at).toLocaleDateString('en-US',{month:'short',day:'numeric'})}</div>
+            ${isAdmin ? `
+            <button onclick="avAdminDeleteBlock(${n.id})" class="p-1.5 rounded hover:bg-red-50 text-gray-300 hover:text-red-400 transition text-xs flex-shrink-0">
+              <i class="fas fa-times"></i>
+            </button>` : ''}
+          </div>`
+        }).join('')}
+      </div>`}
+    </div>
+
+  </div>
+
+  <!-- Admin Add Block Modal -->
+  <div id="avAdminBlockModal" class="hidden fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+    <div class="bg-white rounded-2xl shadow-2xl w-full max-w-md p-6">
+      <h3 class="text-lg font-bold text-gray-800 mb-4"><i class="fas fa-calendar-plus mr-2 text-teal-600"></i>Add Availability Block</h3>
+      <div class="space-y-3 mb-5">
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Provider *</label>
+          <select id="avAdminContractor" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+            ${providers.map(p => `<option value="${p.contractor.id}">${escHtml(p.contractor.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Date *</label>
+          <input type="date" id="avAdminDate" min="${today}" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Type</label>
+          <select id="avAdminType" onchange="avAdminToggleLimit()" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+            <option value="unavailable">🔴 Fully unavailable</option>
+            <option value="limited">🟡 Limited availability</option>
+          </select>
+        </div>
+        <div id="avAdminLimitWrap" class="hidden">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Max consults</label>
+          <input type="number" min="1" max="99" value="3" id="avAdminLimit" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+        </div>
+        <div>
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Reason / Note</label>
+          <input type="text" id="avAdminReason" placeholder="Optional note" class="w-full text-sm border border-gray-200 rounded-lg px-3 py-2">
+        </div>
+      </div>
+      <div class="flex gap-2">
+        <button onclick="avAdminSubmitBlock()" class="btn-primary flex-1 py-2 rounded-lg text-sm font-semibold">Save Block</button>
+        <button onclick="$('avAdminBlockModal').classList.add('hidden')" class="flex-1 py-2 rounded-lg border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+      </div>
+    </div>
+  </div>`
+}
+
+function avRenderView(todayProviders, days7, isAdmin) {
+  if (avAdminState.view === 'today')    return avRenderTodayView(todayProviders, isAdmin)
+  if (avAdminState.view === 'week')     return avRenderWeekView(todayProviders, days7, isAdmin)
+  if (avAdminState.view === 'schedule') return avRenderScheduleView(isAdmin)
+  return ''
+}
+
+function avRenderTodayView(todayProviders, isAdmin) {
+  const today = avTodayStr()
+  const todayLabel = new Date(today + 'T12:00:00').toLocaleDateString('en-US', {weekday:'long', month:'long', day:'numeric'})
+  return `
+  <div class="card p-0 overflow-hidden">
+    <div class="px-5 py-3 border-b border-gray-100 bg-gray-50">
+      <span class="text-xs font-bold text-gray-500 uppercase tracking-wide"><i class="fas fa-calendar-day mr-1.5"></i>${todayLabel}</span>
+    </div>
+    <div class="divide-y divide-gray-50">
+      ${todayProviders.length === 0 ? '<div class="text-center py-10 text-gray-300 text-sm">No active providers found.</div>' :
+        todayProviders.map(p => {
+          const { limit, source, block } = p.eff
+          const blockOnDay = (p.blocks || []).find(b => b.block_date === today)
+          return `
+          <div class="flex items-center gap-4 px-5 py-3.5 hover:bg-gray-50 transition group">
+            <div class="w-9 h-9 rounded-xl flex items-center justify-center text-white font-bold text-sm flex-shrink-0" style="background:var(--lion-gold)">
+              ${(p.contractor.name||'?')[0].toUpperCase()}
+            </div>
+            <div class="flex-1 min-w-0">
+              <div class="text-sm font-semibold text-gray-800">${escHtml(p.contractor.name)}</div>
+              ${p.contractor.specialty ? `<div class="text-xs text-gray-400">${escHtml(p.contractor.specialty)}</div>` : ''}
+            </div>
+            <div class="flex items-center gap-2 flex-wrap justify-end">
+              ${avStatusChip(limit, false)}
+              ${blockOnDay?.reason ? `<span class="text-xs text-gray-400 italic max-w-xs truncate">${escHtml(blockOnDay.reason)}</span>` : ''}
+              ${source === 'block' ? '<span class="text-xs text-red-400 font-medium">Block override</span>' : ''}
+            </div>
+            ${isAdmin ? `
+            <button onclick="avAdminAddBlockFor(${p.contractor.id})"
+              class="opacity-0 group-hover:opacity-100 ml-2 text-xs text-teal-600 hover:text-teal-800 px-2 py-1 rounded-lg hover:bg-teal-50 transition flex-shrink-0">
+              <i class="fas fa-plus mr-1"></i>Edit
+            </button>` : ''}
+          </div>`
+        }).join('')}
+    </div>
+  </div>`
+}
+
+function avRenderWeekView(todayProviders, days7, isAdmin) {
+  const { providers } = avAdminState.data || { providers: [] }
+  return `
+  <div class="card p-0 overflow-hidden">
+    <div class="overflow-x-auto">
+      <table class="w-full min-w-max">
+        <thead>
+          <tr class="bg-gray-50 border-b border-gray-200">
+            <th class="py-3 pl-5 pr-3 text-left text-xs font-bold text-gray-500 uppercase tracking-wide w-36">Provider</th>
+            ${days7.map(d => {
+              const isToday = d === avTodayStr()
+              const label = new Date(d + 'T12:00:00').toLocaleDateString('en-US', {weekday:'short', month:'short', day:'numeric'})
+              return `<th class="py-3 px-2 text-center text-xs font-bold ${isToday ? 'text-teal-700 bg-teal-50' : 'text-gray-500'} uppercase tracking-wide">${label}${isToday ? '<br><span class="text-teal-500 normal-case font-normal">today</span>' : ''}</th>`
+            }).join('')}
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-gray-50">
+          ${providers.map(p => `
+          <tr class="hover:bg-gray-50 transition">
+            <td class="py-3 pl-5 pr-3">
+              <div class="text-sm font-semibold text-gray-800 truncate max-w-32">${escHtml(p.contractor.name)}</div>
+              ${p.contractor.specialty ? `<div class="text-xs text-gray-400 truncate">${escHtml(p.contractor.specialty)}</div>` : ''}
+            </td>
+            ${days7.map(d => {
+              const eff = avEffectiveLimit(p.schedule, p.blocks, d)
+              const isToday = d === avTodayStr()
+              const cellBg = isToday ? 'bg-teal-50/50' : ''
+              if (eff.limit === 0)    return `<td class="py-3 px-2 text-center ${cellBg}"><span class="flex w-8 h-8 rounded-full bg-red-100 text-red-600 text-xs font-bold items-center justify-center mx-auto">✕</span></td>`
+              if (eff.limit === null) return `<td class="py-3 px-2 text-center ${cellBg}"><span class="flex w-8 h-8 rounded-full bg-green-100 text-green-600 text-xs font-bold items-center justify-center mx-auto">✓</span></td>`
+              return `<td class="py-3 px-2 text-center ${cellBg}"><span class="flex min-w-8 h-8 px-1 rounded-full bg-amber-100 text-amber-700 text-xs font-bold items-center justify-center mx-auto">${eff.limit}</span></td>`
+            }).join('')}
+          </tr>`).join('')}
+        </tbody>
+      </table>
+    </div>
+    <div class="px-5 py-3 border-t border-gray-100 bg-gray-50 flex items-center gap-4 text-xs text-gray-400">
+      <span><span class="inline-block w-4 h-4 rounded-full bg-green-100 mr-1 align-middle"></span>Available (no limit set)</span>
+      <span><span class="inline-block w-4 h-4 rounded-full bg-amber-100 mr-1 align-middle"></span>Limited (number = max)</span>
+      <span><span class="inline-block w-4 h-4 rounded-full bg-red-100 mr-1 align-middle"></span>Unavailable</span>
+    </div>
+  </div>`
+}
+
+function avRenderScheduleView(isAdmin) {
+  const { providers } = avAdminState.data || { providers: [] }
+  return `
+  <div class="space-y-3">
+    ${providers.map(p => {
+      const schedMap = {}
+      for (const s of p.schedule) schedMap[s.day_of_week] = s
+      return `
+      <div class="card p-0 overflow-hidden">
+        <div class="flex items-center gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50">
+          <div class="w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold text-sm flex-shrink-0" style="background:var(--lion-gold)">
+            ${(p.contractor.name||'?')[0].toUpperCase()}
+          </div>
+          <div class="flex-1">
+            <span class="text-sm font-bold text-gray-800">${escHtml(p.contractor.name)}</span>
+            ${p.contractor.specialty ? `<span class="ml-2 text-xs text-gray-400">${escHtml(p.contractor.specialty)}</span>` : ''}
+          </div>
+          ${isAdmin ? `
+          <button onclick="avAdminAddBlockFor(${p.contractor.id})"
+            class="text-xs text-teal-600 hover:text-teal-800 px-2 py-1 rounded-lg hover:bg-teal-50 transition">
+            <i class="fas fa-plus mr-1"></i>Add Block
+          </button>` : ''}
+        </div>
+        <div class="flex divide-x divide-gray-100">
+          ${[1,2,3,4,5,6,0].map(dow => {
+            const row = schedMap[dow]
+            const max = row ? row.max_consults : null
+            const bg = max === 0 ? 'bg-red-50' : max === null ? 'bg-green-50' : 'bg-amber-50'
+            const txt = max === 0 ? 'text-red-500' : max === null ? 'text-green-600' : 'text-amber-700'
+            return `
+            <div class="flex-1 text-center py-3 px-1 ${bg}">
+              <div class="text-xs font-bold ${txt}">${AV_DAYS_SHORT[dow]}</div>
+              <div class="text-lg font-bold ${txt} mt-0.5">${max === null ? '∞' : max === 0 ? '✕' : max}</div>
+              ${row?.location ? `<div class="text-xs text-gray-400 truncate px-1">${escHtml(row.location)}</div>` : ''}
+            </div>`
+          }).join('')}
+        </div>
+      </div>`
+    }).join('')}
+  </div>`
+}
+
+function avSetView(view) {
+  avAdminState.view = view
+  const panel = $('avMainPanel')
+  if (!panel) return
+  const { providers } = avAdminState.data || { providers: [] }
+  const today = avTodayStr()
+  const days7 = []
+  for (let i = 0; i < 7; i++) { const d = new Date(); d.setDate(d.getDate() + i); days7.push(d.toISOString().slice(0, 10)) }
+  const todayProviders = providers.map(p => ({ ...p, eff: avEffectiveLimit(p.schedule, p.blocks, today) }))
+  const isAdmin = state.role === 'admin'
+  panel.innerHTML = avRenderView(todayProviders, days7, isAdmin)
+  // Update button styles
+  ;['today','week','schedule'].forEach(v => {
+    const btn = $('avView' + v.charAt(0).toUpperCase() + v.slice(1))
+    if (btn) btn.className = btn.className.replace(/bg-teal-600 text-white|bg-white text-gray-500 hover:bg-gray-50/g,
+      v === view ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50')
+  })
+}
+
+function avScrollToNotifs() {
+  const el = $('avNotifSection')
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'start' })
+}
+
+function avAdminAddBlock() {
+  const modal = $('avAdminBlockModal')
+  if (modal) modal.classList.remove('hidden')
+}
+
+function avAdminAddBlockFor(contractorId) {
+  const modal = $('avAdminBlockModal')
+  if (!modal) return
+  const sel = $('avAdminContractor')
+  if (sel) sel.value = contractorId
+  modal.classList.remove('hidden')
+}
+
+function avAdminToggleLimit() {
+  const type = $('avAdminType')?.value
+  const wrap = $('avAdminLimitWrap')
+  if (wrap) wrap.classList.toggle('hidden', type !== 'limited')
+}
+
+async function avAdminSubmitBlock() {
+  const contractor_id = $('avAdminContractor')?.value
+  const block_date    = $('avAdminDate')?.value
+  if (!contractor_id || !block_date) { showToast('Provider and date are required', 'error'); return }
+  const block_type   = $('avAdminType')?.value || 'unavailable'
+  const max_consults = block_type === 'limited' ? (parseInt($('avAdminLimit')?.value) || 0) : 0
+  const reason       = $('avAdminReason')?.value?.trim() || ''
+  try {
+    await api('/api/availability/blocks', { method: 'POST', body: JSON.stringify({ contractor_id, block_date, block_type, max_consults, reason }) })
+    showToast('Block saved!', 'success')
+    $('avAdminBlockModal').classList.add('hidden')
+    // Refresh dashboard
+    const [data, notifs] = await Promise.all([
+      api('/api/availability/dashboard'),
+      api('/api/availability/notifications'),
+    ])
+    avAdminState.data = data
+    avAdminState.notifications = notifs || []
+    avDrawAdminDashboard()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+async function avAdminDeleteBlock(id) {
+  if (!confirm('Remove this block?')) return
+  try {
+    await api('/api/availability/blocks/' + id, { method: 'DELETE' })
+    showToast('Block removed.', 'success')
+    const [data, notifs] = await Promise.all([
+      api('/api/availability/dashboard'),
+      api('/api/availability/notifications'),
+    ])
+    avAdminState.data = data
+    avAdminState.notifications = notifs || []
+    avDrawAdminDashboard()
+  } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── END PROVIDER AVAILABILITY MODULE ───────────────────────────────────────
+
+// In-app popstate: browser back/forward handled naturally by navigate()
