@@ -17311,6 +17311,29 @@ function avDrawProviderPage() {
       </div>
     </div>
 
+    <!-- Capacity Numbers Card — grayed out for providers, coming soon -->
+    <div class="card p-0 overflow-hidden opacity-50 pointer-events-none select-none">
+      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
+        <div>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-sliders-h mr-2 text-violet-500"></i>My Capacity Numbers</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Your Happy Place and Flex number — set by your admin in coordination with you.</p>
+        </div>
+        <span class="text-xs text-violet-400 bg-violet-50 px-3 py-1.5 rounded-lg font-medium"><i class="fas fa-clock mr-1"></i>Coming soon</span>
+      </div>
+      <div class="px-5 py-5 grid grid-cols-2 gap-5">
+        <div class="rounded-xl border-2 border-dashed border-green-200 bg-green-50 p-4 text-center">
+          <div class="text-3xl font-bold text-green-500 mb-1">—</div>
+          <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
+          <div class="text-xs text-gray-400 mt-1">Cases/day I'm comfortable with every day</div>
+        </div>
+        <div class="rounded-xl border-2 border-dashed border-amber-200 bg-amber-50 p-4 text-center">
+          <div class="text-3xl font-bold text-amber-500 mb-1">—</div>
+          <div class="text-sm font-bold text-amber-700">💪 Flex</div>
+          <div class="text-xs text-gray-400 mt-1">Max I can stretch to when the team needs it</div>
+        </div>
+      </div>
+    </div>
+
     <!-- Block Out a Date Card -->
     <div class="card p-0 overflow-hidden">
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
@@ -17542,7 +17565,6 @@ function avDrawAdminDashboard() {
       ${(() => {
         const available  = todayProviders.filter(p => p.eff.limit !== 0).length
         const blocked    = todayProviders.filter(p => p.eff.limit === 0).length
-        const limited    = todayProviders.filter(p => p.eff.limit !== null && p.eff.limit > 0).length
         const totalCap   = todayProviders.reduce((s, p) => s + (p.eff.limit ?? 10), 0)
         return `
         <div class="card p-4 text-center">
@@ -17555,10 +17577,56 @@ function avDrawAdminDashboard() {
         </div>
         <div class="card p-4 text-center">
           <div class="text-3xl font-bold text-teal-600">${totalCap}</div>
-          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Total Capacity</div>
+          <div class="text-xs text-gray-400 mt-1 font-medium uppercase tracking-wide">Today's Capacity</div>
         </div>`
       })()}
     </div>
+
+    <!-- Team Capacity Banner (Happy Place + Flex) -->
+    ${(() => {
+      const tt = avAdminState.data?.teamTotals || {}
+      const hp  = tt.happy_place_total   || 0
+      const fc  = tt.flex_capacity_total || 0
+      const hpSet = tt.providers_with_happy_place   || 0
+      const fcSet = tt.providers_with_flex_capacity || 0
+      const total = tt.total_providers || providers.length
+      const allSet = hpSet === total && fcSet === total && total > 0
+      return `
+      <div class="rounded-2xl border-2 ${allSet ? 'border-violet-200 bg-violet-50' : 'border-dashed border-violet-200 bg-violet-50/50'} p-5">
+        <div class="flex items-center justify-between flex-wrap gap-3 mb-4">
+          <div>
+            <h2 class="text-sm font-bold text-violet-800"><i class="fas fa-sliders-h mr-1.5"></i>Team Capacity Numbers</h2>
+            <p class="text-xs text-violet-500 mt-0.5">
+              ${allSet
+                ? `All ${total} providers have numbers set — totals below are complete.`
+                : `${hpSet}/${total} Happy Place · ${fcSet}/${total} Flex numbers set — <button onclick="avSetView('schedule')" class="underline hover:text-violet-800">set remaining in Schedule view</button>`
+              }
+            </p>
+          </div>
+          ${isAdmin ? `
+          <button onclick="avSetView('schedule')" class="text-xs font-semibold px-3 py-1.5 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition">
+            <i class="fas fa-edit mr-1"></i>Edit Numbers
+          </button>` : ''}
+        </div>
+        <div class="grid grid-cols-3 gap-4">
+          <div class="bg-white rounded-xl p-4 text-center shadow-sm border border-green-100">
+            <div class="text-3xl font-bold text-green-600">${hp || '—'}</div>
+            <div class="text-xs font-bold text-green-700 mt-1">😊 Team Happy Place</div>
+            <div class="text-xs text-gray-400 mt-0.5">Sustainable daily total</div>
+          </div>
+          <div class="bg-white rounded-xl p-4 text-center shadow-sm border border-amber-100">
+            <div class="text-3xl font-bold text-amber-500">${fc || '—'}</div>
+            <div class="text-xs font-bold text-amber-700 mt-1">💪 Team Flex Max</div>
+            <div class="text-xs text-gray-400 mt-0.5">Max stretch capacity</div>
+          </div>
+          <div class="bg-white rounded-xl p-4 text-center shadow-sm border border-violet-100">
+            <div class="text-3xl font-bold text-violet-600">${fc && hp ? fc - hp : '—'}</div>
+            <div class="text-xs font-bold text-violet-700 mt-1">⚡ Flex Buffer</div>
+            <div class="text-xs text-gray-400 mt-0.5">Extra capacity available</div>
+          </div>
+        </div>
+      </div>`
+    })()}
 
     <!-- Main view panel -->
     <div id="avMainPanel">
@@ -17731,6 +17799,9 @@ function avRenderScheduleView(isAdmin) {
     ${providers.map(p => {
       const schedMap = {}
       for (const s of p.schedule) schedMap[s.day_of_week] = s
+      const cap = p.capacity || {}
+      const hp  = cap.happy_place   != null ? cap.happy_place   : ''
+      const fc  = cap.flex_capacity != null ? cap.flex_capacity : ''
       return `
       <div class="card p-0 overflow-hidden">
         <div class="flex items-center gap-3 px-5 py-3 border-b border-gray-100 bg-gray-50">
@@ -17751,7 +17822,7 @@ function avRenderScheduleView(isAdmin) {
           ${[1,2,3,4,5,6,0].map(dow => {
             const row = schedMap[dow]
             const max = row ? row.max_consults : null
-            const bg = max === 0 ? 'bg-red-50' : max === null ? 'bg-green-50' : 'bg-amber-50'
+            const bg  = max === 0 ? 'bg-red-50' : max === null ? 'bg-green-50' : 'bg-amber-50'
             const txt = max === 0 ? 'text-red-500' : max === null ? 'text-green-600' : 'text-amber-700'
             return `
             <div class="flex-1 text-center py-3 px-1 ${bg}">
@@ -17761,9 +17832,89 @@ function avRenderScheduleView(isAdmin) {
             </div>`
           }).join('')}
         </div>
+        ${isAdmin ? `
+        <div class="flex items-center gap-4 px-5 py-3 border-t border-violet-100 bg-violet-50/40">
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold text-green-700 whitespace-nowrap">😊 Happy Place</span>
+            <input type="number" min="0" max="99"
+              id="avHP_${p.contractor.id}"
+              value="${hp}"
+              placeholder="—"
+              onchange="avSaveCapacity(${p.contractor.id})"
+              class="w-16 text-sm text-center border border-green-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-green-300 outline-none">
+            <span class="text-xs text-gray-400">cases/day</span>
+          </div>
+          <div class="w-px h-6 bg-violet-200"></div>
+          <div class="flex items-center gap-2">
+            <span class="text-xs font-semibold text-amber-700 whitespace-nowrap">💪 Flex</span>
+            <input type="number" min="0" max="99"
+              id="avFC_${p.contractor.id}"
+              value="${fc}"
+              placeholder="—"
+              onchange="avSaveCapacity(${p.contractor.id})"
+              class="w-16 text-sm text-center border border-amber-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-amber-300 outline-none">
+            <span class="text-xs text-gray-400">cases/day max</span>
+          </div>
+          ${hp && fc ? `
+          <div class="ml-auto flex items-center gap-1.5 text-xs text-violet-600 bg-violet-100 px-2.5 py-1 rounded-lg">
+            <i class="fas fa-check-circle"></i>
+            <span>${hp} → ${fc} (+${fc - hp} flex buffer)</span>
+          </div>` : `
+          <div class="ml-auto text-xs text-gray-300 italic">Not set yet</div>`}
+        </div>` : ''}
       </div>`
     }).join('')}
   </div>`
+}
+
+async function avSaveCapacity(contractorId) {
+  const hp = $('avHP_' + contractorId)?.value
+  const fc = $('avFC_' + contractorId)?.value
+
+  // Validate: if both are set, flex must be >= happy place
+  const hpNum = hp !== '' ? parseInt(hp) : null
+  const fcNum = fc !== '' ? parseInt(fc) : null
+  if (hpNum != null && fcNum != null && fcNum < hpNum) {
+    showToast('Flex number must be ≥ Happy Place number', 'error')
+    return
+  }
+
+  try {
+    await api('/api/availability/capacity', {
+      method: 'PUT',
+      body: JSON.stringify({ contractor_id: contractorId, happy_place: hpNum, flex_capacity: fcNum }),
+    })
+
+    // Update local state so the team totals banner refreshes without a full reload
+    const { providers } = avAdminState.data || { providers: [] }
+    const p = providers.find(p => p.contractor.id === contractorId)
+    if (p) {
+      p.capacity = { ...p.capacity, happy_place: hpNum, flex_capacity: fcNum }
+      // Recalculate teamTotals
+      const tt = avAdminState.data.teamTotals || {}
+      tt.happy_place_total   = providers.reduce((s, p) => s + (p.capacity?.happy_place   ?? 0), 0)
+      tt.flex_capacity_total = providers.reduce((s, p) => s + (p.capacity?.flex_capacity ?? 0), 0)
+      tt.providers_with_happy_place   = providers.filter(p => p.capacity?.happy_place   != null).length
+      tt.providers_with_flex_capacity = providers.filter(p => p.capacity?.flex_capacity != null).length
+      avAdminState.data.teamTotals = tt
+    }
+
+    showToast('Capacity saved!', 'success')
+
+    // Update the inline buffer badge without re-rendering the whole schedule
+    const badge = document.querySelector(`#avHP_${contractorId}`)?.closest('.card')?.querySelector('.avCapBadge')
+    const row   = document.querySelector(`#avHP_${contractorId}`)?.closest('.flex.items-center.gap-4')
+    if (row && hpNum && fcNum) {
+      const existing = row.querySelector('.ml-auto')
+      if (existing) existing.outerHTML = `
+        <div class="ml-auto flex items-center gap-1.5 text-xs text-violet-600 bg-violet-100 px-2.5 py-1 rounded-lg">
+          <i class="fas fa-check-circle"></i>
+          <span>${hpNum} → ${fcNum} (+${fcNum - hpNum} flex buffer)</span>
+        </div>`
+    }
+  } catch(e) {
+    showToast('Save failed: ' + e.message, 'error')
+  }
 }
 
 function avSetView(view) {

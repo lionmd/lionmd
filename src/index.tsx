@@ -5240,6 +5240,19 @@ async function ensureAvailabilitySchema(db: D1Database) {
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pav_contractor  ON provider_availability(contractor_id)`).run().catch(() => {})
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pblk_contractor ON provider_blocks(contractor_id)`).run().catch(() => {})
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pblk_date       ON provider_blocks(block_date)`).run().catch(() => {})
+
+  // ── provider_capacity: one row per contractor, stores happy_place + flex_capacity ──
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS provider_capacity (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      contractor_id INTEGER NOT NULL UNIQUE,
+      happy_place   INTEGER DEFAULT NULL,   -- sustainable daily cases the provider is comfortable with
+      flex_capacity INTEGER DEFAULT NULL,   -- max they can stretch to when needed
+      updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_by    TEXT     DEFAULT 'admin',
+      FOREIGN KEY (contractor_id) REFERENCES contractors(id)
+    )
+  `).run().catch(() => {})
 }
 
 // ── Helper: send availability notification email to all admins ────────────
@@ -5589,9 +5602,66 @@ app.delete('/api/availability/blocks/:id', async (c) => {
   return c.json({ error: 'Access denied' }, 403)
 })
 
+// ── GET /api/availability/capacity ───────────────────────────────────────
+// Admin: get all providers' happy_place + flex_capacity numbers
+app.get('/api/availability/capacity', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
+  if (!['admin', 'manager'].includes(payload.role)) return c.json({ error: 'Access denied' }, 403)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const rows = await c.env.DB.prepare(`
+    SELECT pc.contractor_id, pc.happy_place, pc.flex_capacity, pc.updated_at, pc.updated_by,
+           ct.name, ct.first_name, ct.last_name, ct.specialty
+    FROM provider_capacity pc
+    JOIN contractors ct ON ct.id = pc.contractor_id
+    WHERE ct.is_active = 1
+    ORDER BY ct.name
+  `).all().then(r => r.results)
+
+  return c.json(rows)
+})
+
+// ── PUT /api/availability/capacity ───────────────────────────────────────
+// Admin: set happy_place + flex_capacity for a contractor
+// Body: { contractor_id, happy_place, flex_capacity }
+app.put('/api/availability/capacity', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
+  if (payload.role !== 'admin') return c.json({ error: 'Admin only' }, 403)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const body = await c.req.json()
+  const { contractor_id, happy_place, flex_capacity } = body
+  if (!contractor_id) return c.json({ error: 'contractor_id required' }, 400)
+
+  const hp = happy_place   != null && happy_place   !== '' ? parseInt(happy_place)   : null
+  const fc = flex_capacity != null && flex_capacity !== '' ? parseInt(flex_capacity) : null
+
+  await c.env.DB.prepare(`
+    INSERT INTO provider_capacity (contractor_id, happy_place, flex_capacity, updated_at, updated_by)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+    ON CONFLICT(contractor_id) DO UPDATE SET
+      happy_place   = excluded.happy_place,
+      flex_capacity = excluded.flex_capacity,
+      updated_at    = excluded.updated_at,
+      updated_by    = excluded.updated_by
+  `).bind(contractor_id, hp, fc, payload.email || payload.sub || 'admin').run()
+
+  return c.json({ ok: true })
+})
+
 // ── GET /api/availability/dashboard ──────────────────────────────────────
 // Admin/manager dashboard: for each active contractor, their schedule + upcoming blocks
-// Returns { providers: [ { contractor, schedule, blocks[] } ] }
+// Returns { providers: [ { contractor, schedule, blocks[], capacity } ], teamTotals }
 app.get('/api/availability/dashboard', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
@@ -5612,14 +5682,12 @@ app.get('/api/availability/dashboard', async (c) => {
     `SELECT id, name, first_name, last_name, specialty, role_group FROM contractors WHERE is_active=1 ORDER BY name`
   ).all().then(r => r.results as any[])
 
-  // Get all schedules and blocks in one pass
-  const allSchedules = await c.env.DB.prepare(
-    `SELECT * FROM provider_availability WHERE is_active=1`
-  ).all().then(r => r.results as any[])
-
-  const allBlocks = await c.env.DB.prepare(
-    `SELECT * FROM provider_blocks WHERE block_date >= ? AND block_date <= ? ORDER BY block_date`
-  ).bind(from, to).all().then(r => r.results as any[])
+  // Get all schedules, blocks, and capacity numbers in one pass
+  const [allSchedules, allBlocks, allCapacity] = await Promise.all([
+    c.env.DB.prepare(`SELECT * FROM provider_availability WHERE is_active=1`).all().then(r => r.results as any[]),
+    c.env.DB.prepare(`SELECT * FROM provider_blocks WHERE block_date >= ? AND block_date <= ? ORDER BY block_date`).bind(from, to).all().then(r => r.results as any[]),
+    c.env.DB.prepare(`SELECT * FROM provider_capacity`).all().then(r => r.results as any[]),
+  ])
 
   // Group by contractor_id
   const scheduleMap: Record<number, any[]> = {}
@@ -5632,14 +5700,28 @@ app.get('/api/availability/dashboard', async (c) => {
     if (!blockMap[b.contractor_id]) blockMap[b.contractor_id] = []
     blockMap[b.contractor_id].push(b)
   }
+  const capacityMap: Record<number, any> = {}
+  for (const cap of allCapacity) {
+    capacityMap[cap.contractor_id] = cap
+  }
 
   const providers = contractors.map(ct => ({
     contractor: ct,
-    schedule: scheduleMap[ct.id] || [],
-    blocks: blockMap[ct.id] || [],
+    schedule:   scheduleMap[ct.id]  || [],
+    blocks:     blockMap[ct.id]     || [],
+    capacity:   capacityMap[ct.id]  || { happy_place: null, flex_capacity: null },
   }))
 
-  return c.json({ providers, from, to })
+  // Team totals: sum of all providers who have numbers set
+  const teamTotals = {
+    happy_place_total:   providers.reduce((s, p) => s + (p.capacity.happy_place   ?? 0), 0),
+    flex_capacity_total: providers.reduce((s, p) => s + (p.capacity.flex_capacity ?? 0), 0),
+    providers_with_happy_place:   providers.filter(p => p.capacity.happy_place   != null).length,
+    providers_with_flex_capacity: providers.filter(p => p.capacity.flex_capacity != null).length,
+    total_providers: providers.length,
+  }
+
+  return c.json({ providers, from, to, teamTotals })
 })
 
 // ── GET /api/availability/notifications ──────────────────────────────────
