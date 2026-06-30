@@ -17524,6 +17524,12 @@ function avDrawAdminDashboard() {
           <button onclick="avSetView('week')"   id="avViewWeek"   class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='week'   ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">7-Day</button>
           <button onclick="avSetView('schedule')" id="avViewSchedule" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='schedule' ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Schedule</button>
         </div>
+        <button onclick="avExportCalendar()" class="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-indigo-200 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition">
+          <i class="fas fa-calendar-alt"></i> Export Calendar
+        </button>
+        <button onclick="avExportPDF()" class="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-rose-200 text-rose-700 bg-rose-50 hover:bg-rose-100 transition">
+          <i class="fas fa-file-pdf"></i> Export PDF
+        </button>
         ${isAdmin ? `
         <button onclick="avAdminAddBlock()" class="btn-primary px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5">
           <i class="fas fa-plus"></i> Add Block
@@ -17838,6 +17844,254 @@ async function avAdminDeleteBlock(id) {
     avAdminState.notifications = notifs || []
     avDrawAdminDashboard()
   } catch(e) { showToast('Error: ' + e.message, 'error') }
+}
+
+// ── EXPORT: Calendar (.ics) ─────────────────────────────────────────────────
+function avExportCalendar() {
+  const { providers } = avAdminState.data || { providers: [] }
+  if (!providers.length) { showToast('No provider data loaded.', 'warning'); return }
+
+  const DAYS = 30   // export next 30 days
+  const lines = [
+    'BEGIN:VCALENDAR',
+    'VERSION:2.0',
+    'PRODID:-//LionMD//Availability Export//EN',
+    'CALSCALE:GREGORIAN',
+    'METHOD:PUBLISH',
+    'X-WR-CALNAME:LionMD Provider Availability',
+    'X-WR-CALDESC:Provider availability export from LionMD Portal',
+  ]
+
+  // Generate one VEVENT per provider per day that has a block or limited status
+  for (let i = 0; i < DAYS; i++) {
+    const d = new Date()
+    d.setDate(d.getDate() + i)
+    const dateStr  = d.toISOString().slice(0, 10)          // YYYY-MM-DD
+    const dateStamp = dateStr.replace(/-/g, '')             // YYYYMMDD
+    const dayLabel  = d.toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })
+
+    for (const p of providers) {
+      const eff  = avEffectiveLimit(p.schedule, p.blocks, dateStr)
+      const name = p.contractor.name || 'Provider'
+      const spec = p.contractor.specialty ? ` (${p.contractor.specialty})` : ''
+
+      // Only emit events for blocked or limited days — available days need no event
+      if (eff.limit === null) continue   // fully available — skip
+
+      let summary, description, color
+      if (eff.limit === 0) {
+        summary     = `🔴 ${name} — Unavailable`
+        description = `${name}${spec} is fully unavailable on ${dayLabel}.`
+        color       = 'red'
+      } else {
+        summary     = `🟡 ${name} — Limited (max ${eff.limit})`
+        description = `${name}${spec} has limited availability on ${dayLabel}: max ${eff.limit} consult${eff.limit !== 1 ? 's' : ''}.`
+        color       = 'yellow'
+      }
+
+      // Find block reason if any
+      const block = (p.blocks || []).find(b => b.block_date === dateStr)
+      if (block?.reason) description += `\\nNote: ${block.reason}`
+
+      const uid = `lionmd-av-${p.contractor.id}-${dateStamp}@lionmd`
+      const now = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z'
+
+      lines.push(
+        'BEGIN:VEVENT',
+        `UID:${uid}`,
+        `DTSTAMP:${now}`,
+        `DTSTART;VALUE=DATE:${dateStamp}`,
+        `DTEND;VALUE=DATE:${dateStamp}`,
+        `SUMMARY:${summary}`,
+        `DESCRIPTION:${description}`,
+        `CATEGORIES:Provider Availability`,
+        'TRANSP:TRANSPARENT',
+        'END:VEVENT'
+      )
+    }
+  }
+
+  lines.push('END:VCALENDAR')
+  const icsContent = lines.join('\r\n')
+
+  // Download
+  const blob = new Blob([icsContent], { type: 'text/calendar;charset=utf-8' })
+  const url  = URL.createObjectURL(blob)
+  const a    = document.createElement('a')
+  a.href     = url
+  a.download = `LionMD_Availability_${avTodayStr()}.ics`
+  a.click()
+  URL.revokeObjectURL(url)
+  showToast('Calendar exported — open the .ics file to import into Google Calendar, Outlook, or Apple Calendar.', 'success')
+}
+
+// ── EXPORT: PDF Overview ────────────────────────────────────────────────────
+function avExportPDF() {
+  const { providers } = avAdminState.data || { providers: [] }
+  if (!providers.length) { showToast('No provider data loaded.', 'warning'); return }
+
+  const { jsPDF } = window.jspdf
+  if (!jsPDF) { showToast('PDF library not loaded.', 'error'); return }
+
+  const doc      = new jsPDF({ orientation: 'landscape', unit: 'mm', format: 'letter' })
+  const today    = avTodayStr()
+  const todayLabel = new Date(today + 'T12:00:00').toLocaleDateString('en-US', { weekday:'long', month:'long', day:'numeric', year:'numeric' })
+  const DAYS     = 14   // show 2 weeks in the PDF grid
+
+  // ── Header ──
+  doc.setFillColor(20, 184, 166)   // teal-500
+  doc.rect(0, 0, 280, 18, 'F')
+  doc.setTextColor(255, 255, 255)
+  doc.setFontSize(14)
+  doc.setFont('helvetica', 'bold')
+  doc.text('LionMD — Provider Availability Overview', 10, 12)
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'normal')
+  doc.text(`Generated: ${todayLabel}`, 220, 12)
+
+  // ── Summary Stats (today) ──
+  doc.setTextColor(50, 50, 50)
+  const todayProviders = providers.map(p => ({ ...p, eff: avEffectiveLimit(p.schedule, p.blocks, today) }))
+  const available = todayProviders.filter(p => p.eff.limit !== 0).length
+  const blocked   = todayProviders.filter(p => p.eff.limit === 0).length
+  const totalCap  = todayProviders.reduce((s, p) => s + (p.eff.limit ?? 10), 0)
+
+  doc.setFontSize(9)
+  doc.setFont('helvetica', 'bold')
+  doc.text('TODAY AT A GLANCE', 10, 26)
+  doc.setFont('helvetica', 'normal')
+  doc.setFontSize(8)
+  doc.text(`Available: ${available}   Blocked: ${blocked}   Total Capacity: ${totalCap} consults   Active Providers: ${providers.length}`, 10, 32)
+
+  // ── Build 14-day date columns ──
+  const days = []
+  for (let i = 0; i < DAYS; i++) {
+    const d = new Date()
+    d.setDate(d.getDate() + i)
+    days.push(d.toISOString().slice(0, 10))
+  }
+
+  // ── Build table data ──
+  const colLabels = days.map(d => {
+    const dt = new Date(d + 'T12:00:00')
+    const dayName = dt.toLocaleDateString('en-US', { weekday: 'short' })
+    const dayNum  = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+    return `${dayName}\n${dayNum}`
+  })
+
+  const head = [['Provider', 'Specialty', ...colLabels]]
+
+  const body = providers.map(p => {
+    const name = p.contractor.name || '—'
+    const spec = p.contractor.specialty || '—'
+    const cells = days.map(d => {
+      const eff = avEffectiveLimit(p.schedule, p.blocks, d)
+      if (eff.limit === 0)    return '✕'
+      if (eff.limit === null) return '✓'
+      return String(eff.limit)
+    })
+    return [name, spec, ...cells]
+  })
+
+  // Cell color callback
+  const cellStyles = (data) => {
+    if (data.section !== 'body' || data.column.index < 2) return
+    const val = data.cell.raw
+    if (val === '✕') {
+      data.cell.styles.fillColor  = [254, 226, 226]  // red-100
+      data.cell.styles.textColor  = [220, 38,  38 ]  // red-600
+      data.cell.styles.fontStyle  = 'bold'
+    } else if (val === '✓') {
+      data.cell.styles.fillColor  = [220, 252, 231]  // green-100
+      data.cell.styles.textColor  = [22,  163, 74 ]  // green-600
+    } else {
+      data.cell.styles.fillColor  = [254, 243, 199]  // amber-100
+      data.cell.styles.textColor  = [180, 83,  9  ]  // amber-700
+      data.cell.styles.fontStyle  = 'bold'
+    }
+  }
+
+  // Highlight today column
+  const todayColIdx = days.indexOf(today)
+
+  doc.autoTable({
+    startY:       38,
+    head,
+    body,
+    styles:       { fontSize: 7, cellPadding: 2, valign: 'middle', halign: 'center', overflow: 'linebreak' },
+    headStyles:   { fillColor: [15, 118, 110], textColor: 255, fontStyle: 'bold', fontSize: 7, halign: 'center' },
+    columnStyles: {
+      0: { halign: 'left', cellWidth: 32, fontStyle: 'bold' },
+      1: { halign: 'left', cellWidth: 24, textColor: [100, 100, 100] },
+    },
+    didParseCell: (data) => {
+      cellStyles(data)
+      // Highlight today column header + cells
+      if (todayColIdx >= 0 && data.column.index === todayColIdx + 2) {
+        if (data.section === 'head') {
+          data.cell.styles.fillColor = [13, 148, 136]  // teal-600
+          data.cell.styles.textColor = [255, 255, 255]
+        }
+      }
+    },
+    margin: { left: 10, right: 10 },
+  })
+
+  // ── Legend ──
+  const finalY = doc.lastAutoTable.finalY + 6
+  doc.setFontSize(7)
+  doc.setTextColor(120, 120, 120)
+  doc.text('Legend:   ✓ = Available (no limit)     Number = Limited (max consults)     ✕ = Unavailable / Blocked', 10, finalY)
+
+  // ── Notifications / Submissions section ──
+  const notifs = avAdminState.notifications || []
+  if (notifs.length > 0) {
+    const notifY = finalY + 8
+    doc.setFontSize(9)
+    doc.setFont('helvetica', 'bold')
+    doc.setTextColor(50, 50, 50)
+    doc.text('Recent Provider Submissions', 10, notifY)
+
+    const notifRows = notifs.slice(0, 20).map(n => {
+      const age  = Date.now() - new Date(n.created_at).getTime()
+      const isNew = age < 86400000
+      const status = n.max_consults === 0 ? 'Unavailable' : `Limited (${n.max_consults})`
+      return [
+        isNew ? '● NEW' : '',
+        n.contractor_name || '—',
+        avFmtDate(n.block_date),
+        status,
+        n.reason || '—',
+        new Date(n.created_at).toLocaleDateString('en-US', { month:'short', day:'numeric', year:'numeric' }),
+      ]
+    })
+
+    doc.autoTable({
+      startY:     notifY + 4,
+      head:       [['', 'Provider', 'Date', 'Status', 'Note', 'Submitted']],
+      body:       notifRows,
+      styles:     { fontSize: 7, cellPadding: 2 },
+      headStyles: { fillColor: [245, 158, 11], textColor: 255, fontStyle: 'bold', fontSize: 7 },
+      columnStyles: {
+        0: { cellWidth: 10, textColor: [245, 158, 11], fontStyle: 'bold' },
+        1: { fontStyle: 'bold' },
+        3: { halign: 'center' },
+      },
+      margin: { left: 10, right: 10 },
+    })
+  }
+
+  // ── Footer on each page ──
+  const pageCount = doc.internal.getNumberOfPages()
+  for (let pg = 1; pg <= pageCount; pg++) {
+    doc.setPage(pg)
+    doc.setFontSize(7)
+    doc.setTextColor(180, 180, 180)
+    doc.text(`LionMD Provider Availability · ${todayLabel} · Page ${pg} of ${pageCount}`, 10, doc.internal.pageSize.getHeight() - 6)
+  }
+
+  doc.save(`LionMD_Availability_${today}.pdf`)
+  showToast(`PDF exported — ${providers.length} providers, ${DAYS}-day overview.`, 'success')
 }
 
 // ── END PROVIDER AVAILABILITY MODULE ───────────────────────────────────────
