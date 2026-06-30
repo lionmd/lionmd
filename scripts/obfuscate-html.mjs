@@ -5,38 +5,40 @@
  *   1. Reads  dist/static/app.js  (copied from public/static/app.js by Vite)
  *   2. Minifies it with terser    → removes whitespace, shortens identifiers
  *   3. Obfuscates with javascript-obfuscator → encodes strings, mangles names
- *   4. Writes the result back to  dist/static/app.js
+ *   4. Renames to app.<hash>.js   → busts Cloudflare CDN cache on every deploy
+ *   5. Updates dist/index.html    → points <script src> at the new hashed filename
  *
  * Run automatically via `npm run build` (package.json build script).
  */
 
-import { readFileSync, writeFileSync } from 'fs'
-import { resolve, dirname }            from 'path'
-import { fileURLToPath }               from 'url'
-import { minify }                      from 'terser'
-import JavaScriptObfuscator            from 'javascript-obfuscator'
+import { readFileSync, writeFileSync, unlinkSync } from 'fs'
+import { resolve, dirname }                         from 'path'
+import { fileURLToPath }                            from 'url'
+import { createHash }                               from 'crypto'
+import { minify }                                   from 'terser'
+import JavaScriptObfuscator                         from 'javascript-obfuscator'
 
-const __dirname = dirname(fileURLToPath(import.meta.url))
-const appJsPath = resolve(__dirname, '../dist/static/app.js')
+const __dirname  = dirname(fileURLToPath(import.meta.url))
+const distDir    = resolve(__dirname, '../dist')
+const appJsPath  = resolve(distDir, 'static/app.js')
+const indexPath  = resolve(distDir, 'index.html')
 
 console.log('[build] Reading dist/static/app.js …')
 const originalCode = readFileSync(appJsPath, 'utf8')
 const origKB       = (originalCode.length / 1024).toFixed(0)
 
 // ── Step 1: Minify with terser ─────────────────────────────────────────────
-// Removes all whitespace, comments, shortens local variable names.
-// Result: ~1 long line, unreadable but syntactically identical.
 console.log('[build] Minifying with terser …')
 const terserResult = await minify(originalCode, {
   compress: {
-    drop_console:   false,   // keep console.error / console.warn
-    passes:         2,       // two compression passes for better results
+    drop_console:   false,
+    passes:         2,
   },
   mangle: {
-    toplevel: false,         // don't mangle top-level names (globals used by HTML)
+    toplevel: false,   // keep top-level names (called from onclick= attributes)
   },
   format: {
-    comments: false,         // strip all comments
+    comments: false,
   },
 })
 
@@ -49,20 +51,18 @@ const minifiedCode = terserResult.code
 const minKB        = (minifiedCode.length / 1024).toFixed(0)
 console.log(`[build] Minified: ${origKB} KB → ${minKB} KB`)
 
-// ── Step 2: Obfuscate with javascript-obfuscator ───────────────────────────
-// Encodes string literals to base64, shuffles the lookup array, mangles
-// remaining identifiers.  Result: completely unreadable in DevTools.
+// ── Step 2: Obfuscate ─────────────────────────────────────────────────────
 console.log('[build] Obfuscating …')
 const OBF_OPTIONS = {
   compact:                    true,
-  identifierNamesGenerator:  'mangled',    // a, b, c …
-  renameGlobals:              false,        // keep globals intact (DOM APIs etc.)
-  renameProperties:           false,        // safer — dynamic key access intact
+  identifierNamesGenerator:  'mangled',
+  renameGlobals:              false,
+  renameProperties:           false,
   shuffleStringArray:         true,
   rotateStringArray:          true,
   stringArray:                true,
-  stringArrayEncoding:        ['base64'],   // string literals → base64
-  stringArrayThreshold:       0.75,         // encode 75 % of strings
+  stringArrayEncoding:        ['base64'],
+  stringArrayThreshold:       0.75,
   splitStrings:               false,
   deadCodeInjection:          false,
   controlFlowFlattening:      false,
@@ -84,8 +84,7 @@ try {
 
 const obfKB = (obfCode.length / 1024).toFixed(0)
 
-// ── Step 3: Syntax-check the final output ─────────────────────────────────
-// Catches any corruption before it reaches users.
+// ── Step 3: Syntax-check ──────────────────────────────────────────────────
 try {
   new Function(obfCode)
   console.log('[build] Syntax check: ✅ OK')
@@ -94,7 +93,23 @@ try {
   process.exit(1)
 }
 
-// ── Step 4: Write back ────────────────────────────────────────────────────
-writeFileSync(appJsPath, obfCode, 'utf8')
+// ── Step 4: Write hashed filename → busts Cloudflare CDN cache ───────────
+// Hash is derived from the final obfuscated content, so it only changes
+// when the code actually changes.
+const hash        = createHash('md5').update(obfCode).digest('hex').slice(0, 8)
+const hashedName  = `app.${hash}.js`
+const hashedPath  = resolve(distDir, 'static', hashedName)
+
+// Remove the old unhashed file, write the new hashed one
+unlinkSync(appJsPath)
+writeFileSync(hashedPath, obfCode, 'utf8')
+console.log(`[build] Written: dist/static/${hashedName}`)
+
+// ── Step 5: Patch index.html to reference the hashed filename ────────────
+let indexHtml = readFileSync(indexPath, 'utf8')
+// Replace any existing app[.hash].js reference
+indexHtml = indexHtml.replace(/\/static\/app(\.[a-f0-9]+)?\.js/, `/static/${hashedName}`)
+writeFileSync(indexPath, indexHtml, 'utf8')
+console.log(`[build] index.html updated → /static/${hashedName}`)
 
 console.log(`[build] Done. app.js: ${origKB} KB → ${minKB} KB (minified) → ${obfKB} KB (obfuscated)`)
