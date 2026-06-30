@@ -17272,63 +17272,54 @@ function avDrawProviderPage() {
   const today = avTodayStr()
   const futureBlocks = avState.blocks.filter(b => b.block_date >= today).sort((a,b) => a.block_date.localeCompare(b.block_date))
 
-  // Build schedule map: dow → row
-  const schedMap = {}
-  for (const s of avState.schedule) schedMap[s.day_of_week] = s
-
   mc.innerHTML = `
   <div class="max-w-3xl space-y-6">
 
-    <!-- Weekly Schedule & Capacity — single unified card, grayed out for providers -->
-    <div class="card p-0 overflow-hidden opacity-50 pointer-events-none select-none">
+    <!-- My Capacity Numbers — grayed out, coming soon for providers -->
+    <div class="card p-0 overflow-hidden opacity-60 pointer-events-none select-none">
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div>
-          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-week mr-2 text-teal-600"></i>My Weekly Schedule & Capacity</h2>
-          <p class="text-xs text-gray-400 mt-0.5">Set by your LionMD admin — contact your team to make changes.</p>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-sliders-h mr-2 text-violet-500"></i>My Capacity Numbers</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Your personal daily case targets — set by your admin in conversation with you.</p>
         </div>
-        <span class="text-xs text-indigo-400 bg-indigo-50 px-3 py-1.5 rounded-lg font-medium"><i class="fas fa-clock mr-1"></i>Coming soon</span>
+        <span class="text-xs text-violet-400 bg-violet-50 px-3 py-1.5 rounded-lg font-medium border border-violet-100"><i class="fas fa-lock mr-1"></i>Set by admin</span>
       </div>
-      <!-- Per-day schedule -->
-      <div class="divide-y divide-gray-50">
-        ${[1,2,3,4,5,6,0].map(dow => {
-          const row = schedMap[dow]
-          const maxC = row ? row.max_consults : 10
-          const loc  = row ? (row.location || '') : ''
-          const isOff = maxC === 0
+
+      <!-- Instructions -->
+      <div class="px-5 pt-4 pb-3 bg-violet-50/30 border-b border-violet-100">
+        <div class="space-y-2 text-sm text-gray-600">
+          <div class="flex items-start gap-2.5">
+            <span class="text-green-500 mt-0.5 flex-shrink-0">😊</span>
+            <div><span class="font-semibold text-gray-700">Happy Place</span> — The number of cases per day that feels sustainable and comfortable for you. This is your ideal day: busy enough to be productive, not so busy that it's stressful. Think of it as your default.</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="text-amber-500 mt-0.5 flex-shrink-0">💪</span>
+            <div><span class="font-semibold text-gray-700">Flex</span> — The maximum you're willing to take on when the team really needs it. This is your ceiling, not your norm. It's okay to stretch here occasionally, but it's not expected every day.</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="text-indigo-400 mt-0.5 flex-shrink-0"><i class="fas fa-info-circle text-xs"></i></span>
+            <div class="text-xs text-gray-400">These numbers help us plan team capacity honestly. Your admin will confirm them with you directly before anything is set.</div>
+          </div>
+        </div>
+      </div>
+
+      <!-- The two numbers -->
+      <div class="px-5 py-5 grid grid-cols-2 gap-4">
+        ${(() => {
+          const hp = avState.capacity?.happy_place
+          const fc = avState.capacity?.flex_capacity
           return `
-          <div class="flex items-center gap-4 px-5 py-3 ${isOff ? 'bg-gray-50 opacity-70' : ''}">
-            <div class="w-24 flex-shrink-0">
-              <span class="text-sm font-semibold ${isOff ? 'text-gray-400' : 'text-gray-700'}">${AV_DAYS[dow]}</span>
-            </div>
-            <div class="flex items-center gap-2">
-              <input type="number" min="0" max="99" value="${maxC}" disabled
-                class="w-14 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 bg-gray-50 cursor-not-allowed">
-              <span class="ml-1">${avStatusChip(maxC, true)}</span>
-            </div>
-            <div class="flex-1 text-xs text-gray-400">${escHtml(loc)}</div>
+          <div class="rounded-xl border-2 ${hp != null ? 'border-green-300 bg-green-50' : 'border-dashed border-green-200 bg-white'} p-5 text-center">
+            <div class="text-4xl font-bold ${hp != null ? 'text-green-500' : 'text-gray-300'} mb-2">${hp != null ? hp : '—'}</div>
+            <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
+            <div class="text-xs text-gray-400 mt-1.5">cases / day</div>
+          </div>
+          <div class="rounded-xl border-2 ${fc != null ? 'border-amber-300 bg-amber-50' : 'border-dashed border-amber-200 bg-white'} p-5 text-center">
+            <div class="text-4xl font-bold ${fc != null ? 'text-amber-500' : 'text-gray-300'} mb-2">${fc != null ? fc : '—'}</div>
+            <div class="text-sm font-bold text-amber-700">💪 Flex</div>
+            <div class="text-xs text-gray-400 mt-1.5">max cases / day</div>
           </div>`
-        }).join('')}
-      </div>
-      <!-- Capacity numbers footer -->
-      <div class="border-t border-violet-100 bg-violet-50/40 px-5 py-4">
-        <div class="text-xs font-bold text-violet-700 mb-3 uppercase tracking-wide"><i class="fas fa-sliders-h mr-1.5"></i>My Capacity Numbers</div>
-        <div class="grid grid-cols-2 gap-4">
-          ${(() => {
-            const hp = avState.capacity?.happy_place
-            const fc = avState.capacity?.flex_capacity
-            return `
-            <div class="rounded-xl border-2 ${hp != null ? 'border-green-300 bg-green-50' : 'border-dashed border-green-200 bg-green-50/50'} p-4 text-center">
-              <div class="text-3xl font-bold text-green-500 mb-1">${hp != null ? hp : '—'}</div>
-              <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
-              <div class="text-xs text-gray-400 mt-1">Sustainable cases/day</div>
-            </div>
-            <div class="rounded-xl border-2 ${fc != null ? 'border-amber-300 bg-amber-50' : 'border-dashed border-amber-200 bg-amber-50/50'} p-4 text-center">
-              <div class="text-3xl font-bold text-amber-500 mb-1">${fc != null ? fc : '—'}</div>
-              <div class="text-sm font-bold text-amber-700">💪 Flex</div>
-              <div class="text-xs text-gray-400 mt-1">Max stretch when needed</div>
-            </div>`
-          })()}
-        </div>
+        })()}
       </div>
     </div>
 
