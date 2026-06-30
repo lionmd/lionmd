@@ -17195,6 +17195,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 const avState = {
   schedule: [],       // weekly schedule rows
   blocks:   [],       // upcoming block entries
+  capacity: { happy_place: null, flex_capacity: null },
   saving:   false,
 }
 
@@ -17252,12 +17253,14 @@ async function renderProviderAvailability() {
   const mc = $('mainContent')
   mc.innerHTML = `<div class="flex items-center justify-center h-40"><div class="spinner"></div></div>`
   try {
-    const [schedule, blocks] = await Promise.all([
+    const [schedule, blocks, capacity] = await Promise.all([
       api('/api/availability/schedule'),
       api('/api/availability/blocks'),
+      api('/api/availability/capacity/me').catch(() => ({ happy_place: null, flex_capacity: null })),
     ])
     avState.schedule = schedule || []
     avState.blocks   = blocks   || []
+    avState.capacity = capacity || { happy_place: null, flex_capacity: null }
     avDrawProviderPage()
   } catch(e) {
     mc.innerHTML = `<div class="text-red-500 p-6">Error loading availability: ${e.message}</div>`
@@ -17276,15 +17279,16 @@ function avDrawProviderPage() {
   mc.innerHTML = `
   <div class="max-w-3xl space-y-6">
 
-    <!-- Weekly Schedule Card — greyed out, not editable by providers -->
+    <!-- Weekly Schedule & Capacity — single unified card, grayed out for providers -->
     <div class="card p-0 overflow-hidden opacity-50 pointer-events-none select-none">
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div>
-          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-week mr-2 text-teal-600"></i>Weekly Schedule</h2>
-          <p class="text-xs text-gray-400 mt-0.5">Managed by your LionMD admin — contact your team to make changes.</p>
+          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-calendar-week mr-2 text-teal-600"></i>My Weekly Schedule & Capacity</h2>
+          <p class="text-xs text-gray-400 mt-0.5">Set by your LionMD admin — contact your team to make changes.</p>
         </div>
         <span class="text-xs text-indigo-400 bg-indigo-50 px-3 py-1.5 rounded-lg font-medium"><i class="fas fa-clock mr-1"></i>Coming soon</span>
       </div>
+      <!-- Per-day schedule -->
       <div class="divide-y divide-gray-50">
         ${[1,2,3,4,5,6,0].map(dow => {
           const row = schedMap[dow]
@@ -17297,39 +17301,33 @@ function avDrawProviderPage() {
               <span class="text-sm font-semibold ${isOff ? 'text-gray-400' : 'text-gray-700'}">${AV_DAYS[dow]}</span>
             </div>
             <div class="flex items-center gap-2">
-              <label class="text-xs text-gray-400">Max consults</label>
               <input type="number" min="0" max="99" value="${maxC}" disabled
-                class="w-16 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 bg-gray-50 cursor-not-allowed">
+                class="w-14 text-sm text-center border border-gray-200 rounded-lg px-2 py-1 bg-gray-50 cursor-not-allowed">
               <span class="ml-1">${avStatusChip(maxC, true)}</span>
             </div>
-            <div class="flex-1">
-              <input type="text" value="${escHtml(loc)}" disabled placeholder="Location (optional)"
-                class="w-full text-xs border border-gray-200 rounded-lg px-2 py-1.5 text-gray-400 bg-gray-50 cursor-not-allowed">
-            </div>
+            <div class="flex-1 text-xs text-gray-400">${escHtml(loc)}</div>
           </div>`
         }).join('')}
       </div>
-    </div>
-
-    <!-- Capacity Numbers Card — grayed out for providers, coming soon -->
-    <div class="card p-0 overflow-hidden opacity-50 pointer-events-none select-none">
-      <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
-        <div>
-          <h2 class="text-base font-bold text-gray-800"><i class="fas fa-sliders-h mr-2 text-violet-500"></i>My Capacity Numbers</h2>
-          <p class="text-xs text-gray-400 mt-0.5">Your Happy Place and Flex number — set by your admin in coordination with you.</p>
-        </div>
-        <span class="text-xs text-violet-400 bg-violet-50 px-3 py-1.5 rounded-lg font-medium"><i class="fas fa-clock mr-1"></i>Coming soon</span>
-      </div>
-      <div class="px-5 py-5 grid grid-cols-2 gap-5">
-        <div class="rounded-xl border-2 border-dashed border-green-200 bg-green-50 p-4 text-center">
-          <div class="text-3xl font-bold text-green-500 mb-1">—</div>
-          <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
-          <div class="text-xs text-gray-400 mt-1">Cases/day I'm comfortable with every day</div>
-        </div>
-        <div class="rounded-xl border-2 border-dashed border-amber-200 bg-amber-50 p-4 text-center">
-          <div class="text-3xl font-bold text-amber-500 mb-1">—</div>
-          <div class="text-sm font-bold text-amber-700">💪 Flex</div>
-          <div class="text-xs text-gray-400 mt-1">Max I can stretch to when the team needs it</div>
+      <!-- Capacity numbers footer -->
+      <div class="border-t border-violet-100 bg-violet-50/40 px-5 py-4">
+        <div class="text-xs font-bold text-violet-700 mb-3 uppercase tracking-wide"><i class="fas fa-sliders-h mr-1.5"></i>My Capacity Numbers</div>
+        <div class="grid grid-cols-2 gap-4">
+          ${(() => {
+            const hp = avState.capacity?.happy_place
+            const fc = avState.capacity?.flex_capacity
+            return `
+            <div class="rounded-xl border-2 ${hp != null ? 'border-green-300 bg-green-50' : 'border-dashed border-green-200 bg-green-50/50'} p-4 text-center">
+              <div class="text-3xl font-bold text-green-500 mb-1">${hp != null ? hp : '—'}</div>
+              <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
+              <div class="text-xs text-gray-400 mt-1">Sustainable cases/day</div>
+            </div>
+            <div class="rounded-xl border-2 ${fc != null ? 'border-amber-300 bg-amber-50' : 'border-dashed border-amber-200 bg-amber-50/50'} p-4 text-center">
+              <div class="text-3xl font-bold text-amber-500 mb-1">${fc != null ? fc : '—'}</div>
+              <div class="text-sm font-bold text-amber-700">💪 Flex</div>
+              <div class="text-xs text-gray-400 mt-1">Max stretch when needed</div>
+            </div>`
+          })()}
         </div>
       </div>
     </div>
