@@ -18246,3 +18246,4 @@ function avExportPDF() {
 // ── END PROVIDER AVAILABILITY MODULE ───────────────────────────────────────
 
 // In-app popstate: browser back/forward handled naturally by navigate()
+
