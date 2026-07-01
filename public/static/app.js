@@ -990,9 +990,14 @@ async function tryRestoreSession() {
   const token = localStorage.getItem('lmd_token')
   if (!token) return false
   try {
+    // 8-second timeout: cold Cloudflare Worker starts can be very slow; don't block the UI
+    const ctrl = new AbortController()
+    const tid = setTimeout(() => ctrl.abort(), 8000)
     const me = await fetch('/api/auth/me', {
-      headers: { 'Authorization': 'Bearer ' + token }
-    }).then(async r => { if (!r.ok) throw new Error(); return r.json() })
+      headers: { 'Authorization': 'Bearer ' + token },
+      signal: ctrl.signal,
+    }).then(async r => { clearTimeout(tid); if (!r.ok) throw new Error(); return r.json() })
+    clearTimeout(tid)
     state.token = token
     state.user  = me
     state.role  = me.role
@@ -17177,17 +17182,19 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   if (path === '/login') {
     history.replaceState({}, '', '/login')
-    // Show login form immediately — don't block on session check
-    showLoginForm()
-    // Then check if already logged in and redirect transparently
-    tryRestoreSession()
+    if (localStorage.getItem('lmd_token')) {
+      // Token exists — check session; redirect if valid, show login if not
+      const restored = await tryRestoreSession()
+      if (!restored) showLoginForm()
+    } else {
+      showLoginForm()
+    }
     return
   }
 
   if (path === '/portal' || path.startsWith('/portal/')) {
-    // Show login form immediately while checking session
-    showLoginForm()
-    tryRestoreSession()
+    const restored = await tryRestoreSession()
+    if (!restored) showLoginForm()
     return
   }
 
@@ -17205,10 +17212,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     return
   }
 
-  // Default (/) — try to restore session in background so landing page is immediately interactive.
-  // Do NOT await here: a slow /api/auth/me response was blocking all onclick handlers on the
-  // landing page for 30-40s, making "Sign In" appear broken.
-  tryRestoreSession()
+  // Default (/) — only attempt session restore if a token exists in localStorage.
+  // Running tryRestoreSession() unconditionally (even non-awaited) caused showApp() to fire
+  // mid-render and lock body scroll/position, making all landing page buttons unresponsive.
+  if (localStorage.getItem('lmd_token')) tryRestoreSession()
 
   // Handle browser back/forward between clean paths
   window.addEventListener('popstate', () => {
