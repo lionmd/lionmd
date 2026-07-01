@@ -3766,10 +3766,13 @@ function roleGroupBadge(rg) {
 }
 
 function contractorStatusBadge(status) {
-  const s = status || 'Active'
-  if (s === 'Active')     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>Active</span>`
-  if (s === 'Inactive')   return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500"><span class="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block"></span>Inactive</span>`
-  if (s === 'Onboarding') return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block"></span>Onboarding</span>`
+  const s = status || 'Active (no sync yet)'
+  if (s === 'Fully Active')        return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>Fully Active</span>`
+  if (s === 'Active (no sync yet)') return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-700"><span class="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block"></span>Active (no sync yet)</span>`
+  if (s === 'Inactive')             return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500"><span class="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block"></span>Inactive</span>`
+  if (s === 'Onboarding')           return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block"></span>Onboarding</span>`
+  // Legacy fallback: old 'Active' value maps to 'Active (no sync yet)'
+  if (s === 'Active')               return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-blue-100 text-blue-700"><span class="w-1.5 h-1.5 rounded-full bg-blue-400 inline-block"></span>Active (no sync yet)</span>`
   return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">${escHtml(s)}</span>`
 }
 
@@ -4021,7 +4024,8 @@ function renderContractors() {
           <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1.5">Status</label>
             <select id="ctStatus" class="w-full">
-              <option value="Active">✅ Active</option>
+              <option value="Fully Active">✅ Fully Active</option>
+              <option value="Active (no sync yet)">🔵 Active (no sync yet)</option>
               <option value="Onboarding">🟡 Onboarding</option>
               <option value="Inactive">⬜ Inactive</option>
             </select>
@@ -4177,7 +4181,7 @@ function exportContractorsXlsx() {
     list.forEach(c => allRows.push({
       Group:      g.label,
       Name:       c.name        || '',
-      Status:     c.contractor_status || 'Active',
+      Status:     c.contractor_status === 'Active' ? 'Active (no sync yet)' : (c.contractor_status || 'Active (no sync yet)'),
       Company:    c.company     || '',
       'EIN / SSN': c.ein_ssn   || '',
       Email:      c.email       || '',
@@ -4211,7 +4215,7 @@ function exportContractorsXlsx() {
     const rows = list.map((c, i) => ({
       '#':           i + 1,
       Name:          c.name        || '',
-      Status:        c.contractor_status || 'Active',
+      Status:        c.contractor_status === 'Active' ? 'Active (no sync yet)' : (c.contractor_status || 'Active (no sync yet)'),
       Company:       c.company     || '',
       'EIN / SSN':   c.ein_ssn    || '',
       Email:         c.email       || '',
@@ -4238,7 +4242,7 @@ function exportContractorsXlsx() {
     const inactiveRows = inactive.map((c, i) => ({
       '#':           i + 1,
       Name:          c.name        || '',
-      Status:        c.contractor_status || 'Inactive',
+      Status:        c.contractor_status === 'Active' ? 'Active (no sync yet)' : (c.contractor_status || 'Inactive'),
       Group:         c.role_group  || '',
       Company:       c.company     || '',
       'EIN / SSN':   c.ein_ssn    || '',
@@ -4297,7 +4301,7 @@ async function exportProviderSpreadsheet() {
 
       return {
         'Full Name':       fullName,
-        'Status':          ct.contractor_status || 'Active',
+        'Status':          ct.contractor_status === 'Active' ? 'Active (no sync yet)' : (ct.contractor_status || 'Active (no sync yet)'),
         'DOB':             ct.dob        || '',
         'Email':           ct.email      || '',
         'NPI':             ct.npi        || '',
@@ -4480,7 +4484,9 @@ function openContractorModal(contractor = null) {
   $('contractorModalTitle').textContent = contractor ? 'Edit Contractor' : 'Add Contractor'
   $('ctId').value = contractor?.id || ''
   $('ctRoleGroup').value = contractor?.role_group || ''
-  $('ctStatus').value = contractor?.contractor_status || 'Active'
+  // Migrate legacy 'Active' → 'Active (no sync yet)'
+  const rawStatus = contractor?.contractor_status || 'Active (no sync yet)'
+  $('ctStatus').value = rawStatus === 'Active' ? 'Active (no sync yet)' : rawStatus
   $('ctType').value = contractor?.contractor_type || 'regular'
   $('ctGustoType').value = contractor?.gusto_type || 'Individual'
   $('ctFirstName').value = contractor?.first_name || ''
