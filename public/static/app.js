@@ -4545,11 +4545,11 @@ async function saveContractor() {
       await api('/api/contractors', { method: 'POST', body: JSON.stringify(data) })
     }
     await reloadContractors()
-    $('contractorModal').classList.add('hidden')
+    renderContractors()                                   // re-renders mainContent; new modal starts hidden
     showToast('Contractor saved!', 'success')
-    renderContractors()
-    // Refresh the profile panel if it's open for this contractor
-    if (id && ctDetailState.contractorId === parseInt(id)) {
+    // Refresh the detail slide-panel ONLY if it's already open for this contractor
+    const panelOpen = $('ctDetailPanel') && $('ctDetailPanel').style.transform === 'translateX(0px)'
+    if (id && ctDetailState.contractorId === parseInt(id) && panelOpen) {
       obOpenContractorDetail(parseInt(id))
     }
   } catch(e) { showToast('Error: ' + e.message, 'error') }
