@@ -242,9 +242,18 @@ app.use('/api/*', cors({
 }))
 
 // ──────────────────────────────────────────────
+// Module-level flags: skip migrations after first run per Worker instance
+// ──────────────────────────────────────────────
+let schemaEnsured = false
+let contractorSchemaEnsured = false
+let providerSchemaEnsuredFlag = false
+
+// ──────────────────────────────────────────────
 // STARTUP: ensure new columns exist (idempotent)
 // ──────────────────────────────────────────────
 async function ensureSchema(db: D1Database) {
+  if (schemaEnsured) return
+  schemaEnsured = true
   await db.batch([
     db.prepare(`ALTER TABLE upload_sessions ADD COLUMN source_label TEXT`).bind(),
     db.prepare(`ALTER TABLE upload_sessions ADD COLUMN period_key TEXT`).bind(),
@@ -543,30 +552,33 @@ app.post('/api/period-settings/:period_key', requireAdmin, async (c) => {
 // CONTRACTORS
 // ──────────────────────────────────────────────
 app.get('/api/contractors', requireAdmin, async (c) => {
-  // ensure columns exist
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN contractor_type TEXT DEFAULT 'regular'`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN gusto_type TEXT DEFAULT 'Individual'`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN first_name TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN last_name TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN earns_commission INTEGER DEFAULT 0`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN role_group TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN external_cpa_notes TEXT NOT NULL DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN work_email TEXT DEFAULT ''`).run().catch(() => {})
-  // Profile / provider fields (mirrors ensureProviderSchema)
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN photo_data TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN photo_mime TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN npi TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN specialty TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN states_licensed TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN phone TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN bio TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN address TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN start_date TEXT DEFAULT ''`).run().catch(() => {})
-  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN contractor_status TEXT DEFAULT 'Active'`).run().catch(() => {})
-  // Default earns_commission=1 for Lion MD, PLLC contractors (Ana Lisa Carr, Kelly Tenbrink)
-  await c.env.DB.prepare(
-    `UPDATE contractors SET earns_commission=1 WHERE (LOWER(company) LIKE '%lion md%') AND earns_commission=0`
-  ).run().catch(() => {})
+  // ensure columns exist — run only once per Worker instance
+  if (!contractorSchemaEnsured) {
+    contractorSchemaEnsured = true
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN contractor_type TEXT DEFAULT 'regular'`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN gusto_type TEXT DEFAULT 'Individual'`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN first_name TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN last_name TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN earns_commission INTEGER DEFAULT 0`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN role_group TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN external_cpa_notes TEXT NOT NULL DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN work_email TEXT DEFAULT ''`).run().catch(() => {})
+    // Profile / provider fields (mirrors ensureProviderSchema)
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN photo_data TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN photo_mime TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN npi TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN specialty TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN states_licensed TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN phone TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN bio TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN address TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN start_date TEXT DEFAULT ''`).run().catch(() => {})
+    await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN contractor_status TEXT DEFAULT 'Active'`).run().catch(() => {})
+    // Default earns_commission=1 for Lion MD, PLLC contractors (Ana Lisa Carr, Kelly Tenbrink)
+    await c.env.DB.prepare(
+      `UPDATE contractors SET earns_commission=1 WHERE (LOWER(company) LIKE '%lion md%') AND earns_commission=0`
+    ).run().catch(() => {})
+  }
   const rows = await c.env.DB.prepare('SELECT * FROM contractors WHERE is_active=1 ORDER BY role_group, name').all()
   return c.json(rows.results)
 })
@@ -3623,6 +3635,8 @@ async function sendCandidateInviteEmail(
 // ════════════════════════════════════════════════════════════════════
 
 async function ensureProviderSchema(db: D1Database) {
+  if (providerSchemaEnsuredFlag) return
+  providerSchemaEnsuredFlag = true
   // Link portal_users → contractors
   await db.prepare(`ALTER TABLE portal_users ADD COLUMN contractor_id INTEGER`).run().catch(() => {})
   // Link portal_users → phone / bio
