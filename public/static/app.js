@@ -17177,14 +17177,17 @@ window.addEventListener('DOMContentLoaded', async () => {
 
   if (path === '/login') {
     history.replaceState({}, '', '/login')
-    const restored = await tryRestoreSession()
-    if (!restored) showLoginForm()
+    // Show login form immediately — don't block on session check
+    showLoginForm()
+    // Then check if already logged in and redirect transparently
+    tryRestoreSession()
     return
   }
 
   if (path === '/portal' || path.startsWith('/portal/')) {
-    const restored = await tryRestoreSession()
-    if (!restored) showLoginForm()
+    // Show login form immediately while checking session
+    showLoginForm()
+    tryRestoreSession()
     return
   }
 
@@ -17202,8 +17205,10 @@ window.addEventListener('DOMContentLoaded', async () => {
     return
   }
 
-  // Default (/) — try to restore session, otherwise show landing page
-  await tryRestoreSession()
+  // Default (/) — try to restore session in background so landing page is immediately interactive.
+  // Do NOT await here: a slow /api/auth/me response was blocking all onclick handlers on the
+  // landing page for 30-40s, making "Sign In" appear broken.
+  tryRestoreSession()
 
   // Handle browser back/forward between clean paths
   window.addEventListener('popstate', () => {
