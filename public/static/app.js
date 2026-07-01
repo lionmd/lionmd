@@ -3765,6 +3765,14 @@ function roleGroupBadge(rg) {
   return ''
 }
 
+function contractorStatusBadge(status) {
+  const s = status || 'Active'
+  if (s === 'Active')     return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-green-100 text-green-700"><span class="w-1.5 h-1.5 rounded-full bg-green-500 inline-block"></span>Active</span>`
+  if (s === 'Inactive')   return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500"><span class="w-1.5 h-1.5 rounded-full bg-gray-400 inline-block"></span>Inactive</span>`
+  if (s === 'Onboarding') return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-amber-100 text-amber-700"><span class="w-1.5 h-1.5 rounded-full bg-amber-400 inline-block"></span>Onboarding</span>`
+  return `<span class="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-xs font-semibold bg-gray-100 text-gray-500">${escHtml(s)}</span>`
+}
+
 // ── Grouped contractors table (shared by admin + onboarding views) ─
 function renderContractorGroupedTable(contractors, duplicateIds = new Set(), clickFn = null) {
   const groups = [
@@ -3786,6 +3794,7 @@ function renderContractorGroupedTable(contractors, duplicateIds = new Set(), cli
     <thead class="bg-gray-50">
       <tr>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Name</th>
+        <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Status</th>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Group</th>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Company</th>
         <th class="text-left px-5 py-3 text-gray-500 font-semibold text-xs">Email</th>
@@ -3813,6 +3822,7 @@ function renderContractorGroupedTable(contractors, duplicateIds = new Set(), cli
               </div>
             </div>
           </td>
+          <td class="px-5 py-3">${contractorStatusBadge(c.contractor_status)}</td>
           <td class="px-5 py-3">${roleGroupBadge(c.role_group || '')}</td>
           <td class="px-5 py-3 text-gray-600">${escHtml(c.company || '—')}</td>
           <td class="px-5 py-3 text-gray-500 text-xs">${escHtml(c.email || '—')}</td>
@@ -4009,6 +4019,14 @@ function renderContractors() {
             </select>
           </div>
           <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">Status</label>
+            <select id="ctStatus" class="w-full">
+              <option value="Active">✅ Active</option>
+              <option value="Onboarding">🟡 Onboarding</option>
+              <option value="Inactive">⬜ Inactive</option>
+            </select>
+          </div>
+          <div>
             <label class="block text-xs font-semibold text-gray-600 mb-1.5">Contractor Type *</label>
             <select id="ctType" class="w-full">
               <option value="regular">Regular</option>
@@ -4155,21 +4173,22 @@ function exportContractorsXlsx() {
     const list = contractors.filter(c => (c.role_group || '') === g.key)
     if (!list.length) return
     // Section header row
-    allRows.push({ Group: `— ${g.label} —`, Name: '', Company: '', 'EIN / SSN': '', Email: '', Type: '' })
+    allRows.push({ Group: `— ${g.label} —`, Name: '', Status: '', Company: '', 'EIN / SSN': '', Email: '', Type: '' })
     list.forEach(c => allRows.push({
       Group:      g.label,
       Name:       c.name        || '',
+      Status:     c.contractor_status || 'Active',
       Company:    c.company     || '',
       'EIN / SSN': c.ein_ssn   || '',
       Email:      c.email       || '',
       Type:       c.contractor_type === 'owner' ? 'Owner' : 'Regular',
     }))
     // Blank spacer
-    allRows.push({ Group: '', Name: '', Company: '', 'EIN / SSN': '', Email: '', Type: '' })
+    allRows.push({ Group: '', Name: '', Status: '', Company: '', 'EIN / SSN': '', Email: '', Type: '' })
   })
 
   const wsMaster = XLSX.utils.json_to_sheet(allRows, {
-    header: ['Group', 'Name', 'Company', 'EIN / SSN', 'Email', 'Type'],
+    header: ['Group', 'Name', 'Status', 'Company', 'EIN / SSN', 'Email', 'Type'],
     skipHeader: false,
   })
 
@@ -4177,6 +4196,7 @@ function exportContractorsXlsx() {
   wsMaster['!cols'] = [
     { wch: 18 },  // Group
     { wch: 30 },  // Name
+    { wch: 12 },  // Status
     { wch: 30 },  // Company
     { wch: 14 },  // EIN/SSN
     { wch: 32 },  // Email
@@ -4191,17 +4211,19 @@ function exportContractorsXlsx() {
     const rows = list.map((c, i) => ({
       '#':           i + 1,
       Name:          c.name        || '',
+      Status:        c.contractor_status || 'Active',
       Company:       c.company     || '',
       'EIN / SSN':   c.ein_ssn    || '',
       Email:         c.email       || '',
       Type:          c.contractor_type === 'owner' ? 'Owner' : 'Regular',
     }))
     const ws = XLSX.utils.json_to_sheet(rows, {
-      header: ['#', 'Name', 'Company', 'EIN / SSN', 'Email', 'Type'],
+      header: ['#', 'Name', 'Status', 'Company', 'EIN / SSN', 'Email', 'Type'],
     })
     ws['!cols'] = [
       { wch: 4  },  // #
       { wch: 30 },  // Name
+      { wch: 12 },  // Status
       { wch: 30 },  // Company
       { wch: 14 },  // EIN/SSN
       { wch: 32 },  // Email
@@ -4216,6 +4238,7 @@ function exportContractorsXlsx() {
     const inactiveRows = inactive.map((c, i) => ({
       '#':           i + 1,
       Name:          c.name        || '',
+      Status:        c.contractor_status || 'Inactive',
       Group:         c.role_group  || '',
       Company:       c.company     || '',
       'EIN / SSN':   c.ein_ssn    || '',
@@ -4223,10 +4246,10 @@ function exportContractorsXlsx() {
       Type:          c.contractor_type === 'owner' ? 'Owner' : 'Regular',
     }))
     const wsInactive = XLSX.utils.json_to_sheet(inactiveRows, {
-      header: ['#', 'Name', 'Group', 'Company', 'EIN / SSN', 'Email', 'Type'],
+      header: ['#', 'Name', 'Status', 'Group', 'Company', 'EIN / SSN', 'Email', 'Type'],
     })
     wsInactive['!cols'] = [
-      { wch: 4  }, { wch: 30 }, { wch: 14 }, { wch: 30 }, { wch: 14 }, { wch: 32 }, { wch: 10 },
+      { wch: 4  }, { wch: 30 }, { wch: 12 }, { wch: 14 }, { wch: 30 }, { wch: 14 }, { wch: 32 }, { wch: 10 },
     ]
     XLSX.utils.book_append_sheet(wb, wsInactive, 'Inactive')
   }
@@ -4274,6 +4297,7 @@ async function exportProviderSpreadsheet() {
 
       return {
         'Full Name':       fullName,
+        'Status':          ct.contractor_status || 'Active',
         'DOB':             ct.dob        || '',
         'Email':           ct.email      || '',
         'NPI':             ct.npi        || '',
@@ -4286,13 +4310,14 @@ async function exportProviderSpreadsheet() {
       }
     })
 
-    const HEADERS = ['Full Name','DOB','Email','NPI','States Licensed','DEA Number(s)','Languages','Min BMI','Max BMI','Start Date']
+    const HEADERS = ['Full Name','Status','DOB','Email','NPI','States Licensed','DEA Number(s)','Languages','Min BMI','Max BMI','Start Date']
     const wb = XLSX.utils.book_new()
     const ws = XLSX.utils.json_to_sheet(rows, { header: HEADERS, skipHeader: false })
 
     // Column widths
     ws['!cols'] = [
       { wch: 28 },  // Full Name
+      { wch: 12 },  // Status
       { wch: 14 },  // DOB
       { wch: 32 },  // Email
       { wch: 14 },  // NPI
@@ -4455,6 +4480,7 @@ function openContractorModal(contractor = null) {
   $('contractorModalTitle').textContent = contractor ? 'Edit Contractor' : 'Add Contractor'
   $('ctId').value = contractor?.id || ''
   $('ctRoleGroup').value = contractor?.role_group || ''
+  $('ctStatus').value = contractor?.contractor_status || 'Active'
   $('ctType').value = contractor?.contractor_type || 'regular'
   $('ctGustoType').value = contractor?.gusto_type || 'Individual'
   $('ctFirstName').value = contractor?.first_name || ''
@@ -4503,6 +4529,7 @@ async function saveContractor() {
     contractor_type: $('ctType').value,
     gusto_type: gustoType,
     role_group: $('ctRoleGroup').value,
+    contractor_status: $('ctStatus').value,
     external_cpa_notes: $('ctExternalCpaNotes').value.trim(),
     dob: $('ctDob').value.trim(),
     start_date: $('ctStartDate').value.trim(),
@@ -13913,7 +13940,7 @@ function mgrDrawContractorList() {
           </div>
         </div>
         <div class="flex items-center gap-2 flex-shrink-0">
-          <span class="px-2 py-0.5 rounded-full text-xs font-semibold ${c.is_active ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}">${c.is_active ? 'Active' : 'Inactive'}</span>
+          ${contractorStatusBadge(c.contractor_status)}
           <i class="fas fa-chevron-right text-gray-300 group-hover:text-gray-500 transition-colors text-sm"></i>
         </div>
       </div>`).join('')}

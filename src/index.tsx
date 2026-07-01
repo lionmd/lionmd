@@ -562,6 +562,7 @@ app.get('/api/contractors', requireAdmin, async (c) => {
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN bio TEXT DEFAULT ''`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN address TEXT DEFAULT ''`).run().catch(() => {})
   await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN start_date TEXT DEFAULT ''`).run().catch(() => {})
+  await c.env.DB.prepare(`ALTER TABLE contractors ADD COLUMN contractor_status TEXT DEFAULT 'Active'`).run().catch(() => {})
   // Default earns_commission=1 for Lion MD, PLLC contractors (Ana Lisa Carr, Kelly Tenbrink)
   await c.env.DB.prepare(
     `UPDATE contractors SET earns_commission=1 WHERE (LOWER(company) LIKE '%lion md%') AND earns_commission=0`
@@ -571,19 +572,19 @@ app.get('/api/contractors', requireAdmin, async (c) => {
 })
 
 app.post('/api/contractors', requireAdmin, async (c) => {
-  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group } = await c.req.json()
+  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group, contractor_status } = await c.req.json()
   const result = await c.env.DB.prepare(
-    `INSERT INTO contractors (name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', contractor_type || 'regular', gusto_type || 'Individual', role_group || '').run()
-  return c.json({ id: result.meta.last_row_id, name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group })
+    `INSERT INTO contractors (name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group, contractor_status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', contractor_type || 'regular', gusto_type || 'Individual', role_group || '', contractor_status || 'Active').run()
+  return c.json({ id: result.meta.last_row_id, name, first_name, last_name, company, ein_ssn, email, work_email, phone, contractor_type, gusto_type, role_group, contractor_status })
 })
 
 app.put('/api/contractors/:id', requireAdmin, async (c) => {
   const id = c.req.param('id')
-  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes, dob, languages, bmi_min, bmi_max, start_date } = await c.req.json()
+  const { name, first_name, last_name, company, ein_ssn, email, work_email, phone, is_active, contractor_type, gusto_type, earns_commission, role_group, external_cpa_notes, dob, languages, bmi_min, bmi_max, start_date, contractor_status } = await c.req.json()
   await c.env.DB.prepare(
-    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=?, dob=?, languages=?, bmi_min=?, bmi_max=?, start_date=? WHERE id=?`
-  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', dob || '', languages || '', bmi_min !== undefined && bmi_min !== '' && bmi_min !== null ? parseFloat(bmi_min) : null, bmi_max !== undefined && bmi_max !== '' && bmi_max !== null ? parseFloat(bmi_max) : null, start_date || '', id).run()
+    `UPDATE contractors SET name=?, first_name=?, last_name=?, company=?, ein_ssn=?, email=?, work_email=?, phone=?, is_active=?, contractor_type=?, gusto_type=?, earns_commission=?, role_group=?, external_cpa_notes=?, dob=?, languages=?, bmi_min=?, bmi_max=?, start_date=?, contractor_status=? WHERE id=?`
+  ).bind(name, first_name || '', last_name || '', company || '', ein_ssn || '', email || '', work_email || '', phone || '', is_active ?? 1, contractor_type || 'regular', gusto_type || 'Individual', earns_commission ? 1 : 0, role_group || '', external_cpa_notes || '', dob || '', languages || '', bmi_min !== undefined && bmi_min !== '' && bmi_min !== null ? parseFloat(bmi_min) : null, bmi_max !== undefined && bmi_max !== '' && bmi_max !== null ? parseFloat(bmi_max) : null, start_date || '', contractor_status || 'Active', id).run()
   return c.json({ ok: true })
 })
 
@@ -875,7 +876,7 @@ app.post('/api/contractors/merge', requireAdmin, async (c) => {
 app.get('/api/admin/contractors/export-all', requireAdmin, async (c) => {
   const [ctRes, licRes] = await Promise.all([
     c.env.DB.prepare(
-      `SELECT id, name, first_name, last_name, email, npi, dob, languages, bmi_min, bmi_max, start_date, role_group, specialty
+      `SELECT id, name, first_name, last_name, email, npi, dob, languages, bmi_min, bmi_max, start_date, role_group, specialty, contractor_status
        FROM contractors WHERE is_active=1 ORDER BY role_group, name`
     ).all(),
     c.env.DB.prepare(
@@ -4743,7 +4744,7 @@ app.get('/api/manager/contractors', requireManager, async (c) => {
     // all contractors
     rows = await c.env.DB.prepare(
       `SELECT id, name, first_name, last_name, email, phone, bio, specialty,
-              role_group, npi, states_licensed, is_active,
+              role_group, npi, states_licensed, is_active, contractor_status,
               photo_data, photo_mime, created_at
        FROM contractors ORDER BY name ASC`
     ).all().then(r => r.results)
@@ -4753,7 +4754,7 @@ app.get('/api/manager/contractors', requireManager, async (c) => {
     const placeholders = allowedIds.map(() => '?').join(',')
     rows = await c.env.DB.prepare(
       `SELECT id, name, first_name, last_name, email, phone, bio, specialty,
-              role_group, npi, states_licensed, is_active,
+              role_group, npi, states_licensed, is_active, contractor_status,
               photo_data, photo_mime, created_at
        FROM contractors WHERE id IN (${placeholders}) ORDER BY name ASC`
     ).bind(...allowedIds).all().then(r => r.results)
