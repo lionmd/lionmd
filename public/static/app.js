@@ -17320,14 +17320,22 @@ function avDrawProviderPage() {
   mc.innerHTML = `
   <div class="max-w-3xl space-y-6">
 
-    <!-- My Capacity Numbers — grayed out, coming soon for providers -->
-    <div class="card p-0 overflow-hidden opacity-60 pointer-events-none select-none">
+    <!-- My Capacity Numbers -->
+    <div class="card p-0 overflow-hidden">
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div>
           <h2 class="text-base font-bold text-gray-800"><i class="fas fa-sliders-h mr-2 text-violet-500"></i>My Capacity Numbers</h2>
           <p class="text-xs text-gray-400 mt-0.5">Your personal daily case targets — set by your admin in conversation with you.</p>
         </div>
-        <span class="text-xs text-violet-400 bg-violet-50 px-3 py-1.5 rounded-lg font-medium border border-violet-100"><i class="fas fa-lock mr-1"></i>Set by admin</span>
+        <span class="text-xs text-violet-500 bg-violet-50 px-3 py-1.5 rounded-lg font-medium border border-violet-100"><i class="fas fa-eye mr-1"></i>Read only</span>
+      </div>
+
+      <!-- Soft disclaimer banner -->
+      <div class="px-5 py-3 bg-amber-50 border-b border-amber-100 flex items-start gap-2.5">
+        <span class="text-amber-400 flex-shrink-0 mt-0.5"><i class="fas fa-circle-info text-sm"></i></span>
+        <p class="text-xs text-amber-700 leading-relaxed">
+          <span class="font-semibold">Heads up:</span> These numbers are here to help us get a sense of where everyone is — they're a planning tool, not a commitment. We're sharing them with you for transparency, and nothing is guaranteed or set in stone. We'll always work with you directly if things need to adjust.
+        </p>
       </div>
 
       <!-- Instructions -->
@@ -17343,7 +17351,7 @@ function avDrawProviderPage() {
           </div>
           <div class="flex items-start gap-2.5">
             <span class="text-indigo-400 mt-0.5 flex-shrink-0"><i class="fas fa-info-circle text-xs"></i></span>
-            <div class="text-xs text-gray-400">These numbers help us plan team capacity honestly. Your admin will confirm them with you directly before anything is set.</div>
+            <div class="text-xs text-gray-400">If anything looks off or you'd like to talk through your numbers, just reach out — these are always a conversation.</div>
           </div>
         </div>
       </div>
