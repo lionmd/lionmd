@@ -12464,6 +12464,7 @@ async function candLicSubmitImport(rows) {
 
 const ppState = {
   profile: null,     // { contractor, licenses, portal_user }
+  npProfile: {},     // CNP/CNM questionnaire data
   tab: 'profile',    // active sub-tab when inside renderProviderPortal
 }
 
@@ -12477,8 +12478,12 @@ async function renderProviderPortal() {
 }
 
 async function ppLoadProfile() {
-  const data = await api('/api/provider/profile')
+  const [data, npData] = await Promise.all([
+    api('/api/provider/profile'),
+    api('/api/provider/np-profile').catch(() => null),
+  ])
   ppState.profile = data
+  ppState.npProfile = npData || {}
   return data
 }
 
@@ -12803,8 +12808,385 @@ function ppDrawProfile(data) {
         `).join('')
       })()}
     </div>` : ''}
+
+    <!-- CNP/CNM Licensing Information Sheet -->
+    ${ppRenderNpInfoCard(ppState.npProfile || {})}
+
   </div>
   `
+}
+
+// ── CNP/CNM Info Sheet — view card ────────────────────────────────
+function ppRenderNpInfoCard(np) {
+  const hasDea  = np.dea_csr   && np.dea_csr.length   > 0
+  const hasCert = np.board_certs && np.board_certs.length > 0
+  const hasAny  = np.gender || np.birth_name || np.other_names || np.foreign_licensed ||
+                  hasDea || hasCert || np.attestation_signed
+
+  const deaRows = (np.dea_csr || []).map(d => `
+    <div class="flex items-start gap-3 px-3 py-2 bg-blue-50 border border-blue-100 rounded-xl mb-2">
+      <span class="text-xs font-bold px-2 py-0.5 rounded-full ${d.type==='DEA'?'bg-blue-600 text-white':'bg-purple-600 text-white'} flex-shrink-0">${escHtml(d.type||'DEA')}</span>
+      <div class="flex-1 min-w-0 space-y-0.5">
+        <div class="text-xs text-gray-700"><span class="font-semibold text-gray-500 mr-1">Reg #:</span>${escHtml(d.reg_num||'—')}</div>
+        <div class="flex gap-4 text-xs text-gray-500">
+          <span><i class="fas fa-map-marker-alt mr-0.5"></i>${escHtml(d.state||'—')}</span>
+          ${d.issued_date ? `<span><i class="fas fa-calendar-check mr-0.5"></i>Issued ${escHtml(d.issued_date)}</span>` : ''}
+          ${d.expiry_date ? `<span><i class="fas fa-calendar-times mr-0.5 text-orange-400"></i>Exp. ${escHtml(d.expiry_date)}</span>` : ''}
+        </div>
+      </div>
+    </div>`).join('')
+
+  const certRows = (np.board_certs || []).map(c => `
+    <div class="flex items-start gap-3 px-3 py-2 bg-green-50 border border-green-100 rounded-xl mb-2">
+      <i class="fas fa-certificate text-green-500 mt-0.5 flex-shrink-0"></i>
+      <div class="flex-1 min-w-0 space-y-0.5">
+        <div class="text-xs font-semibold text-gray-800">${escHtml(c.board||'—')}</div>
+        <div class="text-xs text-gray-600">${escHtml(c.specialty||'—')} <span class="font-mono text-gray-400 ml-1">${escHtml(c.cert_num||'')}</span></div>
+        <div class="flex gap-4 text-xs text-gray-500">
+          ${c.issued_date ? `<span><i class="fas fa-calendar-check mr-0.5"></i>Issued ${escHtml(c.issued_date)}</span>` : ''}
+          ${c.expiry_date ? `<span><i class="fas fa-calendar-times mr-0.5 text-orange-400"></i>Exp. ${escHtml(c.expiry_date)}</span>` : ''}
+        </div>
+      </div>
+    </div>`).join('')
+
+  return `
+  <div class="card p-5 mb-5">
+    <div class="flex items-center justify-between mb-4">
+      <div>
+        <h3 class="text-xs font-bold text-gray-400 uppercase tracking-wider"><i class="fas fa-file-alt mr-1 text-violet-400"></i>CNP/CNM Licensing Information</h3>
+        ${np.updated_at ? `<p class="text-[10px] text-gray-400 mt-0.5">Last updated ${new Date(np.updated_at).toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'})}</p>` : ''}
+      </div>
+      <button onclick="ppOpenNpInfoModal()" class="text-xs px-3 py-1.5 rounded-lg bg-violet-50 border border-violet-200 text-violet-700 hover:bg-violet-100 font-semibold flex items-center gap-1.5">
+        <i class="fas fa-pencil text-[10px]"></i>${hasAny ? 'Edit' : 'Fill Out'}
+      </button>
+    </div>
+
+    ${!hasAny ? `
+    <div class="text-center py-6 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
+      <i class="fas fa-clipboard-list text-3xl text-gray-300 mb-2 block"></i>
+      <p class="text-sm font-semibold text-gray-500 mb-1">CNP/CNM questionnaire not yet completed</p>
+      <p class="text-xs text-gray-400 mb-3">Please fill out your licensing information including gender, birth name, DEA/CSR registrations, and board certifications.</p>
+      <button onclick="ppOpenNpInfoModal()" class="btn-primary px-5 py-2 rounded-xl text-sm font-semibold">
+        <i class="fas fa-pencil mr-2"></i>Complete Now
+      </button>
+    </div>` : `
+    <div class="space-y-4">
+
+      <!-- Personal identifiers -->
+      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-0.5">Gender</p>
+          <p class="text-sm text-gray-700">${escHtml(np.gender||'—')}</p>
+        </div>
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-0.5">Birth / Maiden Name</p>
+          <p class="text-sm text-gray-700">${escHtml(np.birth_name||'—')}</p>
+        </div>
+        <div>
+          <p class="text-xs text-gray-400 font-medium mb-0.5">Other Names Used</p>
+          <p class="text-sm text-gray-700">${escHtml(np.other_names||'—')}</p>
+        </div>
+      </div>
+
+      <!-- Foreign license -->
+      <div>
+        <p class="text-xs text-gray-400 font-medium mb-0.5">Licensed outside the US?</p>
+        <div class="flex items-center gap-3">
+          <span class="text-sm text-gray-700">${escHtml(np.foreign_licensed||'—')}</span>
+          ${(np.foreign_licensed||'').toLowerCase()==='yes' ? `
+            <span class="text-xs text-gray-500">${escHtml(np.foreign_country||'')} — Lic # ${escHtml(np.foreign_license_num||'—')}</span>` : ''}
+        </div>
+      </div>
+
+      <!-- DEA / CSR -->
+      ${hasDea ? `
+      <div>
+        <p class="text-xs text-gray-400 font-medium mb-2">DEA / CSR Registrations (${np.dea_csr.length})</p>
+        ${deaRows}
+      </div>` : `
+      <div>
+        <p class="text-xs text-gray-400 font-medium mb-1">DEA / CSR Registrations</p>
+        <p class="text-sm text-gray-400 italic">None on file</p>
+      </div>`}
+
+      <!-- Board certifications -->
+      ${hasCert ? `
+      <div>
+        <p class="text-xs text-gray-400 font-medium mb-2">Board Certifications (${np.board_certs.length})</p>
+        ${certRows}
+      </div>` : `
+      <div>
+        <p class="text-xs text-gray-400 font-medium mb-1">Board Certifications</p>
+        <p class="text-sm text-gray-400 italic">None on file</p>
+      </div>`}
+
+      <!-- Attestation -->
+      <div class="pt-2 border-t border-gray-100">
+        <div class="flex items-center gap-2">
+          <i class="fas ${np.attestation_signed?'fa-check-circle text-green-500':'fa-circle text-gray-300'} text-sm"></i>
+          <p class="text-xs text-gray-500">
+            ${np.attestation_signed
+              ? `Attestation signed${np.attestation_date ? ' — ' + escHtml(np.attestation_date) : ''}`
+              : 'Attestation not yet signed — please complete via Edit'}
+          </p>
+        </div>
+      </div>
+
+    </div>`}
+  </div>`
+}
+
+// ── CNP/CNM Info Sheet — Edit Modal ───────────────────────────────
+let _npDeaCsr    = []   // working copy inside modal
+let _npBoardCerts = []  // working copy inside modal
+
+function ppOpenNpInfoModal() {
+  const np = ppState.npProfile || {}
+  _npDeaCsr     = JSON.parse(JSON.stringify(np.dea_csr     || []))
+  _npBoardCerts = JSON.parse(JSON.stringify(np.board_certs || []))
+
+  let modal = $('ppNpModal')
+  if (!modal) {
+    modal = document.createElement('div')
+    modal.id = 'ppNpModal'
+    modal.className = 'fixed inset-0 modal-backdrop z-50 flex items-center justify-center p-4'
+    document.body.appendChild(modal)
+  }
+  ppRenderNpModal(np)
+  modal.classList.remove('hidden')
+}
+
+function ppRenderNpModal(np) {
+  const modal = $('ppNpModal')
+  if (!modal) return
+  modal.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[92vh] flex flex-col">
+    <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100 flex-shrink-0">
+      <div>
+        <h3 class="font-bold text-gray-800"><i class="fas fa-file-alt mr-2 text-violet-500"></i>CNP/CNM Licensing Information</h3>
+        <p class="text-xs text-gray-400 mt-0.5">Complete this form to keep your licensing information on file with LionMDs.</p>
+      </div>
+      <button onclick="$('ppNpModal').classList.add('hidden')" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 flex-shrink-0">
+        <i class="fas fa-times"></i>
+      </button>
+    </div>
+    <div class="overflow-y-auto flex-1 p-5 space-y-6">
+
+      <!-- Personal -->
+      <div>
+        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3">Personal Information</p>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Gender</label>
+            <input id="npGender" type="text" placeholder="e.g. Female" value="${escHtml(np.gender||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Birth / Maiden Name</label>
+            <input id="npBirthName" type="text" placeholder="If different from current legal name" value="${escHtml(np.birth_name||'')}" class="w-full text-sm"/>
+          </div>
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Other Names Used</label>
+            <input id="npOtherNames" type="text" placeholder="Any other names on record" value="${escHtml(np.other_names||'')}" class="w-full text-sm"/>
+          </div>
+        </div>
+      </div>
+
+      <!-- Foreign license -->
+      <div>
+        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3">Foreign License</p>
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Licensed outside the US?</label>
+            <select id="npForeignLicensed" class="w-full text-sm" onchange="ppToggleForeignFields()">
+              <option value="">Select…</option>
+              <option value="No"  ${(np.foreign_licensed||'')==='No'?'selected':''}>No</option>
+              <option value="Yes" ${(np.foreign_licensed||'')==='Yes'?'selected':''}>Yes</option>
+            </select>
+          </div>
+          <div id="npForeignCountryWrap" class="${(np.foreign_licensed||'')!=='Yes'?'opacity-40 pointer-events-none':''}">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Country</label>
+            <input id="npForeignCountry" type="text" placeholder="e.g. Canada" value="${escHtml(np.foreign_country||'')}" class="w-full text-sm"/>
+          </div>
+          <div id="npForeignNumWrap" class="${(np.foreign_licensed||'')!=='Yes'?'opacity-40 pointer-events-none':''}">
+            <label class="block text-xs font-semibold text-gray-600 mb-1">Foreign License #</label>
+            <input id="npForeignNum" type="text" placeholder="License number" value="${escHtml(np.foreign_license_num||'')}" class="w-full text-sm"/>
+          </div>
+        </div>
+      </div>
+
+      <!-- DEA / CSR -->
+      <div>
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">DEA / CSR Registrations</p>
+          <button onclick="ppAddDeaCsr()" class="text-xs px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 font-semibold">
+            <i class="fas fa-plus mr-1"></i>Add
+          </button>
+        </div>
+        <div id="npDeaList" class="space-y-2"></div>
+      </div>
+
+      <!-- Board Certifications -->
+      <div>
+        <div class="flex items-center justify-between mb-3">
+          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Board Certifications</p>
+          <button onclick="ppAddBoardCert()" class="text-xs px-2.5 py-1 rounded-lg bg-green-50 border border-green-200 text-green-700 hover:bg-green-100 font-semibold">
+            <i class="fas fa-plus mr-1"></i>Add
+          </button>
+        </div>
+        <div id="npCertList" class="space-y-2"></div>
+      </div>
+
+      <!-- Attestation -->
+      <div class="p-4 rounded-xl bg-amber-50 border border-amber-200">
+        <p class="text-xs font-bold text-amber-800 mb-2"><i class="fas fa-pen-fancy mr-1"></i>Attestation</p>
+        <p class="text-xs text-amber-700 mb-3">By checking this box, I certify that the above information is a true, accurate, and complete statement of record to the best of my knowledge and belief.</p>
+        <div class="flex items-center gap-3">
+          <input type="checkbox" id="npAttestation" class="w-4 h-4 rounded accent-violet-600" ${np.attestation_signed?'checked':''}/>
+          <label for="npAttestation" class="text-xs font-semibold text-amber-900 cursor-pointer">I certify this information is accurate</label>
+        </div>
+        <div class="mt-2" id="npAttestDateWrap">
+          <label class="block text-xs font-semibold text-gray-600 mb-1">Date</label>
+          <input id="npAttestDate" type="date" value="${escHtml(np.attestation_date||'')}" class="text-sm w-44"/>
+        </div>
+      </div>
+
+      <div id="ppNpError" class="hidden text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2"></div>
+    </div>
+
+    <div class="flex gap-3 px-5 py-4 border-t border-gray-100 flex-shrink-0">
+      <button onclick="$('ppNpModal').classList.add('hidden')" class="flex-1 px-4 py-2 rounded-xl border border-gray-200 text-gray-600 text-sm hover:bg-gray-50">Cancel</button>
+      <button onclick="ppSaveNpInfo()" class="flex-1 btn-primary px-4 py-2 rounded-xl text-sm font-semibold"><i class="fas fa-save mr-1"></i>Save</button>
+    </div>
+  </div>`
+
+  ppRenderDeaList()
+  ppRenderCertList()
+}
+
+function ppToggleForeignFields() {
+  const yes = ($('npForeignLicensed')?.value||'') === 'Yes'
+  ;['npForeignCountryWrap','npForeignNumWrap'].forEach(id => {
+    const el = $(id)
+    if (el) { el.classList.toggle('opacity-40', !yes); el.classList.toggle('pointer-events-none', !yes) }
+  })
+}
+
+function ppRenderDeaList() {
+  const list = $('npDeaList')
+  if (!list) return
+  if (_npDeaCsr.length === 0) {
+    list.innerHTML = '<p class="text-xs text-gray-400 italic py-1">No entries — click Add to add a DEA or CSR registration.</p>'
+    return
+  }
+  list.innerHTML = _npDeaCsr.map((d, i) => `
+  <div class="grid grid-cols-5 gap-2 items-end p-3 bg-blue-50 border border-blue-100 rounded-xl">
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Type</label>
+      <select onchange="_npDeaCsr[${i}].type=this.value" class="w-full text-xs">
+        <option value="DEA"  ${(d.type||'DEA')==='DEA'?'selected':''}>DEA</option>
+        <option value="CSR"  ${(d.type||'')==='CSR'?'selected':''}>CSR</option>
+      </select>
+    </div>
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Reg #</label>
+      <input type="text" value="${escHtml(d.reg_num||'')}" placeholder="Registration #" onchange="_npDeaCsr[${i}].reg_num=this.value" class="w-full text-xs"/>
+    </div>
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">State</label>
+      <select onchange="_npDeaCsr[${i}].state=this.value" class="w-full text-xs">
+        <option value="">State</option>
+        ${US_STATES.map(s=>`<option value="${s}" ${d.state===s?'selected':''}>${s}</option>`).join('')}
+      </select>
+    </div>
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Issued</label>
+      <input type="date" value="${escHtml(d.issued_date||'')}" onchange="_npDeaCsr[${i}].issued_date=this.value" class="w-full text-xs"/>
+    </div>
+    <div class="flex gap-1 items-end">
+      <div class="flex-1">
+        <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Expiry</label>
+        <input type="date" value="${escHtml(d.expiry_date||'')}" onchange="_npDeaCsr[${i}].expiry_date=this.value" class="w-full text-xs"/>
+      </div>
+      <button onclick="_npDeaCsr.splice(${i},1);ppRenderDeaList()" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-100 text-gray-400 hover:text-red-500 flex-shrink-0 mb-0.5">
+        <i class="fas fa-times text-xs"></i>
+      </button>
+    </div>
+  </div>`).join('')
+}
+
+function ppAddDeaCsr() {
+  _npDeaCsr.push({ type: 'DEA', reg_num: '', state: '', issued_date: '', expiry_date: '' })
+  ppRenderDeaList()
+}
+
+function ppRenderCertList() {
+  const list = $('npCertList')
+  if (!list) return
+  if (_npBoardCerts.length === 0) {
+    list.innerHTML = '<p class="text-xs text-gray-400 italic py-1">No entries — click Add to add a board certification.</p>'
+    return
+  }
+  list.innerHTML = _npBoardCerts.map((c, i) => `
+  <div class="grid grid-cols-5 gap-2 items-end p-3 bg-green-50 border border-green-100 rounded-xl">
+    <div class="col-span-2">
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Certifying Board</label>
+      <input type="text" value="${escHtml(c.board||'')}" placeholder="e.g. ANCC" onchange="_npBoardCerts[${i}].board=this.value" class="w-full text-xs"/>
+    </div>
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Specialty</label>
+      <input type="text" value="${escHtml(c.specialty||'')}" placeholder="e.g. FNP-BC" onchange="_npBoardCerts[${i}].specialty=this.value" class="w-full text-xs"/>
+    </div>
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Cert #</label>
+      <input type="text" value="${escHtml(c.cert_num||'')}" placeholder="Cert #" onchange="_npBoardCerts[${i}].cert_num=this.value" class="w-full text-xs"/>
+    </div>
+    <div class="flex gap-1 items-end">
+      <div class="flex-1">
+        <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Issued</label>
+        <input type="date" value="${escHtml(c.issued_date||'')}" onchange="_npBoardCerts[${i}].issued_date=this.value" class="w-full text-xs"/>
+      </div>
+      <button onclick="_npBoardCerts.splice(${i},1);ppRenderCertList()" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-100 text-gray-400 hover:text-red-500 flex-shrink-0 mb-0.5">
+        <i class="fas fa-times text-xs"></i>
+      </button>
+    </div>
+  </div>
+  <div class="grid grid-cols-2 gap-2 px-3 -mt-1">
+    <div>
+      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Expiration Date</label>
+      <input type="date" value="${escHtml(c.expiry_date||'')}" onchange="_npBoardCerts[${i}].expiry_date=this.value" class="w-full text-xs"/>
+    </div>
+  </div>`).join('')
+}
+
+function ppAddBoardCert() {
+  _npBoardCerts.push({ board: '', specialty: '', cert_num: '', issued_date: '', expiry_date: '' })
+  ppRenderCertList()
+}
+
+async function ppSaveNpInfo() {
+  const errEl = $('ppNpError')
+  if (errEl) errEl.classList.add('hidden')
+  const body = {
+    gender:            ($('npGender')?.value||'').trim(),
+    birth_name:        ($('npBirthName')?.value||'').trim(),
+    other_names:       ($('npOtherNames')?.value||'').trim(),
+    foreign_licensed:  ($('npForeignLicensed')?.value||'').trim(),
+    foreign_country:   ($('npForeignCountry')?.value||'').trim(),
+    foreign_license_num: ($('npForeignNum')?.value||'').trim(),
+    dea_csr:           _npDeaCsr,
+    board_certs:       _npBoardCerts,
+    attestation_signed: $('npAttestation')?.checked || false,
+    attestation_date:  ($('npAttestDate')?.value||'').trim(),
+  }
+  try {
+    await api('/api/provider/np-profile', { method: 'PUT', body: JSON.stringify(body) })
+    ppState.npProfile = { ...body, updated_at: new Date().toISOString() }
+    $('ppNpModal').classList.add('hidden')
+    showToast('Licensing information saved!', 'success')
+    renderProviderProfile()
+  } catch(e) {
+    if (errEl) { errEl.textContent = e.message || 'Save failed'; errEl.classList.remove('hidden') }
+  }
 }
 
 function ppOpenEditProfile() {
@@ -15726,9 +16108,12 @@ function licDrawMatrix() {
             const typeLabel = ct.role_group || ct.specialty || ''
             return `<tr class="hover:bg-blue-50 transition-colors">
               <td class="sticky left-0 bg-white border-r border-b border-gray-200 px-3 py-1.5 font-semibold text-gray-800 text-xs whitespace-nowrap z-10">
-                ${escHtml(ct.name)}
-                ${typeLabel ? `<span class="ml-1.5 px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500">${escHtml(typeLabel)}</span>` : ''}
-                <span class="block text-[10px] text-gray-400 font-normal">${visibleStates.filter(s => licMap[ct.id + '_' + s]).length} of ${visibleStates.length} state${visibleStates.length !== 1 ? 's' : ''}</span>
+                <div class="flex items-center gap-1.5">
+                  <span>${escHtml(ct.name)}</span>
+                  ${typeLabel ? `<span class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-gray-100 text-gray-500">${escHtml(typeLabel)}</span>` : ''}
+                  ${(state.role === 'admin' || state.role === 'license_editor') ? `<button onclick="event.stopPropagation();licViewNpInfo(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}')" class="px-1.5 py-0.5 rounded text-[9px] font-bold bg-purple-50 text-purple-600 hover:bg-purple-100 transition flex-shrink-0" title="View CNP/CNM Info Sheet"><i class="fas fa-id-card"></i></button>` : ''}
+                </div>
+                <span class="block text-[10px] text-gray-400 font-normal mt-0.5">${visibleStates.filter(s => licMap[ct.id + '_' + s]).length} of ${visibleStates.length} state${visibleStates.length !== 1 ? 's' : ''}</span>
               </td>
               ${visibleStates.map(s => cellHtml(licMap[ct.id + '_' + s])).join('')}
             </tr>`
@@ -15843,6 +16228,10 @@ function licDrawByProvider() {
             ${expCt.length > 0 ? `<span class="px-2 py-0.5 rounded-full bg-orange-100 text-orange-700 text-xs font-bold">${expCt.length} expiring</span>` : ''}
           </div>
           ${(state.role === 'admin' || state.role === 'license_editor') ? `
+          <button onclick="event.preventDefault();event.stopPropagation();licViewNpInfo(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}')"
+            class="text-xs px-2 py-1 rounded-lg bg-purple-50 text-purple-600 hover:bg-purple-100 transition font-medium flex-shrink-0">
+            <i class="fas fa-id-card mr-1"></i>NP Info
+          </button>
           <button onclick="event.preventDefault();event.stopPropagation();licAddForProvider(${ct.id},'${escHtml(ct.name).replace(/'/g,"\\'")}','${escHtml(ct.role_group||'')}')"
             class="text-xs px-2 py-1 rounded-lg bg-blue-50 text-blue-600 hover:bg-blue-100 transition font-medium flex-shrink-0">
             <i class="fas fa-plus mr-1"></i>Add
@@ -15883,6 +16272,182 @@ function licDrawByProvider() {
       </details>`
     }).join('')}
   </div>`
+}
+
+// ── NP Info Sheet viewer for license_editor/admin ────────────────
+async function licViewNpInfo(contractorId, contractorName) {
+  // Remove any existing modal
+  const existing = $('licNpInfoModal')
+  if (existing) existing.remove()
+
+  // Create modal with loading spinner
+  const modal = document.createElement('div')
+  modal.id = 'licNpInfoModal'
+  modal.className = 'fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4'
+  modal.onclick = (e) => { if (e.target === modal) modal.remove() }
+  modal.innerHTML = `
+  <div class="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[90vh] flex flex-col overflow-hidden">
+    <div class="flex items-center justify-between px-6 py-4 border-b border-gray-100 flex-shrink-0">
+      <div class="flex items-center gap-3">
+        <div class="w-9 h-9 rounded-xl bg-purple-100 flex items-center justify-center">
+          <i class="fas fa-id-card text-purple-600"></i>
+        </div>
+        <div>
+          <p class="font-bold text-gray-800 text-sm leading-tight">CNP/CNM Information Sheet</p>
+          <p class="text-xs text-gray-400 mt-0.5">${escHtml(contractorName)}</p>
+        </div>
+      </div>
+      <button onclick="$('licNpInfoModal').remove()" class="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-100 transition">
+        <i class="fas fa-times text-sm"></i>
+      </button>
+    </div>
+    <div id="licNpInfoBody" class="flex-1 overflow-y-auto p-6">
+      <div class="flex items-center justify-center h-32">
+        <div class="spinner"></div>
+      </div>
+    </div>
+  </div>`
+  document.body.appendChild(modal)
+
+  // Fetch data
+  try {
+    const data = await api('/api/admin/contractors/' + contractorId + '/np-profile')
+    const np = data.np_profile || null
+    const ct = data.contractor || {}
+    const body = $('licNpInfoBody')
+    if (!body) return
+
+    if (!np) {
+      body.innerHTML = `
+      <div class="flex flex-col items-center justify-center py-12 text-center">
+        <div class="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center mb-4">
+          <i class="fas fa-file-alt text-3xl text-gray-300"></i>
+        </div>
+        <p class="font-semibold text-gray-500 text-sm">No questionnaire on file</p>
+        <p class="text-xs text-gray-400 mt-1">${escHtml(contractorName)} has not yet completed their CNP/CNM Information Sheet.</p>
+      </div>`
+      return
+    }
+
+    const fmtD = d => d ? new Date(d + 'T00:00:00').toLocaleDateString('en-US', {month:'short', day:'numeric', year:'numeric'}) : '—'
+    const row = (label, val) => val
+      ? `<div class="flex flex-col gap-0.5"><p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide">${label}</p><p class="text-sm text-gray-800 font-medium">${escHtml(String(val))}</p></div>`
+      : ''
+
+    const deaCsr = Array.isArray(np.dea_csr) ? np.dea_csr : []
+    const boardCerts = Array.isArray(np.board_certs) ? np.board_certs : []
+
+    body.innerHTML = `
+    <div class="space-y-5">
+
+      <!-- Personal Identifiers -->
+      <div>
+        <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fas fa-user text-gray-400"></i> Personal Identifiers
+        </h3>
+        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 bg-gray-50 rounded-xl p-4">
+          ${row('Gender', np.gender)}
+          ${row('Birth Name', np.birth_name)}
+          ${row('Other Names Used', np.other_names)}
+          ${row('Date of Birth', ct.dob ? fmtD(ct.dob) : null)}
+        </div>
+      </div>
+
+      <!-- Foreign License -->
+      <div>
+        <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fas fa-globe text-gray-400"></i> Foreign Country License
+        </h3>
+        <div class="bg-gray-50 rounded-xl p-4">
+          ${np.foreign_licensed === 'yes'
+            ? `<div class="grid grid-cols-2 gap-3">
+                ${row('Country', np.foreign_country)}
+                ${row('License Number', np.foreign_license_num)}
+               </div>`
+            : `<p class="text-sm text-gray-400 italic">Not licensed outside the United States</p>`
+          }
+        </div>
+      </div>
+
+      <!-- DEA / CSR Registrations -->
+      <div>
+        <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fas fa-pills text-gray-400"></i> DEA / CSR Registrations
+        </h3>
+        ${deaCsr.length === 0
+          ? `<div class="bg-gray-50 rounded-xl p-4 text-sm text-gray-400 italic">No DEA/CSR registrations on file</div>`
+          : `<div class="space-y-2">
+              ${deaCsr.map((d, i) => `
+              <div class="bg-blue-50 border border-blue-100 rounded-xl p-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <div class="col-span-2 sm:col-span-3 flex items-center gap-2 mb-1">
+                  <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">${escHtml(d.type || 'DEA')}</span>
+                  <span class="text-xs text-blue-400">Registration ${i + 1}</span>
+                </div>
+                ${row('Reg. Number', d.reg_num)}
+                ${row('State', d.state)}
+                ${row('Issued', d.issued_date ? fmtD(d.issued_date) : null)}
+                ${row('Expires', d.expiry_date ? fmtD(d.expiry_date) : null)}
+              </div>`).join('')}
+             </div>`
+        }
+      </div>
+
+      <!-- Board Certifications -->
+      <div>
+        <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fas fa-certificate text-gray-400"></i> Board Certifications
+        </h3>
+        ${boardCerts.length === 0
+          ? `<div class="bg-gray-50 rounded-xl p-4 text-sm text-gray-400 italic">No board certifications on file</div>`
+          : `<div class="space-y-2">
+              ${boardCerts.map((b, i) => `
+              <div class="bg-green-50 border border-green-100 rounded-xl p-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
+                <div class="col-span-2 sm:col-span-3 flex items-center gap-2 mb-1">
+                  <span class="text-xs font-bold text-green-700">Certification ${i + 1}</span>
+                </div>
+                ${row('Certifying Board', b.board)}
+                ${row('Specialty', b.specialty)}
+                ${row('Cert. Number', b.cert_num)}
+                ${row('Issued', b.issued_date ? fmtD(b.issued_date) : null)}
+                ${row('Expires', b.expiry_date ? fmtD(b.expiry_date) : null)}
+              </div>`).join('')}
+             </div>`
+        }
+      </div>
+
+      <!-- Attestation -->
+      <div>
+        <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fas fa-signature text-gray-400"></i> Attestation
+        </h3>
+        <div class="bg-gray-50 rounded-xl p-4 flex items-center gap-3">
+          ${np.attestation_signed
+            ? `<div class="w-8 h-8 rounded-full bg-green-100 flex items-center justify-center flex-shrink-0">
+                <i class="fas fa-check text-green-600 text-sm"></i>
+               </div>
+               <div>
+                 <p class="text-sm font-semibold text-green-700">Attestation Signed</p>
+                 ${np.attestation_date ? `<p class="text-xs text-gray-400 mt-0.5">Signed on ${fmtD(np.attestation_date)}</p>` : ''}
+               </div>`
+            : `<div class="w-8 h-8 rounded-full bg-amber-100 flex items-center justify-center flex-shrink-0">
+                <i class="fas fa-exclamation text-amber-500 text-sm"></i>
+               </div>
+               <div>
+                 <p class="text-sm font-semibold text-amber-700">Attestation Not Yet Signed</p>
+                 <p class="text-xs text-gray-400 mt-0.5">Provider has not confirmed accuracy of this information.</p>
+               </div>`
+          }
+        </div>
+      </div>
+
+      <!-- Last updated -->
+      ${np.updated_at ? `<p class="text-[10px] text-gray-300 text-right">Last updated: ${new Date(np.updated_at).toLocaleString()}</p>` : ''}
+
+    </div>`
+  } catch(e) {
+    const body = $('licNpInfoBody')
+    if (body) body.innerHTML = `<div class="p-6 text-center text-red-500"><i class="fas fa-exclamation-circle mr-2"></i>${escHtml(e.message || 'Failed to load NP profile')}</div>`
+  }
 }
 
 // ── License detail popover — read-first, edit button for admins ────

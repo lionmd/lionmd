@@ -3712,6 +3712,51 @@ async function ensureProviderSchema(db: D1Database) {
   await db.prepare(`ALTER TABLE contractors ADD COLUMN languages TEXT DEFAULT ''`).run().catch(() => {})
   await db.prepare(`ALTER TABLE contractors ADD COLUMN bmi_min REAL DEFAULT NULL`).run().catch(() => {})
   await db.prepare(`ALTER TABLE contractors ADD COLUMN bmi_max REAL DEFAULT NULL`).run().catch(() => {})
+
+  // ── CNP/CNM Information Sheet (np_profile table) ─────────────────
+  // Stores all fields from the CNP/CNM Questionnaire PDF.
+  // One row per contractor. Provider can self-fill; admin/license_editor can read.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS np_profile (
+      id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+      contractor_id         INTEGER NOT NULL UNIQUE,
+
+      -- Personal information
+      gender                TEXT    DEFAULT '',
+      birth_name            TEXT    DEFAULT '',   -- birth/maiden name
+      other_names           TEXT    DEFAULT '',   -- other names used
+
+      -- License: foreign country
+      foreign_licensed      TEXT    DEFAULT '',   -- Yes / No
+      foreign_country       TEXT    DEFAULT '',
+      foreign_license_num   TEXT    DEFAULT '',
+
+      -- DEA / CSR registrations (stored as JSON array of objects)
+      -- Each object: { type: 'DEA'|'CSR', reg_num, state, issued_date, expiry_date }
+      dea_csr_json          TEXT    DEFAULT '[]',
+
+      -- Board certification (stored as JSON array)
+      -- Each object: { board, specialty, cert_num, issued_date, expiry_date }
+      board_certs_json      TEXT    DEFAULT '[]',
+
+      -- Signature / attestation
+      attestation_signed    INTEGER DEFAULT 0,    -- 0=no 1=yes
+      attestation_date      TEXT    DEFAULT '',
+
+      updated_at            DATETIME DEFAULT CURRENT_TIMESTAMP
+    )
+  `).run().catch(() => {})
+  // Idempotent columns for future additions
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN gender TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN birth_name TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN other_names TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN foreign_licensed TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN foreign_country TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN foreign_license_num TEXT DEFAULT ''`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN dea_csr_json TEXT DEFAULT '[]'`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN board_certs_json TEXT DEFAULT '[]'`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN attestation_signed INTEGER DEFAULT 0`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE np_profile ADD COLUMN attestation_date TEXT DEFAULT ''`).run().catch(() => {})
 }
 
 // ── requireProvider: auth middleware — admin OR provider role ─────
@@ -4082,6 +4127,123 @@ app.get('/api/provider/payroll', requireProvider, async (c) => {
   `).bind(cid).first() as any
 
   return c.json({ periods: periods.results, totals })
+})
+
+// ── GET /api/provider/np-profile ─────────────────────────────────
+// Provider fetches their own CNP/CNM questionnaire data
+app.get('/api/provider/np-profile', requireProvider, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
+  const cid = pu.contractor_id
+  const row = await c.env.DB.prepare(`SELECT * FROM np_profile WHERE contractor_id=?`).bind(cid).first() as any
+  // Return empty defaults if no row yet
+  if (!row) {
+    return c.json({
+      contractor_id: cid,
+      gender: '', birth_name: '', other_names: '',
+      foreign_licensed: '', foreign_country: '', foreign_license_num: '',
+      dea_csr: [], board_certs: [],
+      attestation_signed: false, attestation_date: '',
+    })
+  }
+  return c.json({
+    contractor_id: row.contractor_id,
+    gender: row.gender || '',
+    birth_name: row.birth_name || '',
+    other_names: row.other_names || '',
+    foreign_licensed: row.foreign_licensed || '',
+    foreign_country: row.foreign_country || '',
+    foreign_license_num: row.foreign_license_num || '',
+    dea_csr: (() => { try { return JSON.parse(row.dea_csr_json || '[]') } catch { return [] } })(),
+    board_certs: (() => { try { return JSON.parse(row.board_certs_json || '[]') } catch { return [] } })(),
+    attestation_signed: row.attestation_signed === 1,
+    attestation_date: row.attestation_date || '',
+    updated_at: row.updated_at || '',
+  })
+})
+
+// ── PUT /api/provider/np-profile ─────────────────────────────────
+// Provider saves their own CNP/CNM questionnaire data
+app.put('/api/provider/np-profile', requireProvider, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const u = c.get('user')
+  const pu = await c.env.DB.prepare(`SELECT contractor_id FROM portal_users WHERE id=?`).bind(u.id).first() as any
+  if (!pu?.contractor_id) return c.json({ error: 'No linked contractor profile' }, 404)
+  const cid = pu.contractor_id
+  const body = await c.req.json() as any
+  const {
+    gender = '', birth_name = '', other_names = '',
+    foreign_licensed = '', foreign_country = '', foreign_license_num = '',
+    dea_csr = [], board_certs = [],
+    attestation_signed = false, attestation_date = '',
+  } = body
+  await c.env.DB.prepare(`
+    INSERT INTO np_profile (contractor_id, gender, birth_name, other_names,
+      foreign_licensed, foreign_country, foreign_license_num,
+      dea_csr_json, board_certs_json,
+      attestation_signed, attestation_date, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(contractor_id) DO UPDATE SET
+      gender              = excluded.gender,
+      birth_name          = excluded.birth_name,
+      other_names         = excluded.other_names,
+      foreign_licensed    = excluded.foreign_licensed,
+      foreign_country     = excluded.foreign_country,
+      foreign_license_num = excluded.foreign_license_num,
+      dea_csr_json        = excluded.dea_csr_json,
+      board_certs_json    = excluded.board_certs_json,
+      attestation_signed  = excluded.attestation_signed,
+      attestation_date    = excluded.attestation_date,
+      updated_at          = excluded.updated_at
+  `).bind(
+    cid,
+    String(gender).trim(),
+    String(birth_name).trim(),
+    String(other_names).trim(),
+    String(foreign_licensed).trim(),
+    String(foreign_country).trim(),
+    String(foreign_license_num).trim(),
+    JSON.stringify(Array.isArray(dea_csr) ? dea_csr : []),
+    JSON.stringify(Array.isArray(board_certs) ? board_certs : []),
+    attestation_signed ? 1 : 0,
+    String(attestation_date).trim(),
+  ).run()
+  return c.json({ ok: true })
+})
+
+// ── GET /api/admin/contractors/:id/np-profile ─────────────────────
+// Admin or license_editor reads a provider's CNP/CNM questionnaire data
+app.get('/api/admin/contractors/:id/np-profile', requireLicenseEditor, async (c) => {
+  await ensureProviderSchema(c.env.DB)
+  const cid = c.req.param('id')
+  // Confirm contractor exists
+  const ct = await c.env.DB.prepare(`SELECT id, name, first_name, last_name, email, phone, dob FROM contractors WHERE id=?`).bind(cid).first() as any
+  if (!ct) return c.json({ error: 'Not found' }, 404)
+  const row = await c.env.DB.prepare(`SELECT * FROM np_profile WHERE contractor_id=?`).bind(cid).first() as any
+  if (!row) {
+    return c.json({
+      contractor: ct,
+      np_profile: null,
+    })
+  }
+  return c.json({
+    contractor: ct,
+    np_profile: {
+      gender: row.gender || '',
+      birth_name: row.birth_name || '',
+      other_names: row.other_names || '',
+      foreign_licensed: row.foreign_licensed || '',
+      foreign_country: row.foreign_country || '',
+      foreign_license_num: row.foreign_license_num || '',
+      dea_csr: (() => { try { return JSON.parse(row.dea_csr_json || '[]') } catch { return [] } })(),
+      board_certs: (() => { try { return JSON.parse(row.board_certs_json || '[]') } catch { return [] } })(),
+      attestation_signed: row.attestation_signed === 1,
+      attestation_date: row.attestation_date || '',
+      updated_at: row.updated_at || '',
+    },
+  })
 })
 
 // ── GET /api/provider/consults ────────────────────────────────────
