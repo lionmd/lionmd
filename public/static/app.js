@@ -12862,31 +12862,71 @@ function ppRenderNpInfoCard(np) {
     </div>
 
     ${!hasAny ? `
-    <div class="text-center py-6 bg-gray-50 rounded-xl border-2 border-dashed border-gray-200">
-      <i class="fas fa-clipboard-list text-3xl text-gray-300 mb-2 block"></i>
-      <p class="text-sm font-semibold text-gray-500 mb-1">CNP/CNM questionnaire not yet completed</p>
-      <p class="text-xs text-gray-400 mb-3">Please fill out your licensing information including gender, birth name, DEA/CSR registrations, and board certifications.</p>
-      <button onclick="ppOpenNpInfoModal()" class="btn-primary px-5 py-2 rounded-xl text-sm font-semibold">
-        <i class="fas fa-pencil mr-2"></i>Complete Now
-      </button>
+    <div class="space-y-3">
+      ${(() => {
+        const ct = ppState.profile?.contractor || {}
+        const pu = ppState.profile?.portal_user || {}
+        const fmtDob = ct.dob ? new Date(ct.dob + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'
+        return `<div class="grid grid-cols-2 md:grid-cols-3 gap-3 bg-gray-50 border border-gray-100 rounded-xl p-3 text-sm">
+          <div><p class="text-xs text-gray-400 font-medium mb-0.5">Full Legal Name</p><p class="text-gray-700 font-medium">${escHtml([ct.first_name,ct.last_name].filter(Boolean).join(' ') || ct.name || '—')}</p></div>
+          <div><p class="text-xs text-gray-400 font-medium mb-0.5">Date of Birth</p><p class="text-gray-700">${escHtml(fmtDob)}</p></div>
+          <div><p class="text-xs text-gray-400 font-medium mb-0.5">Phone</p><p class="text-gray-700">${escHtml(ct.phone||'—')}</p></div>
+          <div><p class="text-xs text-gray-400 font-medium mb-0.5">Email</p><p class="text-gray-700">${escHtml(pu.email||ct.email||ct.work_email||'—')}</p></div>
+          <div class="col-span-2"><p class="text-xs text-gray-400 font-medium mb-0.5">Address</p><p class="text-gray-700">${escHtml(ct.address||'—')}</p></div>
+        </div>`
+      })()}
+      <div class="text-center py-4 bg-amber-50 rounded-xl border border-amber-200">
+        <i class="fas fa-clipboard-list text-2xl text-amber-400 mb-2 block"></i>
+        <p class="text-sm font-semibold text-amber-800 mb-1">A few more details needed</p>
+        <p class="text-xs text-amber-700 mb-3">Please add your gender, birth name, DEA/CSR registrations, board certifications, and attestation.</p>
+        <button onclick="ppOpenNpInfoModal()" class="btn-primary px-5 py-2 rounded-xl text-sm font-semibold">
+          <i class="fas fa-pencil mr-2"></i>Complete Now
+        </button>
+      </div>
     </div>` : `
     <div class="space-y-4">
 
-      <!-- Personal identifiers -->
-      <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
-        <div>
-          <p class="text-xs text-gray-400 font-medium mb-0.5">Gender</p>
-          <p class="text-sm text-gray-700">${escHtml(np.gender||'—')}</p>
-        </div>
-        <div>
-          <p class="text-xs text-gray-400 font-medium mb-0.5">Birth / Maiden Name</p>
-          <p class="text-sm text-gray-700">${escHtml(np.birth_name||'—')}</p>
-        </div>
-        <div>
-          <p class="text-xs text-gray-400 font-medium mb-0.5">Other Names Used</p>
-          <p class="text-sm text-gray-700">${escHtml(np.other_names||'—')}</p>
-        </div>
-      </div>
+      <!-- Personal identifiers — profile fields + NP-specific fields -->
+      ${(() => {
+        const ct = ppState.profile?.contractor || {}
+        const pu = ppState.profile?.portal_user || {}
+        const fmtDob = ct.dob ? new Date(ct.dob + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'
+        return `
+        <div class="grid grid-cols-2 md:grid-cols-3 gap-3 bg-gray-50 border border-gray-100 rounded-xl p-3">
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Full Legal Name</p>
+            <p class="text-sm text-gray-700 font-medium">${escHtml([ct.first_name,ct.last_name].filter(Boolean).join(' ') || ct.name || '—')}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Date of Birth</p>
+            <p class="text-sm text-gray-700">${escHtml(fmtDob)}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Gender</p>
+            <p class="text-sm text-gray-700">${escHtml(np.gender||'—')}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Phone</p>
+            <p class="text-sm text-gray-700">${escHtml(ct.phone||'—')}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Email</p>
+            <p class="text-sm text-gray-700">${escHtml(pu.email||ct.email||ct.work_email||'—')}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Birth / Maiden Name</p>
+            <p class="text-sm text-gray-700">${escHtml(np.birth_name||'—')}</p>
+          </div>
+          <div class="col-span-2">
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Address</p>
+            <p class="text-sm text-gray-700">${escHtml(ct.address||'—')}</p>
+          </div>
+          <div>
+            <p class="text-xs text-gray-400 font-medium mb-0.5">Other Names Used</p>
+            <p class="text-sm text-gray-700">${escHtml(np.other_names||'—')}</p>
+          </div>
+        </div>`
+      })()}
 
       <!-- Foreign license -->
       <div>
@@ -12972,24 +13012,44 @@ function ppRenderNpModal(np) {
     </div>
     <div class="overflow-y-auto flex-1 p-5 space-y-6">
 
-      <!-- Personal -->
-      <div>
-        <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider mb-3">Personal Information</p>
-        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Gender</label>
-            <input id="npGender" type="text" placeholder="e.g. Female" value="${escHtml(np.gender||'')}" class="w-full text-sm"/>
+      <!-- Personal — read-only from main profile -->
+      ${(() => {
+        const ct = ppState.profile?.contractor || {}
+        const pu = ppState.profile?.portal_user || {}
+        const fmtDob = ct.dob ? new Date(ct.dob + 'T00:00:00').toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) : '—'
+        const ro = (label, val) => `<div><p class="text-[10px] font-semibold text-gray-400 uppercase tracking-wide mb-0.5">${label}</p><p class="text-sm text-gray-700 font-medium">${val || '<span class=\'text-gray-300 italic\'>Not set</span>'}</p></div>`
+        return `
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">Personal Information</p>
+            <button type="button" onclick="$('ppNpModal').classList.add('hidden'); ppOpenEditProfile()" class="text-xs text-blue-500 hover:underline font-medium flex items-center gap-1">
+              <i class="fas fa-pencil text-[9px]"></i>Edit in Profile
+            </button>
           </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Birth / Maiden Name</label>
-            <input id="npBirthName" type="text" placeholder="If different from current legal name" value="${escHtml(np.birth_name||'')}" class="w-full text-sm"/>
+          <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 bg-gray-50 border border-gray-200 rounded-xl p-3 mb-3">
+            ${ro('Full Name', escHtml([ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.name || ''))}
+            ${ro('Date of Birth', escHtml(fmtDob))}
+            ${ro('Phone', escHtml(ct.phone || ''))}
+            ${ro('Email', escHtml(pu.email || ct.email || ct.work_email || ''))}
+            <div class="col-span-2 sm:col-span-3">${ro('Address', escHtml(ct.address || ''))}</div>
           </div>
-          <div>
-            <label class="block text-xs font-semibold text-gray-600 mb-1">Other Names Used</label>
-            <input id="npOtherNames" type="text" placeholder="Any other names on record" value="${escHtml(np.other_names||'')}" class="w-full text-sm"/>
+          <p class="text-[10px] text-gray-400 italic mb-3 -mt-1"><i class="fas fa-lock text-[9px] mr-0.5"></i>These fields are pulled from your main profile — update them via "Edit in Profile" above.</p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Gender</label>
+              <input id="npGender" type="text" placeholder="e.g. Female" value="${escHtml(np.gender||'')}" class="w-full text-sm"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Birth / Maiden Name</label>
+              <input id="npBirthName" type="text" placeholder="If different from current legal name" value="${escHtml(np.birth_name||'')}" class="w-full text-sm"/>
+            </div>
+            <div>
+              <label class="block text-xs font-semibold text-gray-600 mb-1">Other Names Used</label>
+              <input id="npOtherNames" type="text" placeholder="Any other names on record" value="${escHtml(np.other_names||'')}" class="w-full text-sm"/>
+            </div>
           </div>
-        </div>
-      </div>
+        </div>`
+      })()}
 
       <!-- Foreign license -->
       <div>
@@ -16346,11 +16406,15 @@ async function licViewNpInfo(contractorId, contractorName) {
           <i class="fas fa-user text-gray-400"></i> Personal Identifiers
         </h3>
         <div class="grid grid-cols-2 sm:grid-cols-3 gap-3 bg-gray-50 rounded-xl p-4">
-          ${row('Gender', np.gender)}
-          ${row('Birth Name', np.birth_name)}
-          ${row('Other Names Used', np.other_names)}
+          ${row('Full Legal Name', escHtml([ct.first_name, ct.last_name].filter(Boolean).join(' ') || ct.name || ''))}
           ${row('Date of Birth', ct.dob ? fmtD(ct.dob) : null)}
+          ${row('Gender', np.gender)}
+          ${row('Phone', ct.phone)}
+          ${row('Email', ct.work_email || ct.email)}
+          ${row('Birth / Maiden Name', np.birth_name)}
+          ${row('Other Names Used', np.other_names)}
         </div>
+        ${ct.address ? `<div class="mt-2 bg-gray-50 rounded-xl px-4 py-3">${row('Address', ct.address)}</div>` : ''}
       </div>
 
       <!-- Foreign License -->

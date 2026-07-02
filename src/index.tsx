@@ -4219,7 +4219,7 @@ app.get('/api/admin/contractors/:id/np-profile', requireLicenseEditor, async (c)
   await ensureProviderSchema(c.env.DB)
   const cid = c.req.param('id')
   // Confirm contractor exists
-  const ct = await c.env.DB.prepare(`SELECT id, name, first_name, last_name, email, phone, dob FROM contractors WHERE id=?`).bind(cid).first() as any
+  const ct = await c.env.DB.prepare(`SELECT id, name, first_name, last_name, email, work_email, phone, address, dob FROM contractors WHERE id=?`).bind(cid).first() as any
   if (!ct) return c.json({ error: 'Not found' }, 404)
   const row = await c.env.DB.prepare(`SELECT * FROM np_profile WHERE contractor_id=?`).bind(cid).first() as any
   if (!row) {
