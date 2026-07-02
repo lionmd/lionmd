@@ -5292,18 +5292,23 @@ async function ensureAvailabilitySchema(db: D1Database) {
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pblk_contractor ON provider_blocks(contractor_id)`).run().catch(() => {})
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_pblk_date       ON provider_blocks(block_date)`).run().catch(() => {})
 
-  // ── provider_capacity: one row per contractor, stores happy_place + flex_capacity ──
+  // ── provider_capacity: one row per contractor, stores happy_place + flex_capacity + hours ──
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS provider_capacity (
       id            INTEGER PRIMARY KEY AUTOINCREMENT,
       contractor_id INTEGER NOT NULL UNIQUE,
       happy_place   INTEGER DEFAULT NULL,   -- sustainable daily cases the provider is comfortable with
       flex_capacity INTEGER DEFAULT NULL,   -- max they can stretch to when needed
-      updated_at    DATETIME DEFAULT CURRENT_TIMESTAMP,
-      updated_by    TEXT     DEFAULT 'admin',
+      hours_per_week  REAL DEFAULT NULL,    -- typical hours per week the provider works (self-set)
+      preferred_hours TEXT DEFAULT NULL,    -- free-text notes on preferred schedule / hours (self-set)
+      updated_at      DATETIME DEFAULT CURRENT_TIMESTAMP,
+      updated_by      TEXT     DEFAULT 'admin',
       FOREIGN KEY (contractor_id) REFERENCES contractors(id)
     )
   `).run().catch(() => {})
+  // idempotent column additions for existing tables
+  await db.prepare(`ALTER TABLE provider_capacity ADD COLUMN hours_per_week REAL DEFAULT NULL`).run().catch(() => {})
+  await db.prepare(`ALTER TABLE provider_capacity ADD COLUMN preferred_hours TEXT DEFAULT NULL`).run().catch(() => {})
 }
 
 // ── Helper: send availability notification email to all admins ────────────
@@ -5654,7 +5659,7 @@ app.delete('/api/availability/blocks/:id', async (c) => {
 })
 
 // ── GET /api/availability/capacity/me ────────────────────────────────────
-// Provider: get own happy_place + flex_capacity (read-only, set by admin)
+// Provider: get own capacity row (happy_place + flex set by admin; hours self-set)
 app.get('/api/availability/capacity/me', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
@@ -5665,17 +5670,55 @@ app.get('/api/availability/capacity/me', async (c) => {
   await ensureAvailabilitySchema(c.env.DB)
 
   const contractorId = payload.contractor_id
-  if (!contractorId) return c.json({ happy_place: null, flex_capacity: null })
+  if (!contractorId) return c.json({ happy_place: null, flex_capacity: null, hours_per_week: null, preferred_hours: null })
 
   const row = await c.env.DB.prepare(
-    `SELECT happy_place, flex_capacity, updated_at FROM provider_capacity WHERE contractor_id = ?`
+    `SELECT happy_place, flex_capacity, hours_per_week, preferred_hours, updated_at FROM provider_capacity WHERE contractor_id = ?`
   ).bind(contractorId).first()
 
-  return c.json(row || { happy_place: null, flex_capacity: null })
+  return c.json(row || { happy_place: null, flex_capacity: null, hours_per_week: null, preferred_hours: null })
+})
+
+// ── PUT /api/availability/capacity/me ────────────────────────────────────
+// Provider: self-update their own hours_per_week + preferred_hours (NOT happy_place/flex)
+app.put('/api/availability/capacity/me', async (c) => {
+  const authHeader = c.req.header('Authorization') || ''
+  const token = authHeader.replace('Bearer ', '')
+  if (!token) return c.json({ error: 'Unauthorized' }, 401)
+  const payload = await verifyToken(token, c.env)
+  if (!payload) return c.json({ error: 'Invalid or expired token' }, 401)
+
+  await ensureAvailabilitySchema(c.env.DB)
+
+  const contractorId = payload.contractor_id
+  if (!contractorId) return c.json({ error: 'No contractor linked to this account' }, 400)
+
+  const body = await c.req.json()
+  const hours = body.hours_per_week != null && body.hours_per_week !== '' ? parseFloat(body.hours_per_week) : null
+  const notes = body.preferred_hours !== undefined ? (body.preferred_hours || null) : undefined
+
+  // Upsert: preserve existing happy_place/flex_capacity, only touch hours fields
+  await c.env.DB.prepare(`
+    INSERT INTO provider_capacity (contractor_id, hours_per_week, preferred_hours, updated_at, updated_by)
+    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+    ON CONFLICT(contractor_id) DO UPDATE SET
+      hours_per_week  = excluded.hours_per_week,
+      preferred_hours = CASE WHEN ? IS NOT NULL THEN ? ELSE preferred_hours END,
+      updated_at      = excluded.updated_at
+  `).bind(
+    contractorId,
+    hours,
+    notes ?? null,
+    payload.email || payload.sub || 'provider',
+    notes ?? null,
+    notes ?? null
+  ).run()
+
+  return c.json({ ok: true })
 })
 
 // ── GET /api/availability/capacity ───────────────────────────────────────
-// Admin: get all providers' happy_place + flex_capacity numbers
+// Admin/manager: get all providers' full capacity row incl. hours
 app.get('/api/availability/capacity', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
@@ -5686,21 +5729,23 @@ app.get('/api/availability/capacity', async (c) => {
 
   await ensureAvailabilitySchema(c.env.DB)
 
+  // LEFT JOIN so providers with no row yet still appear
   const rows = await c.env.DB.prepare(`
-    SELECT pc.contractor_id, pc.happy_place, pc.flex_capacity, pc.updated_at, pc.updated_by,
-           ct.name, ct.first_name, ct.last_name, ct.specialty
-    FROM provider_capacity pc
-    JOIN contractors ct ON ct.id = pc.contractor_id
+    SELECT ct.id as contractor_id, ct.name, ct.first_name, ct.last_name, ct.specialty, ct.role_group,
+           pc.happy_place, pc.flex_capacity, pc.hours_per_week, pc.preferred_hours,
+           pc.updated_at, pc.updated_by
+    FROM contractors ct
+    LEFT JOIN provider_capacity pc ON pc.contractor_id = ct.id
     WHERE ct.is_active = 1
-    ORDER BY ct.name
+    ORDER BY ct.role_group, ct.name
   `).all().then(r => r.results)
 
   return c.json(rows)
 })
 
 // ── PUT /api/availability/capacity ───────────────────────────────────────
-// Admin: set happy_place + flex_capacity for a contractor
-// Body: { contractor_id, happy_place, flex_capacity }
+// Admin: set happy_place + flex_capacity (and optionally hours) for a contractor
+// Body: { contractor_id, happy_place, flex_capacity, hours_per_week?, preferred_hours? }
 app.put('/api/availability/capacity', async (c) => {
   const authHeader = c.req.header('Authorization') || ''
   const token = authHeader.replace('Bearer ', '')
@@ -5712,21 +5757,25 @@ app.put('/api/availability/capacity', async (c) => {
   await ensureAvailabilitySchema(c.env.DB)
 
   const body = await c.req.json()
-  const { contractor_id, happy_place, flex_capacity } = body
+  const { contractor_id, happy_place, flex_capacity, hours_per_week, preferred_hours } = body
   if (!contractor_id) return c.json({ error: 'contractor_id required' }, 400)
 
   const hp = happy_place   != null && happy_place   !== '' ? parseInt(happy_place)   : null
   const fc = flex_capacity != null && flex_capacity !== '' ? parseInt(flex_capacity) : null
+  const hw = hours_per_week != null && hours_per_week !== '' ? parseFloat(hours_per_week) : null
+  const ph = preferred_hours !== undefined ? (preferred_hours || null) : null
 
   await c.env.DB.prepare(`
-    INSERT INTO provider_capacity (contractor_id, happy_place, flex_capacity, updated_at, updated_by)
-    VALUES (?, ?, ?, CURRENT_TIMESTAMP, ?)
+    INSERT INTO provider_capacity (contractor_id, happy_place, flex_capacity, hours_per_week, preferred_hours, updated_at, updated_by)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
     ON CONFLICT(contractor_id) DO UPDATE SET
-      happy_place   = excluded.happy_place,
-      flex_capacity = excluded.flex_capacity,
-      updated_at    = excluded.updated_at,
-      updated_by    = excluded.updated_by
-  `).bind(contractor_id, hp, fc, payload.email || payload.sub || 'admin').run()
+      happy_place     = excluded.happy_place,
+      flex_capacity   = excluded.flex_capacity,
+      hours_per_week  = excluded.hours_per_week,
+      preferred_hours = excluded.preferred_hours,
+      updated_at      = excluded.updated_at,
+      updated_by      = excluded.updated_by
+  `).bind(contractor_id, hp, fc, hw, ph, payload.email || payload.sub || 'admin').run()
 
   return c.json({ ok: true })
 })
@@ -5781,15 +5830,17 @@ app.get('/api/availability/dashboard', async (c) => {
     contractor: ct,
     schedule:   scheduleMap[ct.id]  || [],
     blocks:     blockMap[ct.id]     || [],
-    capacity:   capacityMap[ct.id]  || { happy_place: null, flex_capacity: null },
+    capacity:   capacityMap[ct.id]  || { happy_place: null, flex_capacity: null, hours_per_week: null, preferred_hours: null },
   }))
 
   // Team totals: sum of all providers who have numbers set
   const teamTotals = {
     happy_place_total:   providers.reduce((s, p) => s + (p.capacity.happy_place   ?? 0), 0),
     flex_capacity_total: providers.reduce((s, p) => s + (p.capacity.flex_capacity ?? 0), 0),
+    hours_per_week_total: providers.reduce((s, p) => s + (p.capacity.hours_per_week ?? 0), 0),
     providers_with_happy_place:   providers.filter(p => p.capacity.happy_place   != null).length,
     providers_with_flex_capacity: providers.filter(p => p.capacity.flex_capacity != null).length,
+    providers_with_hours:         providers.filter(p => p.capacity.hours_per_week != null).length,
     total_providers: providers.length,
   }
 

@@ -17240,7 +17240,7 @@ window.addEventListener('DOMContentLoaded', async () => {
 const avState = {
   schedule: [],       // weekly schedule rows
   blocks:   [],       // upcoming block entries
-  capacity: { happy_place: null, flex_capacity: null },
+  capacity: { happy_place: null, flex_capacity: null, hours_per_week: null, preferred_hours: null },
   saving:   false,
 }
 
@@ -17301,11 +17301,11 @@ async function renderProviderAvailability() {
     const [schedule, blocks, capacity] = await Promise.all([
       api('/api/availability/schedule'),
       api('/api/availability/blocks'),
-      api('/api/availability/capacity/me').catch(() => ({ happy_place: null, flex_capacity: null })),
+      api('/api/availability/capacity/me').catch(() => ({ happy_place: null, flex_capacity: null, hours_per_week: null, preferred_hours: null })),
     ])
     avState.schedule = schedule || []
     avState.blocks   = blocks   || []
-    avState.capacity = capacity || { happy_place: null, flex_capacity: null }
+    avState.capacity = capacity || { happy_place: null, flex_capacity: null, hours_per_week: null, preferred_hours: null }
     avDrawProviderPage()
   } catch(e) {
     mc.innerHTML = `<div class="text-red-500 p-6">Error loading availability: ${e.message}</div>`
@@ -17325,16 +17325,15 @@ function avDrawProviderPage() {
       <div class="flex items-center justify-between px-5 py-4 border-b border-gray-100">
         <div>
           <h2 class="text-base font-bold text-gray-800"><i class="fas fa-sliders-h mr-2 text-violet-500"></i>My Capacity Numbers</h2>
-          <p class="text-xs text-gray-400 mt-0.5">Your personal daily case targets — set by your admin in conversation with you.</p>
+          <p class="text-xs text-gray-400 mt-0.5">Case targets set by your admin · your weekly hours set by you.</p>
         </div>
-        <span class="text-xs text-violet-500 bg-violet-50 px-3 py-1.5 rounded-lg font-medium border border-violet-100"><i class="fas fa-eye mr-1"></i>Read only</span>
       </div>
 
       <!-- Soft disclaimer banner -->
       <div class="px-5 py-3 bg-amber-50 border-b border-amber-100 flex items-start gap-2.5">
         <span class="text-amber-400 flex-shrink-0 mt-0.5"><i class="fas fa-circle-info text-sm"></i></span>
         <p class="text-xs text-amber-700 leading-relaxed">
-          <span class="font-semibold">Heads up:</span> These numbers are here to help us get a sense of where everyone is — they're a planning tool, not a commitment. We're sharing them with you for transparency, and nothing is guaranteed or set in stone. We'll always work with you directly if things need to adjust.
+          <span class="font-semibold">Heads up:</span> These numbers help us get a sense of where everyone is — they're a planning tool, not a commitment. We share them with you for transparency and nothing is guaranteed or set in stone. We'll always work with you directly if anything needs to adjust.
         </p>
       </div>
 
@@ -17343,11 +17342,15 @@ function avDrawProviderPage() {
         <div class="space-y-2 text-sm text-gray-600">
           <div class="flex items-start gap-2.5">
             <span class="text-green-500 mt-0.5 flex-shrink-0">😊</span>
-            <div><span class="font-semibold text-gray-700">Happy Place</span> — The number of cases per day that feels sustainable and comfortable for you. This is your ideal day: busy enough to be productive, not so busy that it's stressful. Think of it as your default.</div>
+            <div><span class="font-semibold text-gray-700">Happy Place</span> — The number of cases per day that feels sustainable and comfortable for you. Your ideal day: productive, not overwhelming. Set by your admin.</div>
           </div>
           <div class="flex items-start gap-2.5">
             <span class="text-amber-500 mt-0.5 flex-shrink-0">💪</span>
-            <div><span class="font-semibold text-gray-700">Flex</span> — The maximum you're willing to take on when the team really needs it. This is your ceiling, not your norm. It's okay to stretch here occasionally, but it's not expected every day.</div>
+            <div><span class="font-semibold text-gray-700">Flex</span> — Your ceiling when the team really needs it. Occasional, not the norm. Set by your admin.</div>
+          </div>
+          <div class="flex items-start gap-2.5">
+            <span class="text-blue-400 mt-0.5 flex-shrink-0">🕐</span>
+            <div><span class="font-semibold text-gray-700">Weekly Hours</span> — How many hours per week you typically work. <span class="text-blue-600 font-medium">You set this yourself</span> — it helps us understand team capacity more accurately.</div>
           </div>
           <div class="flex items-start gap-2.5">
             <span class="text-indigo-400 mt-0.5 flex-shrink-0"><i class="fas fa-info-circle text-xs"></i></span>
@@ -17356,23 +17359,56 @@ function avDrawProviderPage() {
         </div>
       </div>
 
-      <!-- The two numbers -->
-      <div class="px-5 py-5 grid grid-cols-2 gap-4">
-        ${(() => {
-          const hp = avState.capacity?.happy_place
-          const fc = avState.capacity?.flex_capacity
-          return `
-          <div class="rounded-xl border-2 ${hp != null ? 'border-green-300 bg-green-50' : 'border-dashed border-green-200 bg-white'} p-5 text-center">
-            <div class="text-4xl font-bold ${hp != null ? 'text-green-500' : 'text-gray-300'} mb-2">${hp != null ? hp : '—'}</div>
-            <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
-            <div class="text-xs text-gray-400 mt-1.5">cases / day</div>
+      <!-- Admin-set numbers (read-only) -->
+      <div class="px-5 pt-5 pb-3">
+        <p class="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-3"><i class="fas fa-lock mr-1"></i>Set by admin</p>
+        <div class="grid grid-cols-2 gap-4">
+          ${(() => {
+            const hp = avState.capacity?.happy_place
+            const fc = avState.capacity?.flex_capacity
+            return `
+            <div class="rounded-xl border-2 ${hp != null ? 'border-green-300 bg-green-50' : 'border-dashed border-green-200 bg-white'} p-5 text-center">
+              <div class="text-4xl font-bold ${hp != null ? 'text-green-500' : 'text-gray-300'} mb-2">${hp != null ? hp : '—'}</div>
+              <div class="text-sm font-bold text-green-700">😊 Happy Place</div>
+              <div class="text-xs text-gray-400 mt-1.5">cases / day</div>
+            </div>
+            <div class="rounded-xl border-2 ${fc != null ? 'border-amber-300 bg-amber-50' : 'border-dashed border-amber-200 bg-white'} p-5 text-center">
+              <div class="text-4xl font-bold ${fc != null ? 'text-amber-500' : 'text-gray-300'} mb-2">${fc != null ? fc : '—'}</div>
+              <div class="text-sm font-bold text-amber-700">💪 Flex</div>
+              <div class="text-xs text-gray-400 mt-1.5">max cases / day</div>
+            </div>`
+          })()}
+        </div>
+      </div>
+
+      <!-- Provider-editable: hours -->
+      <div class="px-5 pb-5 pt-4 border-t border-blue-100 bg-blue-50/30">
+        <p class="text-xs font-semibold text-blue-600 uppercase tracking-wide mb-3"><i class="fas fa-pencil-alt mr-1"></i>You set this</p>
+        <div class="grid grid-cols-2 gap-4">
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">🕐 Hours per week</label>
+            <div class="flex items-center gap-2">
+              <input type="number" id="avMyHours" min="1" max="80" step="0.5"
+                value="${avState.capacity?.hours_per_week ?? ''}"
+                placeholder="e.g. 20"
+                class="w-24 text-sm text-center border border-blue-200 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-blue-300 outline-none">
+              <span class="text-xs text-gray-400">hrs / week</span>
+            </div>
           </div>
-          <div class="rounded-xl border-2 ${fc != null ? 'border-amber-300 bg-amber-50' : 'border-dashed border-amber-200 bg-white'} p-5 text-center">
-            <div class="text-4xl font-bold ${fc != null ? 'text-amber-500' : 'text-gray-300'} mb-2">${fc != null ? fc : '—'}</div>
-            <div class="text-sm font-bold text-amber-700">💪 Flex</div>
-            <div class="text-xs text-gray-400 mt-1.5">max cases / day</div>
-          </div>`
-        })()}
+          <div>
+            <label class="block text-xs font-semibold text-gray-600 mb-1.5">📝 Schedule notes <span class="font-normal text-gray-400">(optional)</span></label>
+            <input type="text" id="avMyHoursNotes"
+              value="${escHtml(avState.capacity?.preferred_hours || '')}"
+              placeholder="e.g. mornings only, no Fridays"
+              class="w-full text-sm border border-blue-200 rounded-lg px-3 py-2 bg-white focus:ring-2 focus:ring-blue-300 outline-none">
+          </div>
+        </div>
+        <div class="mt-3 flex items-center gap-3">
+          <button onclick="avSaveMyHours()" class="px-4 py-2 rounded-lg text-xs font-semibold bg-blue-600 text-white hover:bg-blue-700 transition flex items-center gap-1.5">
+            <i class="fas fa-save"></i> Save My Hours
+          </button>
+          <span id="avHoursSaveStatus" class="text-xs text-gray-400"></span>
+        </div>
       </div>
     </div>
 
@@ -17464,6 +17500,31 @@ function avToggleBlockLimit() {
   const type = $('avBlockType')?.value
   const wrap = $('avBlockLimitWrap')
   if (wrap) wrap.classList.toggle('hidden', type !== 'limited')
+}
+
+async function avSaveMyHours() {
+  const hoursVal = $('avMyHours')?.value
+  const notesVal = $('avMyHoursNotes')?.value || ''
+  const statusEl = $('avHoursSaveStatus')
+  const hours = hoursVal !== '' ? parseFloat(hoursVal) : null
+  if (hours !== null && (isNaN(hours) || hours <= 0 || hours > 80)) {
+    showToast('Please enter a valid number of hours (1–80)', 'error')
+    return
+  }
+  if (statusEl) statusEl.innerHTML = '<i class="fas fa-spinner fa-spin mr-1"></i>Saving…'
+  try {
+    await api('/api/availability/capacity/me', {
+      method: 'PUT',
+      body: JSON.stringify({ hours_per_week: hours, preferred_hours: notesVal }),
+    })
+    avState.capacity = { ...avState.capacity, hours_per_week: hours, preferred_hours: notesVal || null }
+    if (statusEl) statusEl.innerHTML = '<span class="text-green-600"><i class="fas fa-check mr-1"></i>Saved</span>'
+    setTimeout(() => { if (statusEl) statusEl.innerHTML = '' }, 3000)
+    showToast('Hours saved!', 'success')
+  } catch(e) {
+    if (statusEl) statusEl.innerHTML = '<span class="text-red-500">Error saving</span>'
+    showToast('Error saving hours: ' + e.message, 'error')
+  }
 }
 
 async function avSaveSchedule() {
@@ -17585,9 +17646,10 @@ function avDrawAdminDashboard() {
           <i class="fas fa-bell"></i> ${recentNotifs.length} new alert${recentNotifs.length > 1 ? 's' : ''}
         </button>` : ''}
         <div class="flex rounded-lg border border-gray-200 overflow-hidden text-xs font-semibold">
-          <button onclick="avSetView('today')"  id="avViewToday"  class="px-3 py-2 transition ${avAdminState.view==='today'  ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Today</button>
-          <button onclick="avSetView('week')"   id="avViewWeek"   class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='week'   ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">7-Day</button>
+          <button onclick="avSetView('today')"    id="avViewToday"    class="px-3 py-2 transition ${avAdminState.view==='today'    ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Today</button>
+          <button onclick="avSetView('week')"     id="avViewWeek"     class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='week'     ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">7-Day</button>
           <button onclick="avSetView('schedule')" id="avViewSchedule" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='schedule' ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}">Schedule</button>
+          <button onclick="avSetView('capacity')" id="avViewCapacity" class="px-3 py-2 border-l border-gray-200 transition ${avAdminState.view==='capacity' ? 'bg-violet-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50'}"><i class="fas fa-sliders-h mr-1"></i>Capacity</button>
         </div>
         <button onclick="avExportCalendar()" class="px-3 py-2 rounded-lg text-xs font-semibold flex items-center gap-1.5 border border-indigo-200 text-indigo-700 bg-indigo-50 hover:bg-indigo-100 transition">
           <i class="fas fa-calendar-alt"></i> Export Calendar
@@ -17750,7 +17812,151 @@ function avRenderView(todayProviders, days7, isAdmin) {
   if (avAdminState.view === 'today')    return avRenderTodayView(todayProviders, isAdmin)
   if (avAdminState.view === 'week')     return avRenderWeekView(todayProviders, days7, isAdmin)
   if (avAdminState.view === 'schedule') return avRenderScheduleView(isAdmin)
+  if (avAdminState.view === 'capacity') return avRenderCapacityView(isAdmin)
   return ''
+}
+
+function avRenderCapacityView(isAdmin) {
+  const { providers, teamTotals } = avAdminState.data || { providers: [], teamTotals: {} }
+  const tt = teamTotals || {}
+  const total = tt.total_providers || providers.length
+  const hpSet   = tt.providers_with_happy_place   || 0
+  const fcSet   = tt.providers_with_flex_capacity || 0
+  const hwSet   = tt.providers_with_hours         || providers.filter(p => p.capacity?.hours_per_week != null).length
+  const hpTotal = tt.happy_place_total   || 0
+  const fcTotal = tt.flex_capacity_total || 0
+  const hwTotal = providers.reduce((s, p) => s + (p.capacity?.hours_per_week ?? 0), 0)
+
+  // Group by role_group
+  const groups = {}
+  for (const p of providers) {
+    const g = p.contractor?.role_group || 'Other'
+    if (!groups[g]) groups[g] = []
+    groups[g].push(p)
+  }
+
+  return `
+  <div class="space-y-5">
+
+    <!-- Totals summary row -->
+    <div class="grid grid-cols-4 gap-3">
+      <div class="card p-4 text-center">
+        <div class="text-3xl font-bold text-gray-700">${total}</div>
+        <div class="text-xs text-gray-400 mt-1 uppercase tracking-wide font-medium">Active Providers</div>
+      </div>
+      <div class="card p-4 text-center">
+        <div class="text-3xl font-bold text-green-600">${hpTotal || '—'}</div>
+        <div class="text-xs text-gray-400 mt-1 uppercase tracking-wide font-medium">😊 Team Happy Place</div>
+        <div class="text-xs text-gray-300 mt-0.5">${hpSet}/${total} set</div>
+      </div>
+      <div class="card p-4 text-center">
+        <div class="text-3xl font-bold text-amber-500">${fcTotal || '—'}</div>
+        <div class="text-xs text-gray-400 mt-1 uppercase tracking-wide font-medium">💪 Team Flex Max</div>
+        <div class="text-xs text-gray-300 mt-0.5">${fcSet}/${total} set</div>
+      </div>
+      <div class="card p-4 text-center">
+        <div class="text-3xl font-bold text-blue-600">${hwTotal > 0 ? hwTotal.toFixed(1).replace(/\.0$/, '') : '—'}</div>
+        <div class="text-xs text-gray-400 mt-1 uppercase tracking-wide font-medium">🕐 Total Hrs/Week</div>
+        <div class="text-xs text-gray-300 mt-0.5">${hwSet}/${total} set</div>
+      </div>
+    </div>
+
+    <!-- Per-provider table grouped by role -->
+    ${Object.entries(groups).sort(([a],[b]) => a.localeCompare(b)).map(([group, gProviders]) => {
+      const gHp = gProviders.reduce((s, p) => s + (p.capacity?.happy_place ?? 0), 0)
+      const gFc = gProviders.reduce((s, p) => s + (p.capacity?.flex_capacity ?? 0), 0)
+      const gHw = gProviders.reduce((s, p) => s + (p.capacity?.hours_per_week ?? 0), 0)
+      return `
+      <div class="card p-0 overflow-hidden">
+        <div class="flex items-center justify-between px-5 py-3 bg-gray-50 border-b border-gray-100">
+          <h3 class="text-sm font-bold text-gray-700">${escHtml(group)} <span class="font-normal text-gray-400 ml-1">(${gProviders.length})</span></h3>
+          <div class="flex items-center gap-4 text-xs text-gray-400">
+            <span class="text-green-600 font-semibold">😊 ${gHp || '—'}</span>
+            <span class="text-amber-500 font-semibold">💪 ${gFc || '—'}</span>
+            <span class="text-blue-500 font-semibold">🕐 ${gHw > 0 ? gHw.toFixed(1).replace(/\.0$/,'') + ' hrs' : '—'}</span>
+          </div>
+        </div>
+        <table class="w-full text-sm">
+          <thead>
+            <tr class="border-b border-gray-100 text-xs text-gray-400 uppercase tracking-wide">
+              <th class="text-left px-5 py-2.5 font-semibold">Provider</th>
+              <th class="text-center px-3 py-2.5 font-semibold">😊 Happy Place</th>
+              <th class="text-center px-3 py-2.5 font-semibold">💪 Flex Max</th>
+              <th class="text-center px-3 py-2.5 font-semibold">⚡ Buffer</th>
+              <th class="text-center px-3 py-2.5 font-semibold">🕐 Hrs/Week</th>
+              <th class="text-left px-3 py-2.5 font-semibold">Schedule Notes</th>
+              ${isAdmin ? '<th class="text-center px-3 py-2.5 font-semibold">Actions</th>' : ''}
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-50">
+            ${gProviders.map(p => {
+              const cap = p.capacity || {}
+              const hp  = cap.happy_place   != null ? cap.happy_place   : null
+              const fc  = cap.flex_capacity != null ? cap.flex_capacity : null
+              const hw  = cap.hours_per_week != null ? cap.hours_per_week : null
+              const buf = hp != null && fc != null ? fc - hp : null
+              const notes = cap.preferred_hours || ''
+              return `
+              <tr class="hover:bg-gray-50 transition">
+                <td class="px-5 py-3">
+                  <div class="flex items-center gap-2.5">
+                    <div class="w-7 h-7 rounded-full flex items-center justify-center text-white text-xs font-bold flex-shrink-0" style="background:var(--lion-gold)">${(p.contractor.name||'?')[0].toUpperCase()}</div>
+                    <div>
+                      <div class="font-semibold text-gray-800">${escHtml(p.contractor.name)}</div>
+                      ${p.contractor.specialty ? `<div class="text-xs text-gray-400">${escHtml(p.contractor.specialty)}</div>` : ''}
+                    </div>
+                  </div>
+                </td>
+                <td class="px-3 py-3 text-center">
+                  ${isAdmin
+                    ? `<input type="number" min="0" max="99" id="avCapHP_${p.contractor.id}" value="${hp ?? ''}" placeholder="—"
+                        onchange="avSaveCapacity(${p.contractor.id})"
+                        class="w-16 text-sm text-center border border-green-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-green-300 outline-none">`
+                    : `<span class="text-lg font-bold ${hp != null ? 'text-green-600' : 'text-gray-300'}">${hp ?? '—'}</span>`
+                  }
+                </td>
+                <td class="px-3 py-3 text-center">
+                  ${isAdmin
+                    ? `<input type="number" min="0" max="99" id="avCapFC_${p.contractor.id}" value="${fc ?? ''}" placeholder="—"
+                        onchange="avSaveCapacity(${p.contractor.id})"
+                        class="w-16 text-sm text-center border border-amber-200 rounded-lg px-2 py-1 bg-white focus:ring-2 focus:ring-amber-300 outline-none">`
+                    : `<span class="text-lg font-bold ${fc != null ? 'text-amber-500' : 'text-gray-300'}">${fc ?? '—'}</span>`
+                  }
+                </td>
+                <td class="px-3 py-3 text-center">
+                  <span class="text-sm font-semibold ${buf != null ? 'text-violet-600' : 'text-gray-300'}">${buf != null ? '+' + buf : '—'}</span>
+                </td>
+                <td class="px-3 py-3 text-center">
+                  <span class="text-sm font-semibold ${hw != null ? 'text-blue-600' : 'text-gray-300'}">${hw != null ? hw + ' hrs' : '—'}</span>
+                </td>
+                <td class="px-3 py-3 text-left">
+                  <span class="text-xs text-gray-500 italic">${escHtml(notes) || '<span class=\'text-gray-300\'>—</span>'}</span>
+                </td>
+                ${isAdmin ? `
+                <td class="px-3 py-3 text-center">
+                  <button onclick="avSetView('schedule')" class="text-xs text-violet-600 hover:text-violet-800 px-2 py-1 rounded hover:bg-violet-50 transition">
+                    <i class="fas fa-edit"></i>
+                  </button>
+                </td>` : ''}
+              </tr>`
+            }).join('')}
+          </tbody>
+          ${gProviders.length > 1 ? `
+          <tfoot>
+            <tr class="border-t-2 border-gray-200 bg-gray-50 text-xs font-bold text-gray-500">
+              <td class="px-5 py-2.5">Group Total</td>
+              <td class="px-3 py-2.5 text-center text-green-700">${gHp || '—'}</td>
+              <td class="px-3 py-2.5 text-center text-amber-600">${gFc || '—'}</td>
+              <td class="px-3 py-2.5 text-center text-violet-600">${gHp && gFc ? '+' + (gFc - gHp) : '—'}</td>
+              <td class="px-3 py-2.5 text-center text-blue-600">${gHw > 0 ? gHw.toFixed(1).replace(/\.0$/,'') + ' hrs' : '—'}</td>
+              <td colspan="${isAdmin ? '2' : '1'}"></td>
+            </tr>
+          </tfoot>` : ''}
+        </table>
+      </div>`
+    }).join('')}
+
+  </div>`
 }
 
 function avRenderTodayView(todayProviders, isAdmin) {
@@ -17910,12 +18116,13 @@ function avRenderScheduleView(isAdmin) {
 }
 
 async function avSaveCapacity(contractorId) {
-  const hp = $('avHP_' + contractorId)?.value
-  const fc = $('avFC_' + contractorId)?.value
+  // Support inputs from both Schedule view (avHP_/avFC_) and Capacity view (avCapHP_/avCapFC_)
+  const hp = ($('avHP_' + contractorId) || $('avCapHP_' + contractorId))?.value
+  const fc = ($('avFC_' + contractorId) || $('avCapFC_' + contractorId))?.value
 
   // Validate: if both are set, flex must be >= happy place
-  const hpNum = hp !== '' ? parseInt(hp) : null
-  const fcNum = fc !== '' ? parseInt(fc) : null
+  const hpNum = hp !== undefined && hp !== '' ? parseInt(hp) : null
+  const fcNum = fc !== undefined && fc !== '' ? parseInt(fc) : null
   if (hpNum != null && fcNum != null && fcNum < hpNum) {
     showToast('Flex number must be ≥ Happy Place number', 'error')
     return
@@ -17938,6 +18145,7 @@ async function avSaveCapacity(contractorId) {
       tt.flex_capacity_total = providers.reduce((s, p) => s + (p.capacity?.flex_capacity ?? 0), 0)
       tt.providers_with_happy_place   = providers.filter(p => p.capacity?.happy_place   != null).length
       tt.providers_with_flex_capacity = providers.filter(p => p.capacity?.flex_capacity != null).length
+      tt.providers_with_hours         = providers.filter(p => p.capacity?.hours_per_week != null).length
       avAdminState.data.teamTotals = tt
     }
 
@@ -17971,10 +18179,13 @@ function avSetView(view) {
   const isAdmin = state.role === 'admin'
   panel.innerHTML = avRenderView(todayProviders, days7, isAdmin)
   // Update button styles
-  ;['today','week','schedule'].forEach(v => {
+  ;['today','week','schedule','capacity'].forEach(v => {
     const btn = $('avView' + v.charAt(0).toUpperCase() + v.slice(1))
-    if (btn) btn.className = btn.className.replace(/bg-teal-600 text-white|bg-white text-gray-500 hover:bg-gray-50/g,
-      v === view ? 'bg-teal-600 text-white' : 'bg-white text-gray-500 hover:bg-gray-50')
+    if (!btn) return
+    const activeClass = v === 'capacity' ? 'bg-violet-600 text-white' : 'bg-teal-600 text-white'
+    const inactiveClass = 'bg-white text-gray-500 hover:bg-gray-50'
+    btn.className = btn.className.replace(/bg-(?:teal|violet)-600 text-white|bg-white text-gray-500 hover:bg-gray-50/g,
+      v === view ? activeClass : inactiveClass)
   })
 }
 
