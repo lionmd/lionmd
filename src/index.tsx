@@ -210,36 +210,30 @@ function aprilAsyncCvFee(
 
 // ──────────────────────────────────────────────
 // SQL expression: normalize decision_date to YYYY-MM-DD for comparison & sorting.
-// Handles three formats stored in the DB:
-//   ISO:   "2026-05-01"         → already correct
-//   Slash: "05/01/2026"         → substr rearrange
-//   Long:  "May 1, 2026"        → month-name map + zero-pad
-// Usage:  NORM_DATE('c.decision_date')  produces a SQL CASE expression string.
+// Actual formats found in production DB (verified via D1 query):
+//   ISO:     "2026-05-01"   (YYYY-MM-DD)        → keep as-is
+//   M/DD/YY: "5/11/26"     (single-digit month, 2-digit year)
+//   M/D/YY:  "5/1/26"      (single-digit month + day, 2-digit year)
+// All slash formats use 2-digit year ("26" = 2026). Century prefix "20" added.
+// GLOB patterns must NOT use wildcards at end — exact length matching.
 // ──────────────────────────────────────────────
 function NORM_DATE(col: string): string {
+  // For M/D/YY and M/DD/YY: parse month/day as integers, zero-pad, prepend "20" to year.
+  // SQLite CAST(x AS INTEGER) stops at non-digit chars (e.g. "/" or end of string),
+  // so CAST(substr(col, slashPos+1) AS INTEGER) correctly extracts the number.
+  //
+  // Strategy: find slash positions via length-based GLOB matching.
+  //   M/D/YY  → length 6: e.g. "5/1/26"   m=col[1], d=col[3], y=col[5..6]
+  //   M/DD/YY → length 7: e.g. "5/11/26"  m=col[1], d=col[3..4], y=col[6..7]
+  //
+  // For ISO format (YYYY-MM-DD, length 10): return first 10 chars as-is.
   return `CASE
-    WHEN ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
-      THEN substr(${col},1,10)
-    WHEN ${col} GLOB '[0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]*'
-      THEN substr(${col},7,4)||'-'||substr(${col},1,2)||'-'||substr(${col},4,2)
-    WHEN ${col} GLOB '[0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]*'
-      THEN substr(${col},6,4)||'-0'||substr(${col},1,1)||'-'||substr(${col},3,2)
-    WHEN ${col} GLOB '[0-9][0-9]/[0-9]/[0-9][0-9][0-9][0-9]*'
-      THEN substr(${col},6,4)||'-'||substr(${col},1,2)||'-0'||substr(${col},4,1)
-    WHEN ${col} GLOB '[0-9]/[0-9]/[0-9][0-9][0-9][0-9]*'
-      THEN substr(${col},4,4)||'-0'||substr(${col},1,1)||'-0'||substr(${col},3,1)
-    WHEN lower(${col}) GLOB 'jan [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-01-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'feb [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-02-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'mar [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-03-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'apr [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-04-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'may [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-05-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'jun [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-06-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'jul [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-07-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'aug [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-08-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'sep [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-09-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'oct [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-10-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'nov [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-11-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
-    WHEN lower(${col}) GLOB 'dec [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-12-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]'
+      THEN ${col}
+    WHEN ${col} GLOB '[0-9]/[0-9][0-9]/[0-9][0-9]'
+      THEN '20'||substr(${col},6,2)||'-'||printf('%02d',CAST(${col} AS INTEGER))||'-'||printf('%02d',CAST(substr(${col},3) AS INTEGER))
+    WHEN ${col} GLOB '[0-9]/[0-9]/[0-9][0-9]'
+      THEN '20'||substr(${col},5,2)||'-'||printf('%02d',CAST(${col} AS INTEGER))||'-'||printf('%02d',CAST(substr(${col},3) AS INTEGER))
     ELSE ${col}
   END`
 }
