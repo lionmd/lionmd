@@ -4221,15 +4221,24 @@ app.get('/api/admin/contractors/:id/np-profile', requireLicenseEditor, async (c)
   // Confirm contractor exists
   const ct = await c.env.DB.prepare(`SELECT id, name, first_name, last_name, email, work_email, phone, address, dob FROM contractors WHERE id=?`).bind(cid).first() as any
   if (!ct) return c.json({ error: 'Not found' }, 404)
+  // Fetch DEA licenses from licenses table (source of truth for DEA)
+  const deaLics = (await c.env.DB.prepare(
+    `SELECT state, license_number, expiry_date FROM provider_licenses WHERE contractor_id=? AND license_type='DEA' ORDER BY state`
+  ).bind(cid).all()).results as any[]
   const row = await c.env.DB.prepare(`SELECT * FROM np_profile WHERE contractor_id=?`).bind(cid).first() as any
   if (!row) {
     return c.json({
       contractor: ct,
+      dea_licenses: deaLics,
       np_profile: null,
     })
   }
+  // Filter out any legacy DEA entries from np_profile's dea_csr_json — only keep CSR
+  const rawDeaCsr: any[] = (() => { try { return JSON.parse(row.dea_csr_json || '[]') } catch { return [] } })()
+  const csrOnly = rawDeaCsr.filter((d: any) => d.type === 'CSR')
   return c.json({
     contractor: ct,
+    dea_licenses: deaLics,
     np_profile: {
       gender: row.gender || '',
       birth_name: row.birth_name || '',
@@ -4237,7 +4246,7 @@ app.get('/api/admin/contractors/:id/np-profile', requireLicenseEditor, async (c)
       foreign_licensed: row.foreign_licensed || '',
       foreign_country: row.foreign_country || '',
       foreign_license_num: row.foreign_license_num || '',
-      dea_csr: (() => { try { return JSON.parse(row.dea_csr_json || '[]') } catch { return [] } })(),
+      csr_registrations: csrOnly,
       board_certs: (() => { try { return JSON.parse(row.board_certs_json || '[]') } catch { return [] } })(),
       attestation_signed: row.attestation_signed === 1,
       attestation_date: row.attestation_date || '',

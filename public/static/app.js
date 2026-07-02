@@ -12818,14 +12818,24 @@ function ppDrawProfile(data) {
 
 // ── CNP/CNM Info Sheet — view card ────────────────────────────────
 function ppRenderNpInfoCard(np) {
-  const hasDea  = np.dea_csr   && np.dea_csr.length   > 0
+  // DEA comes from the licenses table, not np_profile
+  const deaFromLicenses = (ppState.profile?.licenses || []).filter(l => l.license_type === 'DEA')
+  const csrEntries = (np.dea_csr || []).filter(d => d.type === 'CSR')
   const hasCert = np.board_certs && np.board_certs.length > 0
   const hasAny  = np.gender || np.birth_name || np.other_names || np.foreign_licensed ||
-                  hasDea || hasCert || np.attestation_signed
+                  csrEntries.length > 0 || hasCert || np.attestation_signed
 
-  const deaRows = (np.dea_csr || []).map(d => `
-    <div class="flex items-start gap-3 px-3 py-2 bg-blue-50 border border-blue-100 rounded-xl mb-2">
-      <span class="text-xs font-bold px-2 py-0.5 rounded-full ${d.type==='DEA'?'bg-blue-600 text-white':'bg-purple-600 text-white'} flex-shrink-0">${escHtml(d.type||'DEA')}</span>
+  const deaRows = deaFromLicenses.map(d => `
+    <div class="flex items-center gap-3 px-3 py-2 bg-blue-50 border border-blue-100 rounded-xl mb-1.5">
+      <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex-shrink-0">DEA</span>
+      <span class="font-mono text-xs font-semibold text-gray-700">${escHtml(d.license_number||'—')}</span>
+      <span class="text-xs text-gray-500">${escHtml(d.state||'')}</span>
+      ${d.expiry_date ? `<span class="text-xs text-gray-400 ml-auto"><i class="fas fa-calendar mr-0.5"></i>Exp. ${escHtml(d.expiry_date)}</span>` : ''}
+    </div>`).join('')
+
+  const csrRows = csrEntries.map(d => `
+    <div class="flex items-start gap-3 px-3 py-2 bg-purple-50 border border-purple-100 rounded-xl mb-1.5">
+      <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-600 text-white flex-shrink-0">CSR</span>
       <div class="flex-1 min-w-0 space-y-0.5">
         <div class="text-xs text-gray-700"><span class="font-semibold text-gray-500 mr-1">Reg #:</span>${escHtml(d.reg_num||'—')}</div>
         <div class="flex gap-4 text-xs text-gray-500">
@@ -12938,16 +12948,20 @@ function ppRenderNpInfoCard(np) {
         </div>
       </div>
 
-      <!-- DEA / CSR -->
-      ${hasDea ? `
+      <!-- DEA — from State Licenses -->
       <div>
-        <p class="text-xs text-gray-400 font-medium mb-2">DEA / CSR Registrations (${np.dea_csr.length})</p>
-        ${deaRows}
-      </div>` : `
+        <div class="flex items-center justify-between mb-1">
+          <p class="text-xs text-gray-400 font-medium">DEA Registrations (${deaFromLicenses.length})</p>
+          <button onclick="navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline">Manage in State Licenses →</button>
+        </div>
+        ${deaFromLicenses.length > 0 ? deaRows : '<p class="text-sm text-gray-400 italic">None on file — add via State Licenses tab</p>'}
+      </div>
+
+      <!-- CSR — from np_profile -->
       <div>
-        <p class="text-xs text-gray-400 font-medium mb-1">DEA / CSR Registrations</p>
-        <p class="text-sm text-gray-400 italic">None on file</p>
-      </div>`}
+        <p class="text-xs text-gray-400 font-medium mb-1">CSR Registrations (${csrEntries.length})</p>
+        ${csrEntries.length > 0 ? csrRows : '<p class="text-sm text-gray-400 italic">None on file</p>'}
+      </div>
 
       <!-- Board certifications -->
       ${hasCert ? `
@@ -13074,16 +13088,45 @@ function ppRenderNpModal(np) {
         </div>
       </div>
 
-      <!-- DEA / CSR -->
-      <div>
-        <div class="flex items-center justify-between mb-3">
-          <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">DEA / CSR Registrations</p>
-          <button onclick="ppAddDeaCsr()" class="text-xs px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 font-semibold">
-            <i class="fas fa-plus mr-1"></i>Add
-          </button>
+      <!-- DEA — read-only from State Licenses tab -->
+      ${(() => {
+        const deaLics = (ppState.profile?.licenses || []).filter(l => l.license_type === 'DEA')
+        return `
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">DEA Registrations</p>
+            <button type="button" onclick="$('ppNpModal').classList.add('hidden'); navigate('provider_licenses')" class="text-xs text-blue-500 hover:underline font-medium flex items-center gap-1">
+              <i class="fas fa-external-link-alt text-[9px]"></i>Manage in State Licenses
+            </button>
+          </div>
+          ${deaLics.length === 0
+            ? `<div class="flex items-center gap-2 p-3 rounded-xl bg-gray-50 border border-gray-200 text-xs text-gray-400">
+                <i class="fas fa-info-circle text-gray-300"></i>
+                No DEA registrations found. Add them in your <button type="button" onclick="$('ppNpModal').classList.add('hidden'); navigate('provider_licenses')" class="text-blue-500 hover:underline font-medium">State Licenses</button> tab using license type "DEA".
+               </div>`
+            : `<div class="space-y-1.5">
+                ${deaLics.map(d => `
+                <div class="flex items-center gap-3 px-3 py-2 bg-blue-50 border border-blue-100 rounded-xl">
+                  <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex-shrink-0">DEA</span>
+                  <span class="font-mono text-xs font-semibold text-gray-700">${escHtml(d.license_number||'—')}</span>
+                  <span class="text-xs text-gray-500">${escHtml(d.state||'')}</span>
+                  ${d.expiry_date ? `<span class="text-xs text-gray-400 ml-auto"><i class="fas fa-calendar mr-0.5"></i>Exp. ${escHtml(d.expiry_date)}</span>` : ''}
+                  <i class="fas fa-lock text-gray-300 text-[10px] ml-auto" title="Managed in State Licenses tab"></i>
+                </div>`).join('')}
+               </div>`
+          }
         </div>
-        <div id="npDeaList" class="space-y-2"></div>
-      </div>
+        <!-- CSR Registrations — editable (no other home) -->
+        <div>
+          <div class="flex items-center justify-between mb-2 mt-4">
+            <p class="text-[10px] font-bold text-gray-400 uppercase tracking-wider">CSR Registrations</p>
+            <button onclick="ppAddDeaCsr()" class="text-xs px-2.5 py-1 rounded-lg bg-blue-50 border border-blue-200 text-blue-700 hover:bg-blue-100 font-semibold">
+              <i class="fas fa-plus mr-1"></i>Add
+            </button>
+          </div>
+          <div id="npDeaList" class="space-y-2"></div>
+        </div>`
+      })()}
 
       <!-- Board Certifications -->
       <div>
@@ -13134,48 +13177,46 @@ function ppToggleForeignFields() {
 function ppRenderDeaList() {
   const list = $('npDeaList')
   if (!list) return
-  if (_npDeaCsr.length === 0) {
-    list.innerHTML = '<p class="text-xs text-gray-400 italic py-1">No entries — click Add to add a DEA or CSR registration.</p>'
+  // (CSR-only check handled below — don't early-return on DEA-only lists)
+  // Only show CSR entries (DEA entries come from State Licenses tab)
+  const csrOnly = _npDeaCsr.filter(d => d.type === 'CSR')
+  if (csrOnly.length === 0) {
+    list.innerHTML = '<p class="text-xs text-gray-400 italic py-1">No CSR registrations — click Add to add one.</p>'
     return
   }
-  list.innerHTML = _npDeaCsr.map((d, i) => `
-  <div class="grid grid-cols-5 gap-2 items-end p-3 bg-blue-50 border border-blue-100 rounded-xl">
-    <div>
-      <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Type</label>
-      <select onchange="_npDeaCsr[${i}].type=this.value" class="w-full text-xs">
-        <option value="DEA"  ${(d.type||'DEA')==='DEA'?'selected':''}>DEA</option>
-        <option value="CSR"  ${(d.type||'')==='CSR'?'selected':''}>CSR</option>
-      </select>
-    </div>
+  list.innerHTML = csrOnly.map((d, i) => {
+    const realIdx = _npDeaCsr.indexOf(d)
+    return `
+  <div class="grid grid-cols-4 gap-2 items-end p-3 bg-blue-50 border border-blue-100 rounded-xl">
     <div>
       <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Reg #</label>
-      <input type="text" value="${escHtml(d.reg_num||'')}" placeholder="Registration #" onchange="_npDeaCsr[${i}].reg_num=this.value" class="w-full text-xs"/>
+      <input type="text" value="${escHtml(d.reg_num||'')}" placeholder="Registration #" onchange="_npDeaCsr[${realIdx}].reg_num=this.value" class="w-full text-xs"/>
     </div>
     <div>
       <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">State</label>
-      <select onchange="_npDeaCsr[${i}].state=this.value" class="w-full text-xs">
+      <select onchange="_npDeaCsr[${realIdx}].state=this.value" class="w-full text-xs">
         <option value="">State</option>
         ${US_STATES.map(s=>`<option value="${s}" ${d.state===s?'selected':''}>${s}</option>`).join('')}
       </select>
     </div>
     <div>
       <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Issued</label>
-      <input type="date" value="${escHtml(d.issued_date||'')}" onchange="_npDeaCsr[${i}].issued_date=this.value" class="w-full text-xs"/>
+      <input type="date" value="${escHtml(d.issued_date||'')}" onchange="_npDeaCsr[${realIdx}].issued_date=this.value" class="w-full text-xs"/>
     </div>
     <div class="flex gap-1 items-end">
       <div class="flex-1">
         <label class="block text-[10px] font-semibold text-gray-500 mb-0.5">Expiry</label>
-        <input type="date" value="${escHtml(d.expiry_date||'')}" onchange="_npDeaCsr[${i}].expiry_date=this.value" class="w-full text-xs"/>
+        <input type="date" value="${escHtml(d.expiry_date||'')}" onchange="_npDeaCsr[${realIdx}].expiry_date=this.value" class="w-full text-xs"/>
       </div>
-      <button onclick="_npDeaCsr.splice(${i},1);ppRenderDeaList()" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-100 text-gray-400 hover:text-red-500 flex-shrink-0 mb-0.5">
+      <button onclick="_npDeaCsr.splice(${realIdx},1);ppRenderDeaList()" class="w-7 h-7 flex items-center justify-center rounded-lg hover:bg-red-100 text-gray-400 hover:text-red-500 flex-shrink-0 mb-0.5">
         <i class="fas fa-times text-xs"></i>
       </button>
     </div>
-  </div>`).join('')
+  </div>`}).join('')
 }
 
 function ppAddDeaCsr() {
-  _npDeaCsr.push({ type: 'DEA', reg_num: '', state: '', issued_date: '', expiry_date: '' })
+  _npDeaCsr.push({ type: 'CSR', reg_num: '', state: '', issued_date: '', expiry_date: '' })
   ppRenderDeaList()
 }
 
@@ -16378,13 +16419,29 @@ async function licViewNpInfo(contractorId, contractorName) {
     if (!body) return
 
     if (!np) {
+      const deaLicsEmpty = Array.isArray(data.dea_licenses) ? data.dea_licenses : []
       body.innerHTML = `
-      <div class="flex flex-col items-center justify-center py-12 text-center">
-        <div class="w-16 h-16 rounded-2xl bg-gray-100 flex items-center justify-center mb-4">
-          <i class="fas fa-file-alt text-3xl text-gray-300"></i>
+      <div class="space-y-4">
+        ${deaLicsEmpty.length > 0 ? `
+        <div>
+          <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+            <i class="fas fa-pills text-gray-400"></i> DEA Registrations
+          </h3>
+          <div class="space-y-2">
+            ${deaLicsEmpty.map(d => `
+            <div class="flex items-center gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-2.5">
+              <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex-shrink-0">DEA</span>
+              <span class="font-mono text-sm font-semibold text-gray-800">${escHtml(d.license_number||'—')}</span>
+              <span class="text-xs text-gray-500">${escHtml(d.state||'')}</span>
+              ${d.expiry_date ? `<span class="text-xs text-gray-400 ml-auto"><i class="fas fa-calendar mr-0.5"></i>Exp. ${escHtml(d.expiry_date)}</span>` : ''}
+            </div>`).join('')}
+          </div>
+        </div>` : ''}
+        <div class="flex flex-col items-center justify-center py-8 text-center bg-gray-50 rounded-xl border border-dashed border-gray-200">
+          <i class="fas fa-file-alt text-3xl text-gray-300 mb-3"></i>
+          <p class="font-semibold text-gray-500 text-sm">CNP/CNM questionnaire not yet completed</p>
+          <p class="text-xs text-gray-400 mt-1">${escHtml(contractorName)} has not yet filled in gender, birth name, CSR registrations, board certifications, or attestation.</p>
         </div>
-        <p class="font-semibold text-gray-500 text-sm">No questionnaire on file</p>
-        <p class="text-xs text-gray-400 mt-1">${escHtml(contractorName)} has not yet completed their CNP/CNM Information Sheet.</p>
       </div>`
       return
     }
@@ -16394,7 +16451,8 @@ async function licViewNpInfo(contractorId, contractorName) {
       ? `<div class="flex flex-col gap-0.5"><p class="text-[10px] font-bold text-gray-400 uppercase tracking-wide">${label}</p><p class="text-sm text-gray-800 font-medium">${escHtml(String(val))}</p></div>`
       : ''
 
-    const deaCsr = Array.isArray(np.dea_csr) ? np.dea_csr : []
+    const deaLicenses = Array.isArray(data.dea_licenses) ? data.dea_licenses : []
+    const csrRegs = Array.isArray(np.csr_registrations) ? np.csr_registrations : []
     const boardCerts = Array.isArray(np.board_certs) ? np.board_certs : []
 
     body.innerHTML = `
@@ -16433,19 +16491,38 @@ async function licViewNpInfo(contractorId, contractorName) {
         </div>
       </div>
 
-      <!-- DEA / CSR Registrations -->
+      <!-- DEA Registrations — from State Licenses -->
       <div>
         <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
-          <i class="fas fa-pills text-gray-400"></i> DEA / CSR Registrations
+          <i class="fas fa-pills text-gray-400"></i> DEA Registrations
         </h3>
-        ${deaCsr.length === 0
-          ? `<div class="bg-gray-50 rounded-xl p-4 text-sm text-gray-400 italic">No DEA/CSR registrations on file</div>`
+        ${deaLicenses.length === 0
+          ? `<div class="bg-gray-50 rounded-xl p-4 text-sm text-gray-400 italic">No DEA registrations on file</div>`
           : `<div class="space-y-2">
-              ${deaCsr.map((d, i) => `
-              <div class="bg-blue-50 border border-blue-100 rounded-xl p-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
+              ${deaLicenses.map(d => `
+              <div class="flex items-center gap-3 bg-blue-50 border border-blue-100 rounded-xl px-4 py-2.5">
+                <span class="text-[10px] font-bold px-2 py-0.5 rounded-full bg-blue-600 text-white flex-shrink-0">DEA</span>
+                <span class="font-mono text-sm font-semibold text-gray-800">${escHtml(d.license_number||'—')}</span>
+                <span class="text-xs text-gray-500">${escHtml(d.state||'')}</span>
+                ${d.expiry_date ? `<span class="text-xs text-gray-400 ml-auto"><i class="fas fa-calendar mr-0.5"></i>Exp. ${escHtml(d.expiry_date)}</span>` : ''}
+              </div>`).join('')}
+             </div>`
+        }
+      </div>
+
+      <!-- CSR Registrations -->
+      <div>
+        <h3 class="text-xs font-bold text-gray-500 uppercase tracking-wider mb-3 flex items-center gap-1.5">
+          <i class="fas fa-pills text-gray-400"></i> CSR Registrations
+        </h3>
+        ${csrRegs.length === 0
+          ? `<div class="bg-gray-50 rounded-xl p-4 text-sm text-gray-400 italic">No CSR registrations on file</div>`
+          : `<div class="space-y-2">
+              ${csrRegs.map((d, i) => `
+              <div class="bg-purple-50 border border-purple-100 rounded-xl p-3 grid grid-cols-2 sm:grid-cols-3 gap-2">
                 <div class="col-span-2 sm:col-span-3 flex items-center gap-2 mb-1">
-                  <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-blue-100 text-blue-700">${escHtml(d.type || 'DEA')}</span>
-                  <span class="text-xs text-blue-400">Registration ${i + 1}</span>
+                  <span class="px-2 py-0.5 rounded-full text-xs font-bold bg-purple-600 text-white">CSR</span>
+                  <span class="text-xs text-purple-400">Registration ${i + 1}</span>
                 </div>
                 ${row('Reg. Number', d.reg_num)}
                 ${row('State', d.state)}
