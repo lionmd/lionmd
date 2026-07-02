@@ -208,6 +208,42 @@ function aprilAsyncCvFee(
   return defaultCvFee
 }
 
+// ──────────────────────────────────────────────
+// SQL expression: normalize decision_date to YYYY-MM-DD for comparison & sorting.
+// Handles three formats stored in the DB:
+//   ISO:   "2026-05-01"         → already correct
+//   Slash: "05/01/2026"         → substr rearrange
+//   Long:  "May 1, 2026"        → month-name map + zero-pad
+// Usage:  NORM_DATE('c.decision_date')  produces a SQL CASE expression string.
+// ──────────────────────────────────────────────
+function NORM_DATE(col: string): string {
+  return `CASE
+    WHEN ${col} GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]*'
+      THEN substr(${col},1,10)
+    WHEN ${col} GLOB '[0-9][0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]*'
+      THEN substr(${col},7,4)||'-'||substr(${col},1,2)||'-'||substr(${col},4,2)
+    WHEN ${col} GLOB '[0-9]/[0-9][0-9]/[0-9][0-9][0-9][0-9]*'
+      THEN substr(${col},6,4)||'-0'||substr(${col},1,1)||'-'||substr(${col},3,2)
+    WHEN ${col} GLOB '[0-9][0-9]/[0-9]/[0-9][0-9][0-9][0-9]*'
+      THEN substr(${col},6,4)||'-'||substr(${col},1,2)||'-0'||substr(${col},4,1)
+    WHEN ${col} GLOB '[0-9]/[0-9]/[0-9][0-9][0-9][0-9]*'
+      THEN substr(${col},4,4)||'-0'||substr(${col},1,1)||'-0'||substr(${col},3,1)
+    WHEN lower(${col}) GLOB 'jan [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-01-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'feb [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-02-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'mar [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-03-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'apr [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-04-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'may [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-05-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'jun [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-06-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'jul [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-07-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'aug [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-08-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'sep [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-09-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'oct [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-10-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'nov [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-11-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    WHEN lower(${col}) GLOB 'dec [0-9]*, [0-9][0-9][0-9][0-9]' THEN substr(${col},length(${col})-3,4)||'-12-'||printf('%02d',CAST(substr(${col},5) AS INTEGER))
+    ELSE ${col}
+  END`
+}
+
 const app = new Hono<{ Bindings: Bindings }>()
 
 // ── Security headers — applied to every response ──────────────────
@@ -1292,8 +1328,10 @@ app.get('/api/consults', requireAdmin, async (c) => {
   const offset          = (parseInt(page) - 1) * parseInt(limit)
 
   // Sorting — whitelist allowed columns to prevent SQL injection
+  // decision_date uses NORM_DATE() to handle mixed storage formats (ISO, slash, long-month)
+  const normDateExpr = NORM_DATE('c.decision_date')
   const SORT_COLS: Record<string, string> = {
-    decision_date:    'c.decision_date',
+    decision_date:    normDateExpr,
     patient_name:     'c.patient_name',
     organization_name:'c.organization_name',
     doctor_name:      'c.doctor_name',
@@ -1305,7 +1343,7 @@ app.get('/api/consults', requireAdmin, async (c) => {
   }
   const rawSortBy  = c.req.query('sort_by')  || 'decision_date'
   const rawSortDir = c.req.query('sort_dir') || 'desc'
-  const sortCol = SORT_COLS[rawSortBy] ?? 'c.decision_date'
+  const sortCol = SORT_COLS[rawSortBy] ?? normDateExpr
   const sortDir = rawSortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC'
   const orderBy = `${sortCol} ${sortDir}, c.id ${sortDir}`
 
@@ -1333,8 +1371,9 @@ app.get('/api/consults', requireAdmin, async (c) => {
   if (is_flagged === '0') { where += ' AND (c.is_flagged=0 OR c.is_flagged IS NULL)' }
   if (decision_status)    { where += ' AND c.decision_status=?'; params.push(decision_status) }
   if (organization) { where += ' AND c.organization_name=?'; params.push(organization) }
-  if (date_from)    { where += ' AND c.decision_date >= ?';  params.push(date_from) }
-  if (date_to)      { where += ' AND c.decision_date <= ?';  params.push(date_to)   }
+  // Date filters compare against the normalized ISO form of decision_date
+  if (date_from)    { where += ` AND ${NORM_DATE('c.decision_date')} >= ?`;  params.push(date_from) }
+  if (date_to)      { where += ` AND ${NORM_DATE('c.decision_date')} <= ?`;  params.push(date_to)   }
   if (search) {
     where += ' AND (c.patient_name LIKE ? OR c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
     params.push(`%${search}%`, `%${search}%`, `%${search}%`)
@@ -1381,8 +1420,9 @@ app.get('/api/consults/export', requireAdmin, async (c) => {
   const limit           = Math.min(10000, Math.max(1, parseInt(c.req.query('limit') || '10000')))
   const offset          = (page - 1) * limit
 
+  const normDateExprExp = NORM_DATE('c.decision_date')
   const SORT_COLS: Record<string, string> = {
-    decision_date:    'c.decision_date',
+    decision_date:    normDateExprExp,
     patient_name:     'c.patient_name',
     organization_name:'c.organization_name',
     doctor_name:      'c.doctor_name',
@@ -1392,7 +1432,7 @@ app.get('/api/consults/export', requireAdmin, async (c) => {
     case_id_short:    'c.case_id_short',
     decision_status:  'c.decision_status',
   }
-  const sortCol = SORT_COLS[rawSortBy] ?? 'c.decision_date'
+  const sortCol = SORT_COLS[rawSortBy] ?? normDateExprExp
   const sortDir = rawSortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC'
   const orderBy = `${sortCol} ${sortDir}, c.id ${sortDir}`
 
@@ -1418,8 +1458,8 @@ app.get('/api/consults/export', requireAdmin, async (c) => {
   if (is_flagged === '0') { where += ' AND (c.is_flagged=0 OR c.is_flagged IS NULL)' }
   if (decision_status)    { where += ' AND c.decision_status=?'; params.push(decision_status) }
   if (organization)       { where += ' AND c.organization_name=?'; params.push(organization) }
-  if (date_from)          { where += ' AND c.decision_date >= ?';  params.push(date_from) }
-  if (date_to)            { where += ' AND c.decision_date <= ?';  params.push(date_to) }
+  if (date_from)          { where += ` AND ${NORM_DATE('c.decision_date')} >= ?`;  params.push(date_from) }
+  if (date_to)            { where += ` AND ${NORM_DATE('c.decision_date')} <= ?`;  params.push(date_to) }
   if (search) {
     where += ' AND (c.patient_name LIKE ? OR c.case_id_short LIKE ? OR c.organization_name LIKE ?)'
     params.push(`%${search}%`, `%${search}%`, `%${search}%`)
@@ -4070,8 +4110,10 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
   const offset          = (page - 1) * limit
 
   // Sorting — whitelist allowed columns to prevent SQL injection
+  // decision_date uses NORM_DATE() to handle mixed storage formats (ISO, slash, long-month)
+  const normDateExprPP = NORM_DATE('c.decision_date')
   const SORT_COLS: Record<string, string> = {
-    decision_date:    'c.decision_date',
+    decision_date:    normDateExprPP,
     patient_name:     'c.patient_name',
     organization_name:'c.organization_name',
     visit_type:       'c.visit_type',
@@ -4081,7 +4123,7 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
   }
   const rawSortBy  = c.req.query('sort_by')  || 'decision_date'
   const rawSortDir = c.req.query('sort_dir') || 'desc'
-  const sortCol = SORT_COLS[rawSortBy] ?? 'c.decision_date'
+  const sortCol = SORT_COLS[rawSortBy] ?? normDateExprPP
   const sortDir = rawSortDir.toLowerCase() === 'asc' ? 'ASC' : 'DESC'
   const orderBy = `${sortCol} ${sortDir}, c.id ${sortDir}`
 
@@ -4097,8 +4139,8 @@ app.get('/api/provider/consults', requireProvider, async (c) => {
   } else if (visit_type) {
     where += ' AND c.visit_type=?'; params.push(visit_type)
   }
-  if (date_from) { where += ' AND c.decision_date >= ?'; params.push(date_from) }
-  if (date_to)   { where += ' AND c.decision_date <= ?'; params.push(date_to) }
+  if (date_from) { where += ` AND ${NORM_DATE('c.decision_date')} >= ?`; params.push(date_from) }
+  if (date_to)   { where += ` AND ${NORM_DATE('c.decision_date')} <= ?`; params.push(date_to) }
   const reveal = c.req.query('reveal') === '1'
   if (search) {
     if (reveal) {
